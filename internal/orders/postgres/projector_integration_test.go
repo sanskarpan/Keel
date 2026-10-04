@@ -135,6 +135,34 @@ func TestPostgreSQLProjectorDefersReplaysAndDeduplicates(t *testing.T) {
 	if err != nil || appliedVersion != 2 || !status.Valid || status.String != string(orders.Submitted) {
 		t.Fatalf("projected state version=%d status=%v err=%v", appliedVersion, status, err)
 	}
+	// Reconcile the authoritative aggregate snapshot with the immutable event stream after
+	// out-of-order delivery, gap repair, and a late duplicate. The projection is a compact
+	// status/version view, so require its watermark and status to match that same replay.
+	sourceEvents, err := appRepo.Events(ctx, tenant, created.Snapshot.OrderID)
+	if err != nil {
+		t.Fatalf("load and verify canonical event history: %v", err)
+	}
+	replayed, err := orders.Replay(sourceEvents)
+	if err != nil {
+		t.Fatalf("replay canonical event history: %v", err)
+	}
+	view, err := appRepo.ReadOrder(ctx, tenant, created.Snapshot.OrderID)
+	if err != nil {
+		t.Fatalf("read authoritative snapshot and projection watermark: %v", err)
+	}
+	if err := orders.VerifySnapshot(view.Snapshot, sourceEvents); err != nil || view.Snapshot.Version != replayed.Version {
+		t.Fatalf("event-derived state differs from command snapshot: replay=%+v snapshot=%+v err=%v", replayed, view.Snapshot, err)
+	}
+	if view.ProjectionWatermark != replayed.Version || string(replayed.Status) != status.String {
+		t.Fatalf("event replay, projection, and command snapshot disagree: replay=%d/%s projection=%d/%s", replayed.Version, replayed.Status, view.ProjectionWatermark, status.String)
+	}
+	var appliedEffects int
+	if err := adminDB.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.event_inbox WHERE tenant_id=$1 AND consumer_id=$2 AND aggregate_id=$3 AND apply_state='applied'`, string(tenant), projector.DefaultConsumerID, created.Snapshot.OrderID).Scan(&appliedEffects); err != nil {
+		t.Fatal(err)
+	}
+	if appliedEffects != len(sourceEvents) {
+		t.Fatalf("logical projection effects=%d for %d source events after duplicate/reorder, want exactly one per event", appliedEffects, len(sourceEvents))
+	}
 
 	otherTenant := mustTenant(t, nextUUID())
 	err = tenancy.WithTenantTx(ctx, projectorDB, otherTenant, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
