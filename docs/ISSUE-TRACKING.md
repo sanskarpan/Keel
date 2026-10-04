@@ -18,7 +18,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K0.6` | task | K0.6 Implement migration locking/checksums, health/version/metrics and signed artifact/SBOM pipeline. | [Open issue](https://github.com/sanskarpan/Keel/issues/7) |
 
-| `K0-GATE` | gate | K0 gate: two-tenant API and session-bound agent isolation proven with real non-owner DB roles. | [Open issue](https://github.com/sanskarpan/Keel/issues/8) |
+| `K0-GATE` | gate | K0 gate: two-tenant API and session-bound agent isolation proven with real non-owner DB roles. | [PR #117 (closes issue #8)](https://github.com/sanskarpan/Keel/pull/117) |
 
 
 ## K1 — Event-sourced order vertical slice
