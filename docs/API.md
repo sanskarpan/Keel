@@ -23,7 +23,7 @@ Problem response: `{type,title,status,code,detail,request_id,retry_after_seconds
 | `POST /v1/documents/uploads/{id}/complete` | owner of upload; verify size/hash/type/object version, enqueue scan; 202 |
 | `GET /v1/documents/{id}/versions/{version}` | document reader; immutable cited version metadata |
 | `POST /v1/search` | reader; query/mode/filters/top_k; references, ranks, degraded flag and index versions |
-| `POST /v1/orders` | requester; draft order, external reference, currency/minor amount; every line shares order currency; every line shares order currency |
+| `POST /v1/orders` | requester; draft order, external reference, supported currency/minor amount, positive decimal quantities; every line shares order currency |
 | `POST /v1/orders/{id}/submit` | requester; expected version and evidence references |
 | `POST /v1/orders/{id}/cancel` | permitted actor; nonterminal state only |
 | `GET /v1/orders/{id}` | reader; command snapshot/version plus projection watermark |
@@ -56,7 +56,7 @@ Admin/operator APIs are separately routed, strongly authenticated and never acce
   "supplier_id": "<uuid>",
   "currency": "INR",
   "amount_minor": 250000,
-  "line_items": [{"description": "Office equipment", "quantity": 2}],
+  "line_items": [{"description": "Office equipment", "quantity": "2"}],
   "evidence": [{"document_id": "<uuid>", "version": 3}]
 }
 ```

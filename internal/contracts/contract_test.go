@@ -80,6 +80,28 @@ func TestOpenAPIContractLoadsAndValidates(t *testing.T) {
 	}
 }
 
+func TestOrderQuantityContractIsPositiveAndBounded(t *testing.T) {
+	root := repositoryRoot(t)
+	loader := openapi3.NewLoader()
+	loader.IsExternalRefsAllowed = true
+	api, err := loader.LoadFromFile(filepath.Join(root, "contracts/openapi/openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := api.Components.Schemas["CreateOrderRequest"].Value
+	quantity := request.Properties["line_items"].Value.Items.Value.Properties["quantity"].Value
+	for _, value := range []string{"1", "0.000001", "12.34"} {
+		if err := quantity.VisitJSON(value, openapi3.EnableJSONSchema2020()); err != nil {
+			t.Errorf("valid quantity %q rejected: %v", value, err)
+		}
+	}
+	for _, value := range []string{"0", "0.0", "0.000000", "-1", "1e2", "922337203685477580712345678901234567890"} {
+		if err := quantity.VisitJSON(value, openapi3.EnableJSONSchema2020()); err == nil {
+			t.Errorf("invalid quantity %q accepted", value)
+		}
+	}
+}
+
 func TestDeploymentRecipeFixtures(t *testing.T) {
 	root := repositoryRoot(t)
 	schema := compileSchema(t, filepath.Join(root, "contracts/deployment-recipe.schema.json"))

@@ -14,7 +14,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 
 ## K1 — Event-sourced order vertical slice
 
-- [ ] K1.1 Implement order state machine, command snapshot and pure event replay reference model.
+- [x] K1.1 Implement order state machine, command snapshot and pure event replay reference model. Owner: Keel platform (named person unassigned); PR #105; evidence: `internal/orders`, independent transition/replay tests, contract quantity tests, CI contract run #9; decision: pure model/replay only; persistence, transactional idempotency/outbox, HTTP API, approver authorization/policy evaluation and the K0 end-to-end isolation gate remain open.
 - [ ] K1.2 Add aggregate lock/version, stable natural references and transactional idempotency plus a compact dedup registry that prevents financial-effect re-execution after response detail expiry; include >7-day retry proof.
 - [ ] K1.3 Append events/outbox/state-feed/result in one transaction; DB append-only grants.
 - [ ] K1.4 Implement publish-head claims, broker acknowledgement/retry/fencing and stable event IDs.

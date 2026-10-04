@@ -7,6 +7,7 @@ Keel is one Go module and one release artifact with separately selectable runtim
 | Package boundary | Owns | Must not own |
 |---|---|---|
 | `auth`, `tenancy`, `organizations` | Principal authentication, memberships, organization lifecycle and tenant context | Procurement decisions or provider billing state |
+| `orders` | Pure order command rules, canonical snapshots and deterministic event replay | Persistence, HTTP identity verification, approval policy evaluation or external effects |
 | `suppliers`, `onboarding` | Supplier identity, intake cases, evidence and eligibility episodes | Internal membership or purchase authorization |
 | `intake`, `orders`, `approvals`, `procurement`, `contracts` | Purchase request/order authority, frozen approval plans, procurement commitments and supplier contract obligations | AI safety budgets, subscription invoices or payment execution |
 | `documents`, `search` | Versioned document intake, visibility-filtered retrieval and citations | Authorization decisions or tenant-wide corpus statistics |
