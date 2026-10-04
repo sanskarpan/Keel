@@ -31,7 +31,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K1.3` | task | K1.3 Append events/outbox/state-feed/result in one transaction; DB append-only grants. | [Open issue](https://github.com/sanskarpan/Keel/issues/11) |
 
-| `K1.4` | task | K1.4 Implement publish-head claims, broker acknowledgement/retry/fencing and stable event IDs. | [Open issue](https://github.com/sanskarpan/Keel/issues/12) |
+| `K1.4` | task | K1.4 Implement publish-head claims, broker acknowledgement/retry/fencing and stable event IDs. | [PR #110 (closes issue #12)](https://github.com/sanskarpan/Keel/pull/110) |
 | `K1.4-OPS` | task | Add an audited, tenant-scoped operator repair path for blocked outbox streams. | [Open issue](https://github.com/sanskarpan/Keel/issues/108) |
 | `K1.4-SEC` | task | Qualify authenticated TLS Kafka transport and fail closed for non-local plaintext configuration. | [Open issue](https://github.com/sanskarpan/Keel/issues/109) |
 
