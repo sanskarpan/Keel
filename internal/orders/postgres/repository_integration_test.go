@@ -19,7 +19,10 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/sanskarpan/keel/internal/orders"
+	"github.com/sanskarpan/keel/internal/orders/outbox"
+	"github.com/sanskarpan/keel/internal/platform/kafkarelay"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
+	kafka "github.com/segmentio/kafka-go"
 )
 
 var testSequence atomic.Uint64
@@ -545,6 +548,300 @@ func TestPostgreSQLLateStateFeedFailureRollsBackCommandAndCanRetry(t *testing.T)
 	}
 	if events != 1 || outboxRows != 1 || feedRows != 1 {
 		t.Fatalf("retry created event/outbox/feed=%d/%d/%d, want exactly one each", events, outboxRows, feedRows)
+	}
+}
+
+func TestPostgreSQLPublishHeadFencesStaleWorkerAndRetries(t *testing.T) {
+	_, tenant, repo := repositoryTestDB(t)
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	workerDSN := os.Getenv("KEEL_TEST_WORKER_DATABASE_URL")
+	if adminDSN == "" || workerDSN == "" {
+		t.Skip("set worker and test-admin database URLs for publisher fencing coverage")
+	}
+	admin := integrationDB(t, adminDSN, 2)
+	worker := integrationDB(t, workerDSN, 4)
+	workerRepo, err := NewRepository(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	created, err := repo.Create(ctx, tenant, testCreate("publish-fence-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "publish-fence-create-key-0001", "principal:requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := testMetadata(string(tenant), created.Snapshot.OrderID)
+	meta.ActorRef = "principal:requester-1"
+	if _, err := repo.Submit(ctx, tenant, created.Snapshot.OrderID, 1, testSubmit(), meta, "publish-fence-submit-key-0001", "principal:requester-1"); err != nil {
+		t.Fatal(err)
+	}
+	first, ok, err := workerRepo.ClaimNext(ctx, string(tenant), "relay-a", 10*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("first publish claim=%+v ok=%t err=%v", first, ok, err)
+	}
+	if first.Version != 1 || first.EventType != string(orders.OrderCreated) {
+		t.Fatalf("first claim skipped aggregate head: %+v", first)
+	}
+	message, err := workerRepo.LoadClaimed(ctx, first)
+	if err != nil || message.EventID != first.EventID || message.AggregateVersion != 1 {
+		t.Fatalf("load first claimed event=%+v err=%v", message, err)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.outbox_publish_heads SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND aggregate_id=$2`, string(tenant), created.Snapshot.OrderID); err != nil {
+		t.Fatal(err)
+	}
+	second, ok, err := workerRepo.ClaimNext(ctx, string(tenant), "relay-b", 10*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("reclaimed publish claim=%+v ok=%t err=%v", second, ok, err)
+	}
+	if second.Version != 1 || second.EventID != first.EventID || second.Epoch <= first.Epoch {
+		t.Fatalf("reclaim changed logical event or failed to fence: first=%+v second=%+v", first, second)
+	}
+	if _, err := workerRepo.LoadClaimed(ctx, first); !errors.Is(err, outbox.ErrLeaseLost) {
+		t.Fatalf("stale claim loaded event: %v", err)
+	}
+	if err := workerRepo.Acknowledge(ctx, first); !errors.Is(err, outbox.ErrLeaseLost) {
+		t.Fatalf("stale worker acknowledgement error=%v, want fenced lease loss", err)
+	}
+	if err := workerRepo.RecordFailure(ctx, second, "broker_timeout", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := workerRepo.ClaimNext(ctx, string(tenant), "relay-b", 10*time.Second); err != nil || ok {
+		t.Fatalf("retry was claimable before persisted backoff: ok=%t err=%v", ok, err)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.outbox_delivery SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND event_id=$2`, string(tenant), first.EventID); err != nil {
+		t.Fatal(err)
+	}
+	third, ok, err := workerRepo.ClaimNext(ctx, string(tenant), "relay-c", 10*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("backoff retry claim=%+v ok=%t err=%v", third, ok, err)
+	}
+	if third.Version != 1 || third.EventID != first.EventID || third.AttemptCount != 1 || third.Epoch <= second.Epoch {
+		t.Fatalf("retry did not preserve event identity/attempt/fence: %+v", third)
+	}
+	if err := workerRepo.Acknowledge(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	if err := workerRepo.Acknowledge(ctx, third); err != nil {
+		t.Fatalf("duplicate post-commit acknowledgement should be idempotent: %v", err)
+	}
+	fourth, ok, err := workerRepo.ClaimNext(ctx, string(tenant), "relay-c", 10*time.Second)
+	if err != nil || !ok || fourth.Version != 2 {
+		t.Fatalf("publisher did not advance to version 2 only after ack: claim=%+v ok=%t err=%v", fourth, ok, err)
+	}
+	if err := workerRepo.Acknowledge(ctx, fourth); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := workerRepo.ClaimNext(ctx, string(tenant), "relay-c", 10*time.Second); err != nil || ok {
+		t.Fatalf("fully published stream still had a claim: ok=%t err=%v", ok, err)
+	}
+	var nextVersion int64
+	if err := admin.QueryRowContext(ctx, `SELECT next_version FROM keel_meta.outbox_publish_heads WHERE tenant_id=$1 AND aggregate_id=$2`, string(tenant), created.Snapshot.OrderID).Scan(&nextVersion); err != nil {
+		t.Fatal(err)
+	}
+	if nextVersion != 3 {
+		t.Fatalf("fully published stream next_version=%d, want 3", nextVersion)
+	}
+}
+
+type recordingBroker struct {
+	err      error
+	messages []outbox.Message
+}
+
+func (b *recordingBroker) Publish(_ context.Context, message outbox.Message) error {
+	b.messages = append(b.messages, message)
+	return b.err
+}
+
+func TestPostgreSQLPublisherPersistsRetryAndReusesStableEventID(t *testing.T) {
+	_, tenant, repo := repositoryTestDB(t)
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	workerDSN := os.Getenv("KEEL_TEST_WORKER_DATABASE_URL")
+	if adminDSN == "" || workerDSN == "" {
+		t.Skip("set worker and test-admin database URLs for broker retry integration coverage")
+	}
+	admin := integrationDB(t, adminDSN, 2)
+	worker := integrationDB(t, workerDSN, 3)
+	workerRepo, err := NewRepository(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	created, err := repo.Create(ctx, tenant, testCreate("publish-retry-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "publish-retry-create-key-0001", "principal:requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := &recordingBroker{err: outbox.ErrBrokerUnavailable}
+	publisher, err := outbox.NewPublisher(workerRepo, broker, outbox.Config{LeaseDuration: 5 * time.Second, PublishTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := publisher.RunOnce(ctx, string(tenant), "relay-retry")
+	if err != nil || !failed.RetryScheduled || failed.Published || failed.ErrorCode != "broker_unavailable" {
+		t.Fatalf("first broker failure result=%+v err=%v", failed, err)
+	}
+	if len(broker.messages) != 1 {
+		t.Fatalf("broker attempts=%d, want one", len(broker.messages))
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.outbox_delivery SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND event_id=$2`, string(tenant), failed.EventID); err != nil {
+		t.Fatal(err)
+	}
+	broker.err = nil
+	succeeded, err := publisher.RunOnce(ctx, string(tenant), "relay-retry")
+	if err != nil || !succeeded.Published || succeeded.EventID != failed.EventID {
+		t.Fatalf("retry publish result=%+v err=%v", succeeded, err)
+	}
+	if len(broker.messages) != 2 || broker.messages[0].EventID != broker.messages[1].EventID {
+		t.Fatalf("retry event IDs changed across delivery attempts: %+v", broker.messages)
+	}
+	var attemptCount int
+	var state string
+	if err := admin.QueryRowContext(ctx, `SELECT attempt_count,delivery_state FROM keel_meta.outbox_delivery WHERE tenant_id=$1 AND event_id=$2`, string(tenant), failed.EventID).Scan(&attemptCount, &state); err != nil {
+		t.Fatal(err)
+	}
+	if attemptCount != 1 || state != "published" {
+		t.Fatalf("durable delivery state attempts=%d state=%q, want 1/published", attemptCount, state)
+	}
+	_ = created
+}
+
+func TestPostgreSQLPublisherBlocksCorruptEnvelopeWithoutSkippingVersion(t *testing.T) {
+	_, tenant, repo := repositoryTestDB(t)
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	workerDSN := os.Getenv("KEEL_TEST_WORKER_DATABASE_URL")
+	if adminDSN == "" || workerDSN == "" {
+		t.Skip("set worker and test-admin database URLs for corrupt-envelope integration coverage")
+	}
+	admin := integrationDB(t, adminDSN, 2)
+	worker := integrationDB(t, workerDSN, 3)
+	workerRepo, err := NewRepository(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	created, err := repo.Create(ctx, tenant, testCreate("poison-outbox-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "poison-outbox-create-key-0001", "principal:requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := testMetadata(string(tenant), created.Snapshot.OrderID)
+	meta.ActorRef = "principal:requester-1"
+	if _, err := repo.Submit(ctx, tenant, created.Snapshot.OrderID, 1, testSubmit(), meta, "poison-outbox-submit-key-0001", "principal:requester-1"); err != nil {
+		t.Fatal(err)
+	}
+	var firstEventID string
+	if err := admin.QueryRowContext(ctx, `SELECT event_id::text FROM keel_meta.event_outbox WHERE tenant_id=$1 AND aggregate_id=$2 AND aggregate_version=1`, string(tenant), created.Snapshot.OrderID).Scan(&firstEventID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.event_outbox SET safe_envelope='{}'::jsonb WHERE tenant_id=$1 AND event_id=$2`, string(tenant), firstEventID); err != nil {
+		t.Fatal(err)
+	}
+	publisher, err := outbox.NewPublisher(workerRepo, &recordingBroker{}, outbox.Config{LeaseDuration: 5 * time.Second, PublishTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := publisher.RunOnce(ctx, string(tenant), "relay-poison")
+	if !errors.Is(err, outbox.ErrPoisonEnvelope) || !result.Blocked || result.EventID != firstEventID || result.ErrorCode != "outbox_corrupt" {
+		t.Fatalf("corrupt envelope result=%+v err=%v", result, err)
+	}
+	var state, errorCode string
+	if err := admin.QueryRowContext(ctx, `SELECT delivery_state,last_error_code FROM keel_meta.outbox_delivery WHERE tenant_id=$1 AND event_id=$2`, string(tenant), firstEventID).Scan(&state, &errorCode); err != nil {
+		t.Fatal(err)
+	}
+	if state != "blocked" || errorCode != "outbox_corrupt" {
+		t.Fatalf("durable poison state=%q error_code=%q", state, errorCode)
+	}
+	if _, ok, err := workerRepo.ClaimNext(ctx, string(tenant), "relay-poison", 5*time.Second); err != nil || ok {
+		t.Fatalf("blocked head was reclaimed or skipped: claimed=%t err=%v", ok, err)
+	}
+}
+
+func TestPostgreSQLPublisherWritesStableEventsToKafkaInOrder(t *testing.T) {
+	_, tenant, repo := repositoryTestDB(t)
+	brokers := strings.Split(os.Getenv("KEEL_TEST_KAFKA_BROKERS"), ",")
+	topic := os.Getenv("KEEL_TEST_KAFKA_TOPIC")
+	if len(brokers) == 0 || strings.TrimSpace(brokers[0]) == "" || topic == "" {
+		t.Skip("set KEEL_TEST_KAFKA_BROKERS and KEEL_TEST_KAFKA_TOPIC for broker integration coverage")
+	}
+	ctx := context.Background()
+	created, err := repo.Create(ctx, tenant, testCreate("kafka-publish-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "kafka-publish-create-key-0001", "principal:requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := testMetadata(string(tenant), created.Snapshot.OrderID)
+	meta.ActorRef = "principal:requester-1"
+	if _, err := repo.Submit(ctx, tenant, created.Snapshot.OrderID, 1, testSubmit(), meta, "kafka-publish-submit-key-0001", "principal:requester-1"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := repo.Events(ctx, tenant, created.Snapshot.OrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("order event count=%d, want two", len(events))
+	}
+	workerDSN := os.Getenv("KEEL_TEST_WORKER_DATABASE_URL")
+	if workerDSN == "" {
+		t.Skip("set KEEL_TEST_WORKER_DATABASE_URL for broker integration coverage")
+	}
+	worker := integrationDB(t, workerDSN, 3)
+	workerRepo, err := NewRepository(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker, err := kafkarelay.New(brokers, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	publisher, err := outbox.NewPublisher(workerRepo, broker, outbox.Config{LeaseDuration: 5 * time.Second, PublishTimeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		result, err := publisher.RunOnce(ctx, string(tenant), "relay-kafka-test")
+		if err != nil {
+			t.Fatalf("publish event %d: %v", i, err)
+		}
+		if !result.Published || result.EventID != events[i].Metadata.EventID {
+			t.Fatalf("publish result %d=%+v, want event %s", i, result, events[i].Metadata.EventID)
+		}
+	}
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: brokers, Topic: topic, GroupID: "keel-outbox-test-" + nextUUID(),
+		StartOffset: kafka.FirstOffset, MinBytes: 1, MaxBytes: 1 << 20, MaxWait: 50 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = reader.Close() })
+	want := map[string]int{events[0].Metadata.EventID: 1, events[1].Metadata.EventID: 2}
+	seen := make(map[string]bool, len(want))
+	deadline, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	for len(seen) < len(want) {
+		message, err := reader.ReadMessage(deadline)
+		if err != nil {
+			t.Fatalf("read published Kafka event: %v", err)
+		}
+		eventID, version := "", 0
+		for _, header := range message.Headers {
+			switch header.Key {
+			case "event_id":
+				eventID = string(header.Value)
+			case "aggregate_version":
+				_, _ = fmt.Sscan(string(header.Value), &version)
+			}
+		}
+		wantVersion, target := want[eventID]
+		if !target {
+			continue // The shared local topic may contain earlier test runs.
+		}
+		if version != wantVersion || seen[eventID] {
+			t.Fatalf("Kafka event identity/version duplicate or reorder: id=%q version=%d want=%d", eventID, version, wantVersion)
+		}
+		if wantVersion == 2 && !seen[events[0].Metadata.EventID] {
+			t.Fatal("aggregate version 2 arrived before version 1")
+		}
+		if string(message.Key) != string(outbox.Message{TenantID: string(tenant), AggregateID: created.Snapshot.OrderID}.Key()) {
+			t.Fatalf("Kafka partition key=%q is not the stable tenant/aggregate key", message.Key)
+		}
+		seen[eventID] = true
 	}
 }
 
