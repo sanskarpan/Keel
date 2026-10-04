@@ -5,3 +5,9 @@
 *.key
 secrets/
 .DS_Store
+
+# Go build/test outputs
+/bin/
+/coverage.out
+/coverage.html
+/dist/
