@@ -163,6 +163,22 @@ func TestProcessorPersistsOnlyMetadataAndDigestForMalformedRecord(t *testing.T) 
 	}
 }
 
+func TestProcessRecordQuarantinesMalformedEnvelopeWithoutTenantClaim(t *testing.T) {
+	store := &fakeStore{}
+	processor, err := New(store, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := Record{Topic: "keel.test.orders.v1", Partition: 2, Offset: 99, Value: []byte(`{"not_json":`)}
+	result, err := processor.ProcessRecord(context.Background(), record)
+	if err != nil || result.Disposition != Quarantined || result.ReasonCode != "invalid_record" {
+		t.Fatalf("malformed no-tenant record result=%+v err=%v", result, err)
+	}
+	if store.quarantineSource != record.Topic || store.quarantinePartition != record.Partition || store.quarantineOffset != record.Offset || store.quarantineHash != sha256.Sum256(record.Value) || store.quarantineReason != "invalid_record" {
+		t.Fatalf("invalid record was not durably routed using transport coordinates: %+v", store)
+	}
+}
+
 func TestProcessorQuarantinesUnmatchedTenantClaimWithoutTenantScopedWrite(t *testing.T) {
 	store := &fakeStore{result: Result{Disposition: Quarantined, ReasonCode: "source_not_found"}}
 	processor, err := New(store, "")
