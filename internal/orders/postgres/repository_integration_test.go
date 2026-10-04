@@ -380,7 +380,6 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 	statements := []string{
 		`UPDATE keel_meta.order_events SET event_data=event_data WHERE tenant_id=$1 AND event_id=$2`,
 		`DELETE FROM keel_meta.event_outbox WHERE tenant_id=$1 AND event_id=$2`,
-		`DELETE FROM keel_meta.state_updates WHERE tenant_id=$1 AND event_id=$2`,
 	}
 	for _, principalDB := range []*sql.DB{appDB, worker} {
 		for _, statement := range statements {
@@ -388,6 +387,9 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 				t.Fatalf("runtime role unexpectedly changed append-only record with %q", statement)
 			}
 		}
+	}
+	if _, err := appDB.ExecContext(ctx, `DELETE FROM keel_meta.state_updates WHERE tenant_id=$1 AND event_id=$2`, string(tenant), eventID); err == nil {
+		t.Fatal("application role unexpectedly deleted a state-feed record")
 	}
 
 	meta := testMetadata(string(tenant), created.Snapshot.OrderID)
@@ -442,6 +444,56 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 		if sequence != int64(i+1) {
 			t.Fatalf("tenant state-feed sequence=%v has a gap or reorder at position %d", stateSequence, i)
 		}
+	}
+	workerRepo, err := NewRepository(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tenancy.WithTenantTx(ctx, worker, tenant, nil, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `DELETE FROM keel_meta.state_updates WHERE tenant_id=$1 AND sequence=1`, string(tenant))
+		if err != nil {
+			return err
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if deleted != 0 {
+			return fmt.Errorf("worker deleted %d fresh state-feed rows", deleted)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("worker fresh-row retention boundary: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.state_updates SET created_at=clock_timestamp()-interval '25 hours' WHERE tenant_id=$1`, string(tenant)); err != nil {
+		t.Fatal(err)
+	}
+	firstBatch, err := workerRepo.PruneExpiredStateUpdates(ctx, tenant, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBatch, err := workerRepo.PruneExpiredStateUpdates(ctx, tenant, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstBatch != 3 || secondBatch != int64(len(stateSequence)-3) {
+		t.Fatalf("state-feed prune batches=%d/%d, want 3/%d", firstBatch, secondBatch, len(stateSequence)-3)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT last_sequence FROM keel_meta.state_feed_counters WHERE tenant_id=$1`, string(tenant)).Scan(&counter); err != nil {
+		t.Fatal(err)
+	}
+	if counter != int64(len(stateSequence)) {
+		t.Fatalf("feed cursor reset after pruning: %d, want to retain %d", counter, len(stateSequence))
+	}
+	if _, err := repo.Create(ctx, tenant, testCreate("post-prune-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "post-prune-create-key-0001", "principal:requester-1"); err != nil {
+		t.Fatalf("create after state-feed pruning: %v", err)
+	}
+	var nextSequence int64
+	if err := admin.QueryRowContext(ctx, `SELECT max(sequence) FROM keel_meta.state_updates WHERE tenant_id=$1`, string(tenant)).Scan(&nextSequence); err != nil {
+		t.Fatal(err)
+	}
+	if nextSequence != int64(len(stateSequence)+1) {
+		t.Fatalf("state-feed cursor after prune=%d, want %d", nextSequence, len(stateSequence)+1)
 	}
 }
 
