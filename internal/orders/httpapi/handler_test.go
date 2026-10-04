@@ -50,7 +50,7 @@ func TestGetOrderReturnsAuthoritativeSnapshotAndIndependentWatermark(t *testing.
 			t.Fatalf("response exposed private field %q", forbidden)
 		}
 	}
-	if response.Header().Get("ETag") != `"4"` || response.Header().Get("Cache-Control") != "private, no-store" {
+	if response.Header().Get("ETag") != `"4-2"` || response.Header().Get("X-Order-Version") != "4" || response.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatalf("missing version/cache contract headers: %v", response.Header())
 	}
 	if reader.lastTenant != httpTestTenant || authorizer.lastIdentity.TenantID != httpTestTenant {
