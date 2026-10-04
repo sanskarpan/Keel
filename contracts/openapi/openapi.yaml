@@ -2,17 +2,19 @@ openapi: 3.1.1
 info:
   title: Keel API
   version: 0.1.0
-  summary: Initial health and order vertical-slice contract.
+  summary: Health, order, and supplier-intake vertical-slice contracts.
   description: >-
     Design contract for the initial Keel HTTP surface. A documented operation is
-    not evidence that its runtime is implemented. Order operations are introduced
-    in K1; SaaS and supplier workflows are added as their checklist issues ship.
+    not evidence that its runtime is implemented. Supplier operations are introduced
+    in K2.1; authentication/runtime assembly and hosted-provider qualification remain
+    separate gates before public customer traffic.
 servers:
   - url: /
     description: Deployment-provided API origin.
 tags:
   - name: health
   - name: orders
+  - name: supplier intake
 paths:
   /health/live:
     get:
@@ -220,15 +222,192 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /v1/supplier-invitations:
+    post:
+      tags: [supplier intake]
+      operationId: issueSupplierInvitation
+      summary: Issue a one-time supplier invitation for an authorized case.
+      description: The invitation bearer is returned once with no-store headers; callers must deliver it through an approved private channel and must never write it to logs.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueSupplierInvitationRequest'
+      responses:
+        '201':
+          description: Invitation created; raw token is returned once.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+            Referrer-Policy:
+              schema: { type: string, const: no-referrer }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueSupplierInvitationResponse'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.1
+  /v1/public/tenants/{tenant_id}/supplier-invitations/accept:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    post:
+      tags: [supplier intake]
+      operationId: acceptSupplierInvitation
+      summary: Consume a single-use invitation and create a short-lived upload session.
+      security:
+        - supplierInviteBearer: []
+      responses:
+        '201':
+          description: Invitation accepted and upload-session bearer issued once.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptSupplierInvitationResponse'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.1
+  /v1/public/tenants/{tenant_id}/supplier-upload-sessions/uploads:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+    post:
+      tags: [supplier intake]
+      operationId: createSupplierUpload
+      summary: Create a bounded quarantined upload reservation.
+      security:
+        - supplierSessionBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSupplierUploadRequest'
+      responses:
+        '201':
+          description: Upload reservation and short-lived content capability created.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateSupplierUploadResponse'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.1
+  /v1/public/tenants/{tenant_id}/supplier-uploads/{upload_id}/content:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/UploadID'
+    put:
+      tags: [supplier intake]
+      operationId: uploadSupplierContent
+      summary: Stream content into quarantine using the one-upload capability.
+      security:
+        - uploadCapabilityBearer: []
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '204': { description: Verified bytes are quarantined and queued for scanning. }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.1
+  /v1/public/tenants/{tenant_id}/supplier-uploads/{upload_id}/capability:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/UploadID'
+    post:
+      tags: [supplier intake]
+      operationId: renewSupplierUploadCapability
+      summary: Replace an unexpired or expired content capability for an awaiting upload.
+      security:
+        - supplierSessionBearer: []
+      responses:
+        '200':
+          description: New upload capability; older capabilities are invalidated.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenewSupplierUploadCapabilityResponse'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.1
+  /v1/public/tenants/{tenant_id}/supplier-uploads/{upload_id}:
+    parameters:
+      - $ref: '#/components/parameters/TenantID'
+      - $ref: '#/components/parameters/UploadID'
+    get:
+      tags: [supplier intake]
+      operationId: getSupplierUploadStatus
+      summary: Read a coarse status for an upload owned by the supplier session.
+      security:
+        - supplierSessionBearer: []
+      responses:
+        '200':
+          description: Upload status without scanner details or extracted evidence content.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupplierUploadStatus'
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.1
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    supplierInviteBearer:
+      type: http
+      scheme: bearer
+      description: Single-use, tenant-scoped opaque invitation secret.
+    supplierSessionBearer:
+      type: http
+      scheme: bearer
+      description: Short-lived supplier upload-session secret.
+    uploadCapabilityBearer:
+      type: http
+      scheme: bearer
+      description: One-upload capability bound to the exact tenant, upload, size and checksum.
   parameters:
     OrderID:
       name: order_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TenantID:
+      name: tenant_id
+      in: path
+      required: true
+      description: Tenant selector only; bearer capability/session authorization and database RLS still validate access.
+      schema: { type: string, format: uuid }
+    UploadID:
+      name: upload_id
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -378,6 +557,68 @@ components:
                 not: { pattern: '^0(\.0{1,6})?$' }
         projection_watermark: { type: integer, format: int64, minimum: 0, description: Highest contiguous version applied by the asynchronous read projection; zero means no projection is available yet. }
         projection_lag_versions: { type: integer, format: int64, minimum: 0, description: Authoritative version minus projection watermark. }
+        updated_at: { type: string, format: date-time }
+    IssueSupplierInvitationRequest:
+      type: object
+      additionalProperties: false
+      required: [case_id, supplier_id, recipient_email]
+      properties:
+        case_id: { type: string, format: uuid }
+        supplier_id: { type: string, format: uuid }
+        recipient_email: { type: string, format: email, maxLength: 254, writeOnly: true }
+    IssueSupplierInvitationResponse:
+      type: object
+      additionalProperties: false
+      required: [invitation_id, expires_at, invitation_token]
+      properties:
+        invitation_id: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        invitation_token: { type: string, format: password, minLength: 40, maxLength: 64, writeOnly: true }
+    AcceptSupplierInvitationResponse:
+      type: object
+      additionalProperties: false
+      required: [invitation_id, case_id, supplier_id, upload_session_token]
+      properties:
+        invitation_id: { type: string, format: uuid }
+        case_id: { type: string, format: uuid }
+        supplier_id: { type: string, format: uuid }
+        upload_session_token: { type: string, format: password, minLength: 40, maxLength: 64, writeOnly: true }
+    CreateSupplierUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [filename, content_type, size_bytes, sha256]
+      properties:
+        filename: { type: string, minLength: 1, maxLength: 160, writeOnly: true }
+        content_type:
+          type: string
+          enum: [application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, text/plain]
+        size_bytes: { type: integer, minimum: 1, maximum: 20971520 }
+        sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+    CreateSupplierUploadResponse:
+      type: object
+      additionalProperties: false
+      required: [upload_id, state, capability_expires_at, upload_capability, content_url]
+      properties:
+        upload_id: { type: string, format: uuid }
+        state: { type: string, const: awaiting_upload }
+        capability_expires_at: { type: string, format: date-time }
+        upload_capability: { type: string, format: password, minLength: 40, maxLength: 2048, writeOnly: true }
+        content_url: { type: string, format: uri-reference }
+    RenewSupplierUploadCapabilityResponse:
+      type: object
+      additionalProperties: false
+      required: [upload_id, upload_capability, capability_expires_at]
+      properties:
+        upload_id: { type: string, format: uuid }
+        upload_capability: { type: string, format: password, minLength: 40, maxLength: 2048, writeOnly: true }
+        capability_expires_at: { type: string, format: date-time }
+    SupplierUploadStatus:
+      type: object
+      additionalProperties: false
+      required: [upload_id, state, updated_at]
+      properties:
+        upload_id: { type: string, format: uuid }
+        state: { type: string, enum: [awaiting_upload, processing, ready, rejected, expired] }
         updated_at: { type: string, format: date-time }
     OrderEventPage:
       type: object
