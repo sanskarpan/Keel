@@ -14,6 +14,9 @@ func TestNewJSONRedactsSensitiveAttributesAndGroups(t *testing.T) {
 	logger.Info("request completed",
 		slog.String("request_id", "req-safe"),
 		slog.String("Authorization", "Bearer top-secret-token"),
+		slog.String("customer_email", "person@example.test"),
+		slog.String("url", "https://user:pass@internal.example.test/private"),
+		slog.String("query", "SELECT private_document_text"),
 		slog.Group("credentials",
 			slog.String("username", "private-user"),
 			slog.String("password", "private-password"),
@@ -22,7 +25,7 @@ func TestNewJSONRedactsSensitiveAttributesAndGroups(t *testing.T) {
 	)
 
 	line := output.String()
-	for _, secret := range []string{"top-secret-token", "private-user", "private-password", "private prompt"} {
+	for _, secret := range []string{"top-secret-token", "private-user", "private-password", "private prompt", "person@example.test", "user:pass@internal.example.test", "SELECT private_document_text"} {
 		if strings.Contains(line, secret) {
 			t.Fatalf("log contains sensitive value %q: %s", secret, line)
 		}
@@ -34,8 +37,11 @@ func TestNewJSONRedactsSensitiveAttributesAndGroups(t *testing.T) {
 	if record["request_id"] != "req-safe" {
 		t.Fatalf("safe field was lost: %#v", record)
 	}
-	if record["Authorization"] != redacted {
-		t.Fatalf("authorization not redacted: %#v", record["Authorization"])
+	if record["Authorization"] != redacted || record["url"] != redacted || record["query"] != redacted {
+		t.Fatalf("sensitive fields not redacted: authorization=%#v url=%#v query=%#v", record["Authorization"], record["url"], record["query"])
+	}
+	if record["customer_email"] != omitted {
+		t.Fatalf("unknown PII field was not omitted: %#v", record["customer_email"])
 	}
 	credentials, ok := record["credentials"].(map[string]any)
 	if !ok || credentials["username"] != redacted || credentials["password"] != redacted {
