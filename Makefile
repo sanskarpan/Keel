@@ -71,6 +71,12 @@ local-orders-test: local-migrate
 	docker compose -f $(COMPOSE_FILE) exec -T kafka /opt/kafka/bin/kafka-topics.sh \
 	  --bootstrap-server localhost:9092 --create --if-not-exists \
 	  --topic keel.test.orders.v1 --partitions 3 --replication-factor 1; \
+	docker compose -f $(COMPOSE_FILE) exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+	  --bootstrap-server localhost:9092 --create --if-not-exists \
+	  --topic keel.k17-relay.orders.v1 --partitions 3 --replication-factor 1; \
+	docker compose -f $(COMPOSE_FILE) exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+	  --bootstrap-server localhost:9092 --create --if-not-exists \
+	  --topic keel.k17-consumer.orders.v1 --partitions 3 --replication-factor 1; \
 	test_bin=$$(mktemp /tmp/keel-orders-test.XXXXXX); \
 	trap 'rm -f "$$test_bin"; docker compose -f $(COMPOSE_FILE) exec -T postgres rm -f /tmp/keel-orders.test >/dev/null 2>&1 || true' EXIT; \
 	GOTOOLCHAIN=local go test -c -o "$$test_bin" ./internal/orders/postgres; \
