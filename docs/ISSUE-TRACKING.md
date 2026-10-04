@@ -41,7 +41,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K1.7` | task | K1.7 Exercise command/relay/consumer crash and rebalance boundaries. | [PR #113 (closes issue #15)](https://github.com/sanskarpan/Keel/pull/113) |
 
-| `K1-GATE` | gate | K1 gate: duplicates/reorder/replay never duplicate effects; event-derived state equals snapshot/projection. | [Open issue](https://github.com/sanskarpan/Keel/issues/16) |
+| `K1-GATE` | gate | K1 gate: duplicates/reorder/replay never duplicate effects; event-derived state equals snapshot/projection. | [PR #116 (closes issue #16)](https://github.com/sanskarpan/Keel/pull/116) |
 
 
 ## K2 — Durable supplier onboarding
