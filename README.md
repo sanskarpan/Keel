@@ -54,3 +54,9 @@ docs/{adr,reports,runbooks}/
 ```
 
 Begin with one vertical slice: authenticate into a tenant, submit a purchase request, append its event, publish it, update a read model and inspect the trace. Add supplier onboarding and approvals, then documents/AI, then hardened external delivery and cost controls. Ghostlight deploys signed build recipes after this local flow is stable.
+
+## Implementation bootstrap
+
+The backend remains one Go module with separate process roles and bounded domain packages. Domain packages own their invariants; platform adapters assemble them, and one domain must not write another domain's tables. See [`internal/README.md`](internal/README.md) for current boundaries and dependency direction.
+
+The pinned toolchain is Go 1.27.1. Run `make check` to execute unit tests and `go vet`. The role dispatcher intentionally fails closed until a role implementation is registered; configuration validation alone does not imply that an API or worker is serving traffic.
