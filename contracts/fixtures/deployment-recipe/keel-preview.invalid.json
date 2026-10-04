@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.1",
+  "product": "keel",
+  "source_sha": "not-a-git-object-id",
+  "images": { "backend": "ghcr.io/example.invalid/keel/backend:latest", "web": "ghcr.io/example.invalid/keel/web:latest" },
+  "migration_bundle": "migration-v1",
+  "event_schema_bundle": "event-v1",
+  "configuration_schema": "config-v1",
+  "health_contract": "1",
+  "roles": ["api", "root"],
+  "dependencies": ["postgres"],
+  "test_profiles": ["smoke"],
+  "resource_profile": "preview-small",
+  "signature": "unsigned"
+}
