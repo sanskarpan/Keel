@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -35,43 +33,109 @@ type Consumer struct {
 	mu        sync.Mutex
 	reader    GroupReader
 	processor RecordProcessor
+	brokers   []string
+	topic     string
+	groupID   string
+	closed    bool
+	secure    bool
+	security  *SecurityConfig
 }
 
-// NewConsumer creates a consumer-group reader with synchronous explicit offset commits.
-// The first group run starts at the earliest retained record; inbox uniqueness makes replay safe.
-func NewConsumer(brokers []string, topic, groupID string, processor RecordProcessor) (*Consumer, error) {
-	if len(brokers) == 0 {
-		return nil, errors.New("at least one Kafka broker address is required")
-	}
+func validateConsumerConfig(topic, groupID string, processor RecordProcessor) error {
 	if !validOrderTopic(topic) {
-		return nil, errors.New("Kafka order topic name is invalid")
+		return errors.New("Kafka order topic name is invalid")
 	}
 	if !groupIDPattern.MatchString(groupID) {
-		return nil, errors.New("Kafka consumer group ID is invalid")
+		return errors.New("Kafka consumer group ID is invalid")
 	}
 	if processor == nil {
-		return nil, errors.New("Kafka record processor is required")
+		return errors.New("Kafka record processor is required")
 	}
-	addresses := make([]string, 0, len(brokers))
-	seen := make(map[string]struct{}, len(brokers))
-	for _, address := range brokers {
-		address = strings.TrimSpace(address)
-		host, port, err := net.SplitHostPort(address)
-		if err != nil || host == "" || port == "" {
-			return nil, fmt.Errorf("invalid Kafka broker address %q", address)
-		}
-		if _, exists := seen[address]; exists {
-			continue
-		}
-		seen[address] = struct{}{}
-		addresses = append(addresses, address)
-	}
-	reader := kafka.NewReader(kafka.ReaderConfig{
+	return nil
+}
+
+func newReader(addresses []string, topic, groupID string, security *SecurityConfig) (*kafka.Reader, error) {
+	config := kafka.ReaderConfig{
 		Brokers: addresses, Topic: topic, GroupID: groupID,
 		MinBytes: 1, MaxBytes: 10 << 20, MaxWait: time.Second,
 		CommitInterval: 0, StartOffset: kafka.FirstOffset,
-	})
-	return NewConsumerWithReader(reader, processor)
+	}
+	if security != nil {
+		dialer, err := secureKafkaDialer(*security)
+		if err != nil {
+			return nil, err
+		}
+		config.Dialer = dialer
+	}
+	return kafka.NewReader(config), nil
+}
+
+func newConsumer(brokers []string, topic, groupID string, processor RecordProcessor, security *SecurityConfig, local bool) (*Consumer, error) {
+	if err := validateConsumerConfig(topic, groupID, processor); err != nil {
+		return nil, err
+	}
+	var addresses []string
+	var err error
+	if local {
+		addresses, err = validateLocalBrokers(brokers)
+	} else {
+		addresses, err = normalizeBrokers(brokers)
+	}
+	if err != nil {
+		return nil, err
+	}
+	reader, err := newReader(addresses, topic, groupID, security)
+	if err != nil {
+		return nil, err
+	}
+	return &Consumer{reader: reader, processor: processor, brokers: addresses, topic: topic, groupID: groupID, secure: security != nil, security: cloneOptionalSecurity(security)}, nil
+}
+
+func cloneOptionalSecurity(security *SecurityConfig) *SecurityConfig {
+	if security == nil {
+		return nil
+	}
+	return cloneSecurityConfig(*security)
+}
+
+// NewLocalSynthetic is restricted to loopback and the local Compose Kafka alias.
+func NewLocalSyntheticConsumer(brokers []string, topic, groupID string, processor RecordProcessor) (*Consumer, error) {
+	return newConsumer(brokers, topic, groupID, processor, nil, true)
+}
+
+// NewSecureConsumer always configures verified TLS and SASL/SCRAM-SHA-512.
+func NewSecureConsumer(brokers []string, topic, groupID string, processor RecordProcessor, security SecurityConfig) (*Consumer, error) {
+	return newConsumer(brokers, topic, groupID, processor, &security, false)
+}
+
+// RotateSecurity replaces the reader and reconnects with fresh trust roots and
+// credentials. RunOnce is serialized against the swap; pending offsets are safe
+// to replay because projector inbox processing is idempotent.
+func (c *Consumer) RotateSecurity(security SecurityConfig) error {
+	if c == nil {
+		return errors.New("Kafka consumer is not configured")
+	}
+	if !c.secure {
+		return errors.New("security rotation is available only for authenticated Kafka consumers")
+	}
+	reader, err := newReader(c.brokers, c.topic, c.groupID, &security)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		_ = reader.Close()
+		return errors.New("Kafka consumer is closed")
+	}
+	old := c.reader
+	oldSecurity := c.security
+	c.reader = reader
+	c.security = cloneSecurityConfig(security)
+	if err := old.Close(); err != nil {
+		return redactKafkaError(fmt.Errorf("close previous Kafka reader generation: %w", err), oldSecurity)
+	}
+	return nil
 }
 
 // NewConsumerWithReader installs a reader, primarily for testing failure boundaries.
@@ -93,7 +157,7 @@ func (c *Consumer) RunOnce(ctx context.Context) (projector.Result, error) {
 	defer c.mu.Unlock()
 	message, err := c.reader.FetchMessage(ctx)
 	if err != nil {
-		return projector.Result{}, err
+		return projector.Result{}, redactKafkaError(err, c.security)
 	}
 	record := projector.Record{
 		Topic: message.Topic, Partition: message.Partition, Offset: message.Offset,
@@ -105,7 +169,7 @@ func (c *Consumer) RunOnce(ctx context.Context) (projector.Result, error) {
 	}
 	result, err := c.processor.ProcessRecord(ctx, record)
 	if err != nil {
-		return projector.Result{}, err
+		return projector.Result{}, redactKafkaError(err, c.security)
 	}
 	switch result.Disposition {
 	case projector.Applied, projector.Duplicate, projector.Deferred, projector.Quarantined:
@@ -113,14 +177,20 @@ func (c *Consumer) RunOnce(ctx context.Context) (projector.Result, error) {
 		return projector.Result{}, fmt.Errorf("processor returned non-durable disposition %q", result.Disposition)
 	}
 	if err := c.reader.CommitMessages(ctx, message); err != nil {
-		return projector.Result{}, fmt.Errorf("commit Kafka offset after durable processing: %w", err)
+		return projector.Result{}, redactKafkaError(fmt.Errorf("commit Kafka offset after durable processing: %w", err), c.security)
 	}
 	return result, nil
 }
 
 func (c *Consumer) Close() error {
-	if c == nil || c.reader == nil {
+	if c == nil {
 		return nil
 	}
-	return c.reader.Close()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.reader == nil {
+		return nil
+	}
+	c.closed = true
+	return redactKafkaError(c.reader.Close(), c.security)
 }
