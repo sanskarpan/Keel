@@ -27,7 +27,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 
 ## K2 — Durable supplier onboarding
 
-- [ ] K2.1 Implement supplier invitations, validated upload flow and sandbox scan/extraction.
+- [ ] K2.1 Implement supplier invitations, validated upload flow and sandbox scan/extraction. Acceptance: single-use expiring tenant/case-scoped invitation; hashed supplier/session credentials; checksum/size/type verification; bounded PDF/DOCX/TXT quarantine; least-privilege RLS worker with lease fencing; real ClamAV/Tika contract tests on a no-egress network; scanner/extractor failures fail closed; local storage and provider/runtime limits are documented without claiming hosted readiness.
 - [ ] K2.2 Add case/evidence/policy/deadline model and durable workflow intents.
 - [ ] K2.3 Implement deterministic Temporal workflow IDs, retry-safe start and deduplicated signals.
 - [ ] K2.4 Add human approval/separation-of-duties checks and deadline race serialization.
