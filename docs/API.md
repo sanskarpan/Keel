@@ -1,6 +1,6 @@
 # HTTP and streaming contract
 
-OpenAPI and JSON Schema are implementation artifacts generated from this contract and reviewed in CI. Examples specify shape, not real identifiers/secrets.
+The canonical initial HTTP shape is [`contracts/openapi/openapi.yaml`](../contracts/openapi/openapi.yaml), validated in CI. It covers health/version and the first order vertical slice; later supplier, SaaS, retrieval and AI routes remain design scope until their implementation issues ship. The OpenAPI contract is not a claim that those handlers exist. Examples specify shape, not real identifiers/secrets.
 
 ## 1. Common rules
 
