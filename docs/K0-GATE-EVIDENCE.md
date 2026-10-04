@@ -1,6 +1,6 @@
 # K0 tenant/API isolation gate evidence
 
-**Decision:** Pending final contract CI on this PR. The evidence targets the local-synthetic order read profile and proves the database/API tenant boundary under real non-owner PostgreSQL roles; it does not enable production traffic or claim a production identity-provider integration.
+**Decision:** PASS for the local-synthetic order read profile; final PR-head contract CI run #63 passed. The evidence proves the database/API tenant boundary under real non-owner PostgreSQL roles; it does not enable production traffic or claim a production identity-provider integration.
 
 ## Two-tenant order API
 
