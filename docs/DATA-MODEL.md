@@ -18,7 +18,7 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `workflow_intents` | stable workflow ID, start/signal type, input hash, payload reference, status, attempts, lease_epoch | Metadata claim role; scoped dispatch |
 | `order_heads` | `(tenant,order)`, version, reconstructable command_snapshot, snapshot_hash | Lock before mutation |
 | `order_events` | `(tenant,order,version)` PK; unique `(tenant,event_id)`; type/schema, metadata, payload reference/hash | API append; update/delete denied |
-| `order_projections` | `(tenant,order)`, applied_version and status only | Projector writer; API reader; forced RLS |
+| `order_projections` | `(tenant,order)`, contiguous applied_version and status only | Projector writer; API reads watermark only; authoritative status/version stay in `order_heads`; forced RLS |
 | `event_outbox` | immutable event FK, aggregate/version, schema version, allowlisted JSON envelope | App transaction inserts; app and worker can select; delivery state is stored separately |
 | `outbox_delivery` | `(tenant,event_id)`, aggregate/version, pending/published/blocked state, attempt count, retry time, coarse error code | App inserts pending in command transaction; worker updates delivery outcome; corrupt head remains blocked for reviewed repair |
 | `outbox_publish_heads` | `(tenant,aggregate)`, next_version, claim_owner, lease_epoch, lease expiry | One fenced publisher claim per stream; advances only after broker acknowledgement |
@@ -50,7 +50,7 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `state_feed_counters` | `(tenant)` primary key and last committed feed sequence | App transaction locks/increments once per accepted aggregate event |
 | `state_updates` | `(tenant,sequence)` primary key plus event/aggregate/version/kind and allowlisted payload; no raw PII | App inserts/selects; worker selects and RLS limits deletes to rows older than 24h; per-tenant replay feed |
 | `order_heads` | `(tenant,order)` primary key; tenant-unique bytewise/case-sensitive external reference; current status/version, reconstructable snapshot and SHA-256 | API transaction; aggregate head is locked for each versioned mutation; FORCE RLS |
-| `order_events` | `(tenant,order,aggregate_version)` primary key; tenant-unique event ID, event payload and SHA-256 | API append-only; event append and head update commit atomically; FORCE RLS |
+| `order_events` | `(tenant,order,aggregate_version)` primary key; tenant-unique event ID, event payload and SHA-256 | API append-only; event append and head update commit atomically; bounded history pages verify canonical payload digest and contiguous versions; FORCE RLS |
 | `idempotency_requests` | `(tenant,normalized route,key digest)` unique; canonical request hash, protected response detail/error code, expiry | API transactional; response detail expires after 7d; worker deletes expired details in bounded tenant batches |
 | `idempotency_dedup` | `(tenant,normalized route,key digest)` unique; principal-binding digest, request hash, canonical operation reference and outcome state | Compact non-sensitive tombstone retained through consequential business-effect/audit lifetime; cannot be key-reused; FORCE RLS |
 | `audit_records` | tenant/id, actor/auth context, action/resource, before/after digests, request/trace ref | Append only; export immutable audit archive |
