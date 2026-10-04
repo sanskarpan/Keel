@@ -1,11 +1,11 @@
 # Implementation checklist and release gates
 
-All tasks are pending. Record owner, PR/commit, evidence path and decision revision beside completed items. A phase gate remains open until its independent evidence passes. Shared contract version: 1.1. K8 starts alongside K0/K1; phase numbering preserves the technical baseline, not chronological deferral. ROADMAP.md defines paid 1.0 through enterprise/discovery versions. Original topics are minimum scope.
+Tasks retain their individual status until acceptance evidence passes. Record owner, PR/commit, evidence path and decision revision beside completed items. A phase gate remains open until its independent evidence passes. Shared contract version: 1.1. K8 starts alongside K0/K1; phase numbering preserves the technical baseline, not chronological deferral. ROADMAP.md defines paid 1.0 through enterprise/discovery versions. Original topics are minimum scope.
 
 ## K0 — Foundation and boundaries
 
-- [ ] K0.1 Lock supported language/dependency versions, images and provider capabilities; close Q-01; close Q-03/Q-04/Q-09 or document each as disabled/not applicable in the selected pilot profile with owner, reason and evidence. Q-01 always blocks a pilot.
-- [ ] K0.2 Create Go role entry point, module boundaries, structured redacting logger and validated configuration.
+- [ ] K0.1 Lock supported language/dependency versions, images and provider capabilities; close Q-01; close Q-03/Q-04/Q-09 or document each as disabled/not applicable in the selected pilot profile with owner, reason and evidence. Q-01 always blocks a pilot. Local synthetic profile pinned in `docs/TECHNOLOGY-BASELINE.md`; hosted version/provider support and a named accountable owner remain open, so no pilot is enabled.
+- [x] K0.2 Create Go role entry point, module boundaries, structured redacting logger and validated configuration. Owner: Keel platform (named person unassigned); PR #98; evidence: `cmd/keel`, `internal/platform`, `go test -race ./...`, `go build ./...`; decision: role bootstrap only, unimplemented roles fail closed.
 - [ ] K0.3 Build local real-dependency Compose profile and deterministic two-tenant seeds.
 - [ ] K0.4 Define OpenAPI/event schemas and shared deployment recipe fixtures; contract CI checks.
 - [ ] K0.5 Create schema owner/app/worker/agent roles and FORCE RLS transaction wrapper.
