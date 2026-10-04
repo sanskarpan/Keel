@@ -19,7 +19,7 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `order_heads` | `(tenant,order)`, version, reconstructable command_snapshot, snapshot_hash | Lock before mutation |
 | `order_events` | `(tenant,order,version)` PK; unique `(tenant,event_id)`; type/schema, metadata, payload reference/hash | API append; update/delete denied |
 | `order_projections` | `(tenant,order)`, applied_version, user-facing fields | Consumer writer; API reader |
-| `outbox_events` | event FK, aggregate/version, schema, published status and retry metadata | Transactional creation; relay metadata writes |
+| `event_outbox` | immutable event FK, aggregate/version, schema version, allowlisted JSON envelope | App transaction inserts; app and worker can select; K1.4 adds separate relay claim/delivery state |
 | `publish_heads` | `(tenant,aggregate)`, next_version, claim_owner, lease_epoch, expires_at | One intended publisher per stream |
 | `event_inbox` | `(tenant,consumer,event_id)` unique; aggregate/version; received/applied/deferred state | Consumer transaction |
 | `deferred_events` | same logical key; expected_version, retry deadline and replay request | Consumer gap repair |
@@ -44,7 +44,8 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `delivery_attempts` | tenant/delivery/attempt unique; timing, response classification, redacted snippets | Append only |
 | `callback_inbox` | tenant/provider/provider_event_id unique, verified hash, receipt/apply state | Verified adapters |
 | `reconciliation_runs` | tenant/id, adapter, cursor/watermark, diff references, result | Audited operators |
-| `state_updates` | tenant/id plus aggregate/version/kind/ref; no raw PII | SSE replay feed |
+| `state_feed_counters` | `(tenant)` primary key and last committed feed sequence | App transaction locks/increments once per accepted aggregate event |
+| `state_updates` | `(tenant,sequence)` primary key plus event/aggregate/version/kind and allowlisted payload; no raw PII | App inserts/selects; worker selects and RLS limits deletes to rows older than 24h; per-tenant replay feed |
 | `order_heads` | `(tenant,order)` primary key; tenant-unique bytewise/case-sensitive external reference; current status/version, reconstructable snapshot and SHA-256 | API transaction; aggregate head is locked for each versioned mutation; FORCE RLS |
 | `order_events` | `(tenant,order,aggregate_version)` primary key; tenant-unique event ID, event payload and SHA-256 | API append-only; event append and head update commit atomically; FORCE RLS |
 | `idempotency_requests` | `(tenant,normalized route,key digest)` unique; canonical request hash, protected response detail/error code, expiry | API transactional; response detail expires after 7d; worker deletes expired details in bounded tenant batches |
@@ -59,7 +60,7 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 - `webhook_deliveries(state,next_attempt_at)` partial index; per-endpoint concurrency guard prevents retry storms.
 - `document_terms(tenant_id,visibility_class,corpus_version,term_id)` postings lookup; include tf/chunk ID. Statistics use tenant/visibility/version keys.
 - HNSW cosine index applies to one compatible embedding model family/version. Add tenant/model/visibility B-tree filters. Exact path for small/selective corpora. Observe actual query plans under skew; a global HNSW index is not a tenant-local index.
-- `state_updates(tenant_id,id)` provides replay. Cursor allocation is serialized through a small per-tenant feed-head lock so committed stream IDs do not regress; consumers treat gap-free delivery as conditional on retention and can resync. Do not use precommit BIGSERIAL allocation as proof of commit order.
+- `state_updates(tenant_id,sequence)` provides 24-hour replay. Cursor allocation updates a per-tenant feed-head row in the same transaction so committed stream IDs do not regress; this serializes accepted state changes within one tenant. A bounded worker prune is RLS-limited to rows older than 24 hours and never deletes/resets the cursor; readers compare the oldest retained cursor to detect when to resync. Do not use precommit BIGSERIAL allocation as proof of commit order.
 - Usage and audit indexes support tenant/time pagination; no unbounded multi-column metric cardinality.
 
 ## 4. Roles and RLS resolver

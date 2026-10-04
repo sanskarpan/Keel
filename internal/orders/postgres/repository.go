@@ -96,6 +96,9 @@ func (r *Repository) Create(ctx context.Context, tenant tenancy.TenantID, comman
 			commandErr = ErrNaturalReferenceConflict
 			return storeRejected(ctx, tx, tenant, createRoute, keyHash, requestHash, "natural_reference_conflict")
 		}
+		if err := appendCommandSideEffects(ctx, tx, event, snapshot); err != nil {
+			return err
+		}
 		if err := completeClaim(ctx, tx, tenant, createRoute, keyHash, snapshot.OrderID); err != nil {
 			return err
 		}
@@ -167,6 +170,9 @@ func (r *Repository) Submit(ctx context.Context, tenant tenancy.TenantID, orderI
 			return err
 		}
 		if err := insertEvent(ctx, tx, event); err != nil {
+			return err
+		}
+		if err := appendCommandSideEffects(ctx, tx, event, next); err != nil {
 			return err
 		}
 		if err := completeClaim(ctx, tx, tenant, submitRoute, keyHash, next.OrderID); err != nil {
@@ -274,6 +280,31 @@ func (r *Repository) PruneExpiredResponses(ctx context.Context, tenant tenancy.T
 		)
 		DELETE FROM keel_meta.idempotency_requests AS requests USING expired
 		WHERE requests.tenant_id=expired.tenant_id AND requests.route=expired.route AND requests.key_digest=expired.key_digest`, string(tenant), limit)
+		if err != nil {
+			return err
+		}
+		deleted, err = result.RowsAffected()
+		return err
+	})
+	return deleted, err
+}
+
+// PruneExpiredStateUpdates deletes a bounded batch older than the 24-hour state-feed retention.
+// RLS independently limits the worker role to the same age boundary and tenant.
+func (r *Repository) PruneExpiredStateUpdates(ctx context.Context, tenant tenancy.TenantID, limit int) (int64, error) {
+	if limit < 1 || limit > maxPruneBatch {
+		return 0, fmt.Errorf("prune limit must be in [1,%d]", maxPruneBatch)
+	}
+	var deleted int64
+	err := tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `WITH expired AS (
+			SELECT tenant_id,sequence FROM keel_meta.state_updates
+			WHERE tenant_id=$1 AND created_at <= statement_timestamp()-interval '24 hours'
+			ORDER BY created_at,sequence
+			LIMIT $2
+		)
+		DELETE FROM keel_meta.state_updates AS updates USING expired
+		WHERE updates.tenant_id=expired.tenant_id AND updates.sequence=expired.sequence`, string(tenant), limit)
 		if err != nil {
 			return err
 		}
@@ -417,6 +448,57 @@ func insertEvent(ctx context.Context, tx *sql.Tx, event orders.Event) error {
 		(tenant_id,order_id,aggregate_version,event_id,event_type,event_data,event_hash,occurred_at)
 		VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`, event.Metadata.TenantID, event.Metadata.OrderID, event.Version,
 		event.Metadata.EventID, string(event.Type), data, eventHash, event.Metadata.OccurredAt)
+	return err
+}
+
+// appendCommandSideEffects writes the privacy-safe relay envelope and tenant stream update in
+// the same transaction as the aggregate event, snapshot and idempotency result.
+func appendCommandSideEffects(ctx context.Context, tx *sql.Tx, event orders.Event, snapshot orders.Snapshot) error {
+	tenant := event.Metadata.TenantID
+	envelope := struct {
+		SchemaVersion    int              `json:"schema_version"`
+		EventID          string           `json:"event_id"`
+		TenantID         string           `json:"tenant_id"`
+		AggregateID      string           `json:"aggregate_id"`
+		AggregateVersion uint64           `json:"aggregate_version"`
+		EventType        orders.EventType `json:"event_type"`
+		OccurredAt       time.Time        `json:"occurred_at"`
+	}{1, event.Metadata.EventID, tenant, event.Metadata.OrderID, event.Version, event.Type, event.Metadata.OccurredAt}
+	envelopeJSON, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("encode safe outbox envelope: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO keel_meta.event_outbox
+		(tenant_id,event_id,aggregate_id,aggregate_version,event_type,schema_version,safe_envelope)
+		VALUES ($1,$2,$3,$4,$5,1,$6::jsonb)`, tenant, event.Metadata.EventID, event.Metadata.OrderID,
+		event.Version, string(event.Type), envelopeJSON)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.state_feed_counters (tenant_id,last_sequence)
+		VALUES ($1,0) ON CONFLICT (tenant_id) DO NOTHING`, tenant); err != nil {
+		return err
+	}
+	var sequence int64
+	if err := tx.QueryRowContext(ctx, `UPDATE keel_meta.state_feed_counters SET last_sequence=last_sequence+1,updated_at=clock_timestamp()
+		WHERE tenant_id=$1 RETURNING last_sequence`, tenant).Scan(&sequence); err != nil {
+		return err
+	}
+	payload := struct {
+		SchemaVersion    int           `json:"schema_version"`
+		EventID          string        `json:"event_id"`
+		AggregateID      string        `json:"aggregate_id"`
+		AggregateVersion uint64        `json:"aggregate_version"`
+		Status           orders.Status `json:"status"`
+	}{1, event.Metadata.EventID, event.Metadata.OrderID, event.Version, snapshot.Status}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode safe state update: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO keel_meta.state_updates
+		(tenant_id,sequence,event_id,aggregate_id,aggregate_version,update_kind,safe_payload)
+		VALUES ($1,$2,$3,$4,$5,'order.changed',$6::jsonb)`, tenant, sequence, event.Metadata.EventID,
+		event.Metadata.OrderID, event.Version, payloadJSON)
 	return err
 }
 
