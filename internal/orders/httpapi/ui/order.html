@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Order {{.OrderID}} · Keel</title>
+    <link rel="stylesheet" href="/app/orders/assets/order.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to order details</a>
+    <header class="topbar"><span class="brand">Keel</span><span>Orders</span></header>
+    <main id="main" class="page">
+      <nav aria-label="Breadcrumb"><span>Orders</span><span aria-hidden="true"> / </span><span aria-current="page">Order details</span></nav>
+      <section class="hero" aria-labelledby="order-title">
+        <div>
+          <p class="eyebrow">Order workspace</p>
+          <h1 id="order-title">{{.ExternalReference}}</h1>
+          <p class="identifier">Order ID <code>{{.OrderID}}</code></p>
+        </div>
+        <span class="status status-{{.Status}}">{{.Status}}</span>
+      </section>
+
+      <section class="authority" aria-labelledby="authority-title">
+        <div class="authority-mark" aria-hidden="true">✓</div>
+        <div>
+          <h2 id="authority-title">Current order status</h2>
+          <p><strong>{{.Status}}</strong> · authoritative command state at version {{.Version}}</p>
+          <p class="subtle">Commands use this state and version when checking whether an action is allowed.</p>
+        </div>
+      </section>
+
+      {{if .HasProjectionLag}}
+      <aside class="projection lag" aria-labelledby="projection-title">
+        <div>
+          <h2 id="projection-title">Activity projection is catching up</h2>
+          <p>History projection is at version {{.ProjectionWatermark}} of {{.Version}}. The command state above remains current.</p>
+        </div>
+        <span class="lag-count">{{.ProjectionLagVersions}} {{if eq .ProjectionLagVersions 1}}version{{else}}versions{{end}} behind</span>
+      </aside>
+      {{else}}
+      <aside class="projection current" aria-labelledby="projection-title">
+        <div>
+          <h2 id="projection-title">Activity projection is current</h2>
+          <p>History projection has applied through version {{.ProjectionWatermark}}.</p>
+        </div>
+        <span class="lag-count">Up to date</span>
+      </aside>
+      {{end}}
+
+      <div class="content-grid">
+        <section class="card summary" aria-labelledby="summary-title">
+          <div class="section-heading"><div><p class="eyebrow">Overview</p><h2 id="summary-title">Order summary</h2></div></div>
+          <dl>
+            <div><dt>Supplier</dt><dd><code>{{.SupplierID}}</code></dd></div>
+            <div><dt>Total</dt><dd>{{.Currency}} {{.AmountMinor}}</dd></div>
+            <div><dt>Command version</dt><dd>{{.Version}}</dd></div>
+            <div><dt>Last changed</dt><dd><time datetime="{{.UpdatedAt}}">{{.UpdatedAtLabel}}</time></dd></div>
+          </dl>
+          <h3 class="lines-title">Line items</h3>
+          <ul class="line-items">
+            {{range .LineItems}}<li><span>{{.Description}}</span><span>{{.Quantity}}</span></li>{{end}}
+          </ul>
+          <p class="subtle">Amounts are shown in the order currency’s minor units.</p>
+        </section>
+
+        <section class="card activity" aria-labelledby="activity-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Immutable order events</p><h2 id="activity-title">Activity history</h2></div>
+            <span class="page-count">{{len .Events}} events</span>
+          </div>
+          <p class="subtle">Newest events appear first. This timeline is a historical record; use the current order status above for command decisions.</p>
+          {{if .Events}}
+          <ol class="timeline" aria-label="Order event history">
+            {{range .Events}}
+            <li>
+              <span class="timeline-dot" aria-hidden="true"></span>
+              <div class="event-copy"><h3>{{.Title}}</h3><p>Version {{.Version}}</p></div>
+              <time datetime="{{.OccurredAt}}">{{.OccurredAtLabel}}</time>
+            </li>
+            {{end}}
+          </ol>
+          {{else}}
+          <p class="empty">No order activity is available.</p>
+          {{end}}
+          {{if .NextURL}}<a class="button secondary" href="{{.NextURL}}">Load older activity</a>{{end}}
+        </section>
+      </div>
+      <footer><span>Keel order workspace</span><span>Private to your organization</span></footer>
+    </main>
+  </body>
+</html>
