@@ -25,11 +25,11 @@ Public ingress, application workloads, extraction sandbox, database, event bus, 
 
 ## 3. Database agent boundary
 
-The model invokes `search_policies`, `get_supplier_summary`, `get_order_summary` and other reviewed typed tools. A query broker maps identity to a tenant-bound read-only pool. Parameters are bound; tool code chooses SQL. Connection `session_user` maps to exactly one tenant in a protected table, and RLS ignores caller-set tenant GUCs for those roles. Login roles cannot inherit application/migration roles or change session authorization.
+The model invokes reviewed typed tools such as `search_policies`, `get_supplier_summary` and `get_order_summary`; it never receives a DSN, database credential, raw SQL tool or arbitrary database session. A query broker maps the authenticated principal to a per-tenant read-only PostgreSQL login. A protected `session_user -> tenant_id` mapping and fixed-path `SECURITY DEFINER` function bind each agent login to one tenant; RLS ignores caller-set tenant GUCs for those logins. Agent logins inherit only the SELECT-only `keel_agent` capability role and cannot become app, worker or migration roles. Provisioning creates the login and protected mapping together; revocation removes both under a controlled operation.
 
 Read-only transaction mode is defense in depth, not the privilege boundary; a role may otherwise try to turn it off. Revoke INSERT/UPDATE/DELETE/TRUNCATE/CREATE and unsafe function execution. Use fixed search paths and qualified SECURITY DEFINER function names. Revoke PUBLIC schema-create privileges. Do not expose database introspection or unrestricted network/file functions through tools.
 
-The trusted application still uses a cross-tenant-capable app identity with transaction-local context. Its compromise has broader impact than a bound agent identity. Scope service roles, audit context changes, enforce network separation and offer a dedicated tenant database tier for customers requiring a stronger physical boundary.
+Trusted API and worker roles use `WithTenantTx` to set a transaction-local `keel.tenant_id` only after server-side authorization. PostgreSQL custom GUCs are caller-settable, so this protects against omitted tenant predicates and routine application mistakes; it does not make a compromised cross-tenant app/worker credential tenant-bound. Agent identities are separately bound by `session_user`. Scope service roles, audit context changes, enforce network separation, and offer a dedicated tenant database tier for customers requiring a stronger physical boundary.
 
 ## 4. PII handling and context retention
 

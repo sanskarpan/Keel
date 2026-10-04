@@ -20,6 +20,8 @@ Run real PostgreSQL/pgvector, Kafka and Redis containers plus Temporal test envi
 
 Temporal tests use time skipping to reach 72h and signals/worker restarts/versioned histories. At least one staging soak spans a real deadline and rollout; time skipping alone does not validate clock/network/operational behavior.
 
+K0.5 runs `make local-rls-test` against the local PostgreSQL container using non-owner credentials. It verifies the app role sees only its transaction-bound tenant, context does not leak through the connection pool, the probe table has `FORCE ROW LEVEL SECURITY`, an agent's protected login mapping overrides a forged GUC and wrapper tenant, unmapped role escalation is unavailable, and agent writes are denied. GitHub Actions repeats this against a pinned PostgreSQL/pgvector service before unit/static/race/build checks. These checks validate the role mechanism only; they do not close the K0 end-to-end API gate or replace RLS coverage on future product tables.
+
 ## 3. Isolation and adversarial suite
 
 Seed two tenants with identical external references, document titles/query terms and inference prompts. Attempt guessed IDs, cursor reuse, cache scope changes, stream subscriptions, signed URL reuse, callbacks, replay/context reads and role/GUC changes. Cover app role and tenant-bound agent role separately. Change permissions/document visibility after cache population and during a query.
