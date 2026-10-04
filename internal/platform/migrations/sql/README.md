@@ -8,5 +8,6 @@ row run in one PostgreSQL transaction while the runner holds the fixed session a
 
 Keep files compatible with transactional PostgreSQL execution. Online operations such as
 `CREATE INDEX CONCURRENTLY` require an explicit future runner extension and separate acceptance;
-they cannot be placed in a regular migration file. The first domain migration will ship alongside
-the first owning domain schema so Keel does not manufacture unused application tables here.
+they cannot be placed in a regular migration file. The order aggregate/idempotency schema is
+introduced by migration `0001_orders_and_idempotency`; add later product tables with the owning
+domain migration and its access, retention, and recovery contracts.

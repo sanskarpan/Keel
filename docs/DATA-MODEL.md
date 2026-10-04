@@ -45,8 +45,10 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `callback_inbox` | tenant/provider/provider_event_id unique, verified hash, receipt/apply state | Verified adapters |
 | `reconciliation_runs` | tenant/id, adapter, cursor/watermark, diff references, result | Audited operators |
 | `state_updates` | tenant/id plus aggregate/version/kind/ref; no raw PII | SSE replay feed |
-| `idempotency_requests` | tenant/route/key unique; principal class, request hash, operation/result reference, response detail expiry | API transactional; response detail may expire after 7d |
-| `idempotency_dedup` | tenant/route/key digest unique; principal binding, request hash, canonical operation reference, outcome state, retention class | Compact non-sensitive tombstone retained through consequential business-effect/audit lifetime; cannot be key-reused |
+| `order_heads` | `(tenant,order)` primary key; tenant-unique bytewise/case-sensitive external reference; current status/version, reconstructable snapshot and SHA-256 | API transaction; aggregate head is locked for each versioned mutation; FORCE RLS |
+| `order_events` | `(tenant,order,aggregate_version)` primary key; tenant-unique event ID, event payload and SHA-256 | API append-only; event append and head update commit atomically; FORCE RLS |
+| `idempotency_requests` | `(tenant,normalized route,key digest)` unique; canonical request hash, protected response detail/error code, expiry | API transactional; response detail expires after 7d; worker deletes expired details in bounded tenant batches |
+| `idempotency_dedup` | `(tenant,normalized route,key digest)` unique; principal-binding digest, request hash, canonical operation reference and outcome state | Compact non-sensitive tombstone retained through consequential business-effect/audit lifetime; cannot be key-reused; FORCE RLS |
 | `audit_records` | tenant/id, actor/auth context, action/resource, before/after digests, request/trace ref | Append only; export immutable audit archive |
 
 ## 3. Index plan

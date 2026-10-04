@@ -76,6 +76,20 @@ type SubmitOrder struct {
 	Evidence []EvidenceRef `json:"evidence"`
 }
 
+// CanonicalizeCreateOrder validates and normalizes an order command for stable hashing and storage.
+func CanonicalizeCreateOrder(command CreateOrder) (CreateOrder, error) {
+	return validateCreateOrder(command)
+}
+
+// CanonicalizeSubmitOrder validates evidence references and returns their deterministic digest.
+func CanonicalizeSubmitOrder(command SubmitOrder) (SubmitOrder, string, error) {
+	refs, digest, err := validateEvidence(command.Evidence)
+	if err != nil {
+		return SubmitOrder{}, "", err
+	}
+	return SubmitOrder{Evidence: refs}, digest, nil
+}
+
 type DecisionOutcome string
 
 const (

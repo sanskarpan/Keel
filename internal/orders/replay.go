@@ -34,7 +34,7 @@ func Submit(snapshot Snapshot, expectedVersion uint64, command SubmitOrder, meta
 	if err := checkCommandBase(snapshot, expectedVersion, meta, Draft); err != nil {
 		return Snapshot{}, Event{}, err
 	}
-	_, digest, err := validateEvidence(command.Evidence)
+	_, digest, err := CanonicalizeSubmitOrder(command)
 	if err != nil {
 		return Snapshot{}, Event{}, err
 	}
