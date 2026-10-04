@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -290,5 +294,217 @@ func TestPostgreSQLExpiredDetailRetainsDedupTombstone(t *testing.T) {
 	}
 	if details != 0 || tombstones != 1 {
 		t.Fatalf("expired registry state details=%d tombstones=%d, want 0 and 1", details, tombstones)
+	}
+}
+
+func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
+	appDB, tenant, repo := repositoryTestDB(t)
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	workerDSN := os.Getenv("KEEL_TEST_WORKER_DATABASE_URL")
+	if adminDSN == "" || workerDSN == "" {
+		t.Skip("set worker and test-admin database URLs for outbox/state-feed integration coverage")
+	}
+	admin := integrationDB(t, adminDSN, 2)
+	worker := integrationDB(t, workerDSN, 2)
+	ctx := context.Background()
+	principal := "principal:requester-1"
+	secretCanary := "ORDER-PII-CANARY-" + nextUUID()
+	command := testCreate(secretCanary)
+	command.LineItems[0].Description = "DESCRIPTION-CANARY-" + nextUUID()
+	key := "outbox-atomicity-key-0001"
+	created, err := repo.Create(ctx, tenant, command, testMetadata(string(tenant), nextUUID()), key, principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyHash, err := KeyDigest(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events, outboxRows, stateRows, resultRows int
+	err = admin.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM keel_meta.order_events WHERE tenant_id=$1 AND order_id=$2),
+		(SELECT count(*) FROM keel_meta.event_outbox WHERE tenant_id=$1 AND aggregate_id=$2),
+		(SELECT count(*) FROM keel_meta.state_updates WHERE tenant_id=$1 AND aggregate_id=$2),
+		(SELECT count(*) FROM keel_meta.idempotency_requests WHERE tenant_id=$1 AND route=$3 AND key_digest=$4)`,
+		string(tenant), created.Snapshot.OrderID, createRoute, keyHash).Scan(&events, &outboxRows, &stateRows, &resultRows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || outboxRows != 1 || stateRows != 1 || resultRows != 1 {
+		t.Fatalf("created command records event/outbox/state/result=%d/%d/%d/%d, want one each", events, outboxRows, stateRows, resultRows)
+	}
+	var envelopeRaw, stateRaw []byte
+	eventsInStream, err := repo.Events(ctx, tenant, created.Snapshot.OrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID := eventsInStream[0].Metadata.EventID
+	if err := admin.QueryRowContext(ctx, `SELECT safe_envelope FROM keel_meta.event_outbox WHERE tenant_id=$1 AND event_id=$2`, string(tenant), eventID).Scan(&envelopeRaw); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT safe_payload FROM keel_meta.state_updates WHERE tenant_id=$1 AND event_id=$2`, string(tenant), eventID).Scan(&stateRaw); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(envelopeRaw), secretCanary) || strings.Contains(string(envelopeRaw), command.LineItems[0].Description) || strings.Contains(string(stateRaw), secretCanary) || strings.Contains(string(stateRaw), command.LineItems[0].Description) {
+		t.Fatal("safe outbox/state-feed payload leaked private order fields")
+	}
+	var envelopeFields, stateFields map[string]json.RawMessage
+	if err := json.Unmarshal(envelopeRaw, &envelopeFields); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(stateRaw, &stateFields); err != nil {
+		t.Fatal(err)
+	}
+	requireJSONKeys(t, envelopeFields, "aggregate_id", "aggregate_version", "event_id", "event_type", "occurred_at", "schema_version", "tenant_id")
+	requireJSONKeys(t, stateFields, "aggregate_id", "aggregate_version", "event_id", "schema_version", "status")
+
+	workerTxErr := tenancy.WithTenantTx(ctx, worker, tenant, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
+		var visible, visibleUpdates int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.event_outbox WHERE tenant_id=$1`, string(tenant)).Scan(&visible); err != nil {
+			return err
+		}
+		if visible != 1 {
+			return fmt.Errorf("worker sees %d outbox records, want one", visible)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.state_updates WHERE tenant_id=$1`, string(tenant)).Scan(&visibleUpdates); err != nil {
+			return err
+		}
+		if visibleUpdates != 1 {
+			return fmt.Errorf("worker sees %d state updates, want one", visibleUpdates)
+		}
+		return nil
+	})
+	if workerTxErr != nil {
+		t.Fatalf("scoped worker cannot read safe outbox envelope: %v", workerTxErr)
+	}
+	statements := []string{
+		`UPDATE keel_meta.order_events SET event_data=event_data WHERE tenant_id=$1 AND event_id=$2`,
+		`DELETE FROM keel_meta.event_outbox WHERE tenant_id=$1 AND event_id=$2`,
+		`DELETE FROM keel_meta.state_updates WHERE tenant_id=$1 AND event_id=$2`,
+	}
+	for _, principalDB := range []*sql.DB{appDB, worker} {
+		for _, statement := range statements {
+			if _, err := principalDB.ExecContext(ctx, statement, string(tenant), eventID); err == nil {
+				t.Fatalf("runtime role unexpectedly changed append-only record with %q", statement)
+			}
+		}
+	}
+
+	meta := testMetadata(string(tenant), created.Snapshot.OrderID)
+	meta.ActorRef = principal
+	if _, err := repo.Submit(ctx, tenant, created.Snapshot.OrderID, 1, testSubmit(), meta, "outbox-submit-key-0001", principal); err != nil {
+		t.Fatal(err)
+	}
+	const concurrentOrders = 4
+	concurrentErrors := make([]error, concurrentOrders)
+	var wg sync.WaitGroup
+	for i := range concurrentOrders {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			orderCommand := testCreate("feed-concurrent-" + nextUUID())
+			concurrentErrors[i] = func() error {
+				_, err := repo.Create(ctx, tenant, orderCommand, testMetadata(string(tenant), nextUUID()), fmt.Sprintf("feed-concurrent-key-%04d", i), principal)
+				return err
+			}()
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range concurrentErrors {
+		if err != nil {
+			t.Fatalf("concurrent state-feed create %d: %v", i, err)
+		}
+	}
+	var counter int64
+	var stateSequence []int64
+	rows, err := admin.QueryContext(ctx, `SELECT sequence FROM keel_meta.state_updates WHERE tenant_id=$1 ORDER BY sequence`, string(tenant))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var sequence int64
+		if err := rows.Scan(&sequence); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		stateSequence = append(stateSequence, sequence)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT last_sequence FROM keel_meta.state_feed_counters WHERE tenant_id=$1`, string(tenant)).Scan(&counter); err != nil {
+		t.Fatal(err)
+	}
+	if len(stateSequence) != 2+concurrentOrders || counter != int64(2+concurrentOrders) {
+		t.Fatalf("tenant state-feed sequence=%v counter=%d, want %d consecutive records", stateSequence, counter, 2+concurrentOrders)
+	}
+	for i, sequence := range stateSequence {
+		if sequence != int64(i+1) {
+			t.Fatalf("tenant state-feed sequence=%v has a gap or reorder at position %d", stateSequence, i)
+		}
+	}
+}
+
+func TestPostgreSQLLateStateFeedFailureRollsBackCommandAndCanRetry(t *testing.T) {
+	_, tenant, repo := repositoryTestDB(t)
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("set KEEL_TEST_ADMIN_DATABASE_URL to verify rollback after the final transactional append")
+	}
+	admin := integrationDB(t, adminDSN, 2)
+	ctx := context.Background()
+	command := testCreate("late-feed-failure-" + nextUUID())
+	key := "late-feed-failure-key-0001"
+	orderID := nextUUID()
+	constraint := "state_updates_test_reject_all"
+	if _, err := admin.ExecContext(ctx, `ALTER TABLE keel_meta.state_updates ADD CONSTRAINT `+constraint+` CHECK (false) NOT VALID`); err != nil {
+		t.Fatalf("install scoped failure constraint: %v", err)
+	}
+	dropped := false
+	t.Cleanup(func() {
+		if !dropped {
+			_, _ = admin.ExecContext(context.Background(), `ALTER TABLE keel_meta.state_updates DROP CONSTRAINT IF EXISTS `+constraint)
+		}
+	})
+	if _, err := repo.Create(ctx, tenant, command, testMetadata(string(tenant), orderID), key, "principal:requester-1"); err == nil {
+		t.Fatal("state-feed insert failure unexpectedly committed the order")
+	}
+	if _, err := admin.ExecContext(ctx, `ALTER TABLE keel_meta.state_updates DROP CONSTRAINT `+constraint); err != nil {
+		t.Fatalf("remove scoped failure constraint: %v", err)
+	}
+	dropped = true
+	if _, err := repo.Load(ctx, tenant, orderID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("aggregate head survived failed state-feed append: %v", err)
+	}
+	created, err := repo.Create(ctx, tenant, command, testMetadata(string(tenant), nextUUID()), key, "principal:requester-1")
+	if err != nil {
+		t.Fatalf("same key could not retry after full transaction rollback: %v", err)
+	}
+	if created.Replayed || created.Snapshot.OrderID == orderID {
+		t.Fatalf("failed command left an idempotency result behind: %+v", created)
+	}
+	var events, outboxRows, feedRows int
+	if err := admin.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM keel_meta.order_events WHERE tenant_id=$1 AND order_id=$2),
+		(SELECT count(*) FROM keel_meta.event_outbox WHERE tenant_id=$1 AND aggregate_id=$2),
+		(SELECT count(*) FROM keel_meta.state_updates WHERE tenant_id=$1 AND aggregate_id=$2)`,
+		string(tenant), created.Snapshot.OrderID).Scan(&events, &outboxRows, &feedRows); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || outboxRows != 1 || feedRows != 1 {
+		t.Fatalf("retry created event/outbox/feed=%d/%d/%d, want exactly one each", events, outboxRows, feedRows)
+	}
+}
+
+func requireJSONKeys(t *testing.T, value map[string]json.RawMessage, want ...string) {
+	t.Helper()
+	got := make([]string, 0, len(value))
+	for key := range value {
+		got = append(got, key)
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("JSON keys=%v, want exactly %v", got, want)
 	}
 }
