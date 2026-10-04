@@ -116,13 +116,15 @@ func (h *Handler) getOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	version := view.Snapshot.Version
-	w.Header().Set("ETag", `"`+strconv.FormatUint(version, 10)+`"`)
+	watermark := view.ProjectionWatermark
+	w.Header().Set("ETag", `"`+strconv.FormatUint(version, 10)+`-`+strconv.FormatUint(watermark, 10)+`"`)
+	w.Header().Set("X-Order-Version", strconv.FormatUint(version, 10))
 	writeJSON(w, http.StatusOK, orderResponse{
 		OrderID: view.Snapshot.OrderID, Status: view.Snapshot.Status, Version: version,
 		ExternalReference: view.Snapshot.ExternalReference, SupplierID: view.Snapshot.SupplierID,
 		Currency: view.Snapshot.Currency, AmountMinor: view.Snapshot.AmountMinor,
 		LineItems:           append([]orders.LineItem(nil), view.Snapshot.LineItems...),
-		ProjectionWatermark: view.ProjectionWatermark, ProjectionLagVersions: version - view.ProjectionWatermark,
+		ProjectionWatermark: watermark, ProjectionLagVersions: version - watermark,
 		UpdatedAt: view.UpdatedAt,
 	})
 }
