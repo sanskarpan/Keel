@@ -725,7 +725,7 @@ func TestPostgreSQLRelayCrashAfterBrokerAcceptanceRedeliversSameEffect(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker, err := kafkarelay.New(brokers, topic)
+	broker, err := kafkarelay.NewLocalSyntheticBroker(brokers, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,7 +748,7 @@ func TestPostgreSQLRelayCrashAfterBrokerAcceptanceRedeliversSameEffect(t *testin
 		t.Fatalf("restart did not redeliver stable event identity: first=%+v second=%+v err=%v", first, second, err)
 	}
 	consumerProcessor := &targetDeliveryProcessor{RecordProcessor: processor, eventID: first.EventID}
-	consumer, err := kafkarelay.NewConsumer(brokers, topic, "keel-k17-relay-test", consumerProcessor)
+	consumer, err := kafkarelay.NewLocalSyntheticConsumer(brokers, topic, "keel-k17-relay-test", consumerProcessor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -910,7 +910,7 @@ func TestPostgreSQLPublisherWritesStableEventsToKafkaInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker, err := kafkarelay.New(brokers, topic)
+	broker, err := kafkarelay.NewLocalSyntheticBroker(brokers, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
