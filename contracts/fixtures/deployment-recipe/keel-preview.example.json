@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.1",
+  "product": "keel",
+  "source_sha": "7d23f73920982813bc56f5ec909a804ddbf492d3",
+  "images": {
+    "backend": "ghcr.io/example.invalid/keel/backend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "web": "ghcr.io/example.invalid/keel/web@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "migration_bundle": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "event_schema_bundle": "sha256:f079f01e8797465e6ab50426536902fb0683108bf09376b81f92b9ea466cfd18",
+  "configuration_schema": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "health_contract": "1",
+  "roles": ["api", "relay", "projector", "ai-executor", "temporal-worker", "webhook-worker", "billing-worker", "notification-worker"],
+  "dependencies": ["postgres", "pgvector", "kafka", "temporal", "redis", "s3", "oidc"],
+  "test_profiles": ["smoke", "isolation", "replay", "load", "chaos"],
+  "resource_profile": "preview-small",
+  "signature": "https://attestations.example.invalid/keel/example"
+}
