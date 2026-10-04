@@ -51,15 +51,23 @@ jobs:
           pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
           -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1
           -f /workspace/deploy/compose/init/20-keel-tenant-roles.sql
+      - name: Apply embedded PostgreSQL migrations
+        env:
+          KEEL_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
+        run: GOTOOLCHAIN=local go run ./cmd/keel migrate
       - name: Validate contracts, tests, and static analysis
         env:
           KEEL_TEST_DATABASE_URL: postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_WORKER_DATABASE_URL: postgres://keel_local_worker:keel-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_ADMIN_DATABASE_URL: postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_AGENT_PASSWORD: keel-agent-local-only
           KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
         run: make check
       - name: Race-check packages
         env:
           KEEL_TEST_DATABASE_URL: postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_WORKER_DATABASE_URL: postgres://keel_local_worker:keel-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_ADMIN_DATABASE_URL: postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_AGENT_PASSWORD: keel-agent-local-only
           KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
         run: GOTOOLCHAIN=local go test -race ./...
