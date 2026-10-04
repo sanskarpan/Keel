@@ -13,6 +13,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "migrate" {
+		if err := runMigrations(); err != nil {
+			logging.NewJSON(os.Stderr, slog.LevelError).Error("Keel migrations failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		os.Exit(1)
 	}
