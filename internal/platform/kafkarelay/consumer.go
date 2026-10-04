@@ -15,8 +15,7 @@ import (
 )
 
 var (
-	groupIDPattern    = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
-	orderTopicPattern = regexp.MustCompile(`^keel\.[a-z0-9-]+\.orders\.v1$`)
+	groupIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 )
 
 // GroupReader is the manual-commit subset of kafka.Reader. Keeping it narrow makes the
@@ -44,8 +43,8 @@ func NewConsumer(brokers []string, topic, groupID string, processor RecordProces
 	if len(brokers) == 0 {
 		return nil, errors.New("at least one Kafka broker address is required")
 	}
-	if !orderTopicPattern.MatchString(topic) {
-		return nil, errors.New("Kafka topic name is invalid")
+	if !validOrderTopic(topic) {
+		return nil, errors.New("Kafka order topic name is invalid")
 	}
 	if !groupIDPattern.MatchString(groupID) {
 		return nil, errors.New("Kafka consumer group ID is invalid")
