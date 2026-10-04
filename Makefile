@@ -1,4 +1,4 @@
-.PHONY: test vet fmt check contract local-up local-down local-health local-seed local-roles local-rls-test
+.PHONY: test vet fmt check contract local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate
 
 COMPOSE_FILE := deploy/compose/compose.yaml
 
@@ -45,3 +45,23 @@ local-rls-test: local-up local-roles
 	  KEEL_TEST_DATABASE_URL='postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	  KEEL_TEST_AGENT_PASSWORD='keel-agent-local-only' \
 	  /tmp/keel-tenancy.test -test.run TestPostgreSQLTenantIsolation -test.count=1
+
+local-migration-test: local-up local-roles
+	@set -eu; \
+	test_bin=$$(mktemp /tmp/keel-migrations-test.XXXXXX); \
+	trap 'rm -f "$$test_bin"; docker compose -f $(COMPOSE_FILE) exec -T postgres rm -f /tmp/keel-migrations.test >/dev/null 2>&1 || true' EXIT; \
+	GOTOOLCHAIN=local go test -c -o "$$test_bin" ./internal/platform/migrations; \
+	docker cp "$$test_bin" $$(docker compose -f $(COMPOSE_FILE) ps -q postgres):/tmp/keel-migrations.test; \
+	docker compose -f $(COMPOSE_FILE) exec -T postgres env \
+	  KEEL_TEST_MIGRATION_DATABASE_URL='postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
+	  /tmp/keel-migrations.test -test.run TestPostgreSQL -test.count=1
+
+local-migrate: local-up local-roles
+	@set -eu; \
+	app_bin=$$(mktemp /tmp/keel-migrate.XXXXXX); \
+	trap 'rm -f "$$app_bin"; docker compose -f $(COMPOSE_FILE) exec -T postgres rm -f /tmp/keel-migrate >/dev/null 2>&1 || true' EXIT; \
+	GOTOOLCHAIN=local go build -o "$$app_bin" ./cmd/keel; \
+	docker cp "$$app_bin" $$(docker compose -f $(COMPOSE_FILE) ps -q postgres):/tmp/keel-migrate; \
+	docker compose -f $(COMPOSE_FILE) exec -T postgres env \
+	  KEEL_MIGRATION_DATABASE_URL='postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
+	  /tmp/keel-migrate migrate
