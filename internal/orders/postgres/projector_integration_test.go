@@ -237,7 +237,11 @@ func TestPostgreSQLProjectorBlocksCorruptCanonicalSource(t *testing.T) {
 	}
 }
 
-var errOffsetCommitLost = errors.New("injected Kafka offset commit acknowledgement loss")
+var (
+	errOffsetCommitNotApplied = errors.New("injected Kafka offset commit failure before acceptance")
+	errOffsetCommitAckLost    = errors.New("injected lost acknowledgement after Kafka accepted offset commit")
+	k17ConsumerTopic          = "keel.k17-consumer.orders.v1"
+)
 
 type failTargetCommitReader struct {
 	kafkarelay.GroupReader
@@ -250,7 +254,28 @@ func (r *failTargetCommitReader) CommitMessages(ctx context.Context, messages ..
 		for _, header := range message.Headers {
 			if header.Key == "event_id" && string(header.Value) == r.eventID && !r.failed {
 				r.failed = true
-				return errOffsetCommitLost
+				return errOffsetCommitNotApplied
+			}
+		}
+	}
+	return r.GroupReader.CommitMessages(ctx, messages...)
+}
+
+type loseTargetCommitAckReader struct {
+	kafkarelay.GroupReader
+	eventID string
+	lost    bool
+}
+
+func (r *loseTargetCommitAckReader) CommitMessages(ctx context.Context, messages ...kafka.Message) error {
+	for _, message := range messages {
+		for _, header := range message.Headers {
+			if header.Key == "event_id" && string(header.Value) == r.eventID && !r.lost {
+				if err := r.GroupReader.CommitMessages(ctx, messages...); err != nil {
+					return err
+				}
+				r.lost = true
+				return errOffsetCommitAckLost
 			}
 		}
 	}
@@ -266,7 +291,7 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	if projectorDSN == "" || adminDSN == "" || workerDSN == "" || strings.TrimSpace(brokers[0]) == "" {
 		t.Skip("set projector, worker, test-admin, and Kafka test endpoints for consumer rebalance coverage")
 	}
-	const topic = "keel.test.orders.v1"
+	topic := k17ConsumerTopic
 	projectorDB := integrationDB(t, projectorDSN, 3)
 	adminDB := integrationDB(t, adminDSN, 3)
 	workerDB := integrationDB(t, workerDSN, 3)
@@ -310,19 +335,23 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	if err != nil || !firstPublish.Published || firstPublish.EventID != events[0].Metadata.EventID {
 		t.Fatalf("first order event publish=%+v err=%v", firstPublish, err)
 	}
-	groupID := "keel-k17-" + strings.ReplaceAll(nextUUID(), "-", "")
+	groupID := "keel-k17-consumer-test"
 	reader1 := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: topic, GroupID: groupID, MinBytes: 1, MaxBytes: 1 << 20, MaxWait: 100 * time.Millisecond, CommitInterval: 0, StartOffset: kafka.FirstOffset})
 	consumer1, err := kafkarelay.NewConsumerWithReader(&failTargetCommitReader{GroupReader: reader1, eventID: events[0].Metadata.EventID}, processor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	commitLost := false
-	for !commitLost {
-		if _, err := consumer1.RunOnce(ctx); errors.Is(err, errOffsetCommitLost) {
-			commitLost = true
+	commitNotApplied := false
+	for attempts := 0; attempts < 100; attempts++ {
+		if _, err := consumer1.RunOnce(ctx); errors.Is(err, errOffsetCommitNotApplied) {
+			commitNotApplied = true
+			break
 		} else if err != nil {
-			t.Fatalf("consume before commit-loss boundary: %v", err)
+			t.Fatalf("consume before unaccepted commit boundary: %v", err)
 		}
+	}
+	if !commitNotApplied {
+		t.Fatal("consumer did not reach the target event before its rejected offset commit")
 	}
 	if err := consumer1.Close(); err != nil {
 		t.Fatal(err)
@@ -331,7 +360,8 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 
 	// Closing the first group member simulates process loss/rebalance. Since its DB effect
 	// committed but the Kafka offset did not, the new member must receive and deduplicate v1.
-	consumer2, err := kafkarelay.NewConsumer(brokers, topic, groupID, processor)
+	reader2 := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: topic, GroupID: groupID, MinBytes: 1, MaxBytes: 1 << 20, MaxWait: 100 * time.Millisecond, CommitInterval: 0, StartOffset: kafka.FirstOffset})
+	consumer2, err := kafkarelay.NewConsumerWithReader(&loseTargetCommitAckReader{GroupReader: reader2, eventID: events[1].Metadata.EventID}, processor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,31 +375,39 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 		_ = consumer2.Close()
 		t.Fatalf("second order event publish=%+v err=%v", secondPublish, err)
 	}
-	var versionTwoDisposition projector.Disposition
+	commitAcceptedAckLost := false
 	for attempts := 0; attempts < 100; attempts++ {
-		result, err = consumer2.RunOnce(ctx)
-		if err != nil {
-			_ = consumer2.Close()
-			t.Fatalf("version two after rebalance: %v", err)
-		}
-		versionTwo, status := readProjectionVersion(t, adminDB, string(tenant), created.Snapshot.OrderID)
-		if versionTwo == 2 {
-			if status != string(orders.Submitted) {
-				_ = consumer2.Close()
-				t.Fatalf("version two status=%q, want submitted", status)
-			}
-			versionTwoDisposition = result.Disposition
+		if _, err := consumer2.RunOnce(ctx); errors.Is(err, errOffsetCommitAckLost) {
+			commitAcceptedAckLost = true
 			break
+		} else if err != nil {
+			_ = consumer2.Close()
+			t.Fatalf("consume before accepted offset commit acknowledgement loss: %v", err)
 		}
 	}
-	if versionTwoDisposition != projector.Applied {
+	if !commitAcceptedAckLost {
 		_ = consumer2.Close()
-		t.Fatalf("version two did not apply after rebalance; disposition=%q", versionTwoDisposition)
+		t.Fatal("consumer did not reach version two before its accepted offset commit acknowledgement was lost")
 	}
 	if err := consumer2.Close(); err != nil {
 		t.Fatal(err)
 	}
 	assertProjectionVersion(t, adminDB, string(tenant), created.Snapshot.OrderID, 2, string(orders.Submitted))
+	// This time Kafka did commit the offset; only the response was lost. Restart must continue
+	// after v2 without reapplying it, which is the other valid outcome of an ambiguous commit.
+	consumer3, err := kafkarelay.NewConsumer(brokers, topic, groupID, processor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noRedeliveryCtx, stopWaiting := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer stopWaiting()
+	if _, err := consumer3.RunOnce(noRedeliveryCtx); !errors.Is(err, context.DeadlineExceeded) {
+		_ = consumer3.Close()
+		t.Fatalf("accepted offset was redelivered after acknowledgement loss: %v", err)
+	}
+	if err := consumer3.Close(); err != nil {
+		t.Fatal(err)
+	}
 	var inboxCount int
 	if err := adminDB.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.event_inbox WHERE tenant_id=$1 AND consumer_id=$2 AND aggregate_id=$3 AND apply_state='applied'`, string(tenant), projector.DefaultConsumerID, created.Snapshot.OrderID).Scan(&inboxCount); err != nil {
 		t.Fatal(err)
