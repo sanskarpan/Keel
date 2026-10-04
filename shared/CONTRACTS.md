@@ -33,7 +33,7 @@ Keel receives trusted, platform-injected `KEEL_ENVIRONMENT_ID` and `KEEL_CONFIG_
 }
 ```
 
-Digest strings above are explanatory placeholders. Implemented fixtures use valid digests. Recipe signatures/provenance bind the artifact to the source SHA and trusted build workflow. An untrusted artifact may run only in preview after scanning and sandbox checks; a signature demonstrates provenance, not that its code is safe.
+The canonical Keel-owned v1.1 recipe schema and conformance fixtures are [`../contracts/deployment-recipe.schema.json`](../contracts/deployment-recipe.schema.json) and [`../contracts/fixtures/deployment-recipe/`](../contracts/fixtures/deployment-recipe/). Example references are deliberately under the reserved `.invalid` domain and are not deployable artifacts. Before Ghostlight consumes a new contract revision, its implementation must validate the same schema/fixtures in its own CI. Signature/provenance bind the real artifact to source and trusted build; a schema-valid recipe alone is not an attestation. Recipe signatures/provenance bind the artifact to the source SHA and trusted build workflow. An untrusted artifact may run only in preview after scanning and sandbox checks; a signature demonstrates provenance, not that its code is safe.
 
 Recipes select platform-owned modules and bounded resource profiles. They cannot introduce arbitrary Terraform providers/modules, Helm hooks, cluster roles, host mounts, privileged containers, external destinations or cloud IAM policies. Optional capabilities require a reviewed contract revision.
 
