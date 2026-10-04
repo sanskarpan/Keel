@@ -45,7 +45,7 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `callback_inbox` | tenant/provider/provider_event_id unique, verified hash, receipt/apply state | Verified adapters |
 | `reconciliation_runs` | tenant/id, adapter, cursor/watermark, diff references, result | Audited operators |
 | `state_feed_counters` | `(tenant)` primary key and last committed feed sequence | App transaction locks/increments once per accepted aggregate event |
-| `state_updates` | `(tenant,sequence)` primary key plus event/aggregate/version/kind and allowlisted payload; no raw PII | App transaction inserts; app and worker can select; append-only replay feed |
+| `state_updates` | `(tenant,sequence)` primary key plus event/aggregate/version/kind and allowlisted payload; no raw PII | App inserts/selects; worker selects and RLS limits deletes to rows older than 24h; per-tenant replay feed |
 | `order_heads` | `(tenant,order)` primary key; tenant-unique bytewise/case-sensitive external reference; current status/version, reconstructable snapshot and SHA-256 | API transaction; aggregate head is locked for each versioned mutation; FORCE RLS |
 | `order_events` | `(tenant,order,aggregate_version)` primary key; tenant-unique event ID, event payload and SHA-256 | API append-only; event append and head update commit atomically; FORCE RLS |
 | `idempotency_requests` | `(tenant,normalized route,key digest)` unique; canonical request hash, protected response detail/error code, expiry | API transactional; response detail expires after 7d; worker deletes expired details in bounded tenant batches |
@@ -60,7 +60,7 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 - `webhook_deliveries(state,next_attempt_at)` partial index; per-endpoint concurrency guard prevents retry storms.
 - `document_terms(tenant_id,visibility_class,corpus_version,term_id)` postings lookup; include tf/chunk ID. Statistics use tenant/visibility/version keys.
 - HNSW cosine index applies to one compatible embedding model family/version. Add tenant/model/visibility B-tree filters. Exact path for small/selective corpora. Observe actual query plans under skew; a global HNSW index is not a tenant-local index.
-- `state_updates(tenant_id,sequence)` provides replay. Cursor allocation updates a per-tenant feed-head row in the same transaction so committed stream IDs do not regress; this serializes accepted state changes within one tenant. Consumers treat gap-free delivery as conditional on retention and can resync. Do not use precommit BIGSERIAL allocation as proof of commit order.
+- `state_updates(tenant_id,sequence)` provides 24-hour replay. Cursor allocation updates a per-tenant feed-head row in the same transaction so committed stream IDs do not regress; this serializes accepted state changes within one tenant. A bounded worker prune is RLS-limited to rows older than 24 hours and never deletes/resets the cursor; readers compare the oldest retained cursor to detect when to resync. Do not use precommit BIGSERIAL allocation as proof of commit order.
 - Usage and audit indexes support tenant/time pagination; no unbounded multi-column metric cardinality.
 
 ## 4. Roles and RLS resolver
