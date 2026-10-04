@@ -20,6 +20,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/sanskarpan/keel/internal/orders"
 	"github.com/sanskarpan/keel/internal/orders/outbox"
+	"github.com/sanskarpan/keel/internal/orders/projector"
 	"github.com/sanskarpan/keel/internal/platform/kafkarelay"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 	kafka "github.com/segmentio/kafka-go"
@@ -650,6 +651,84 @@ type recordingBroker struct {
 func (b *recordingBroker) Publish(_ context.Context, message outbox.Message) error {
 	b.messages = append(b.messages, message)
 	return b.err
+}
+
+type failFirstAcknowledgeStore struct {
+	outbox.Store
+	fail bool
+}
+
+func (s *failFirstAcknowledgeStore) Acknowledge(ctx context.Context, claim outbox.Claim) error {
+	if s.fail {
+		s.fail = false
+		return errors.New("simulated relay process loss after broker acceptance")
+	}
+	return s.Store.Acknowledge(ctx, claim)
+}
+
+func TestPostgreSQLRelayCrashAfterBrokerAcceptanceRedeliversSameEffect(t *testing.T) {
+	_, tenant, appRepo := repositoryTestDB(t)
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	workerDSN := os.Getenv("KEEL_TEST_WORKER_DATABASE_URL")
+	projectorDSN := os.Getenv("KEEL_TEST_PROJECTOR_DATABASE_URL")
+	if adminDSN == "" || workerDSN == "" || projectorDSN == "" {
+		t.Skip("set worker, projector, and test-admin database URLs for relay crash coverage")
+	}
+	adminDB := integrationDB(t, adminDSN, 2)
+	workerDB := integrationDB(t, workerDSN, 2)
+	projectorDB := integrationDB(t, projectorDSN, 2)
+	workerRepo, err := NewRepository(workerDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectorRepo, err := NewRepository(projectorDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor, err := projector.New(projectorRepo, projector.DefaultConsumerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	created, err := appRepo.Create(ctx, tenant, testCreate("relay-crash-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "relay-crash-create-"+nextUUID(), "principal:requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := &recordingBroker{}
+	store := &failFirstAcknowledgeStore{Store: workerRepo, fail: true}
+	publisher, err := outbox.NewPublisher(store, broker, outbox.Config{LeaseDuration: 5 * time.Second, PublishTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := publisher.RunOnce(ctx, string(tenant), "relay-before-crash")
+	if err == nil || !first.Claimed || first.Published || len(broker.messages) != 1 {
+		t.Fatalf("crash after accepted broker write: result=%+v broker_messages=%d err=%v", first, len(broker.messages), err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.outbox_publish_heads SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND aggregate_id=$2`, string(tenant), created.Snapshot.OrderID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := publisher.RunOnce(ctx, string(tenant), "relay-after-restart")
+	if err != nil || !second.Published || second.EventID != first.EventID || len(broker.messages) != 2 || broker.messages[0].EventID != broker.messages[1].EventID {
+		t.Fatalf("restart did not redeliver stable event identity: first=%+v second=%+v messages=%+v err=%v", first, second, broker.messages, err)
+	}
+	for i, message := range broker.messages {
+		result, err := processor.Process(ctx, string(tenant), projectionRecord(t, message.Payload, time.Now().UnixNano()+int64(i)))
+		want := projector.Applied
+		if i == 1 {
+			want = projector.Duplicate
+		}
+		if err != nil || result.Disposition != want {
+			t.Fatalf("projector delivery attempt %d result=%+v err=%v, want %s", i+1, result, err, want)
+		}
+	}
+	assertProjectionVersion(t, adminDB, string(tenant), created.Snapshot.OrderID, 1, string(orders.Draft))
+	var effects int
+	if err := adminDB.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.event_inbox WHERE tenant_id=$1 AND consumer_id=$2 AND aggregate_id=$3 AND apply_state='applied'`, string(tenant), projector.DefaultConsumerID, created.Snapshot.OrderID).Scan(&effects); err != nil {
+		t.Fatal(err)
+	}
+	if effects != 1 {
+		t.Fatalf("duplicate broker delivery produced %d logical projection effects, want one", effects)
+	}
 }
 
 func TestPostgreSQLPublisherPersistsRetryAndReusesStableEventID(t *testing.T) {
