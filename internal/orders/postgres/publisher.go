@@ -261,9 +261,9 @@ func (r *Repository) RecordFailure(ctx context.Context, claim outbox.Claim, code
 			return outbox.ErrLeaseLost
 		}
 		result, err = tx.ExecContext(ctx, `UPDATE keel_meta.outbox_delivery
-			SET attempt_count=attempt_count+1,next_attempt_at=clock_timestamp()+$1::interval,last_error_code=$2,updated_at=clock_timestamp()
+			SET attempt_count=attempt_count+1,next_attempt_at=clock_timestamp()+$1::double precision * interval '1 second',last_error_code=$2,updated_at=clock_timestamp()
 			WHERE tenant_id=$3 AND event_id=$4 AND aggregate_id=$5 AND aggregate_version=$6 AND delivery_state='pending'`,
-			delay.String(), code, string(tenant), claim.EventID, claim.AggregateID, claim.Version)
+			delay.Seconds(), code, string(tenant), claim.EventID, claim.AggregateID, claim.Version)
 		if err != nil {
 			return err
 		}
