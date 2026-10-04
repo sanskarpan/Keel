@@ -2,7 +2,7 @@
 
 AI-assisted supplier onboarding and purchase-order orchestration with tenant-isolated retrieval, durable approvals and auditable external effects.
 
-This is a design package for a new production-oriented product. Nothing in this package claims that implementation or load qualification has already passed.
+This repository combines the reviewed product/system design with its early platform implementation. The K0 foundation now includes real dependency fixtures, contract checks, tenant-role/RLS infrastructure, migration tooling and a signed release workflow. Product features, hosted provider compatibility, production qualification and load evidence remain incomplete; see `docs/CHECKLIST.md` for exact status.
 
 ## Document map
 
@@ -23,6 +23,7 @@ This is a design package for a new production-oriented product. Nothing in this 
 | [CAPACITY-AND-COST.md](docs/CAPACITY-AND-COST.md) | Initial scale envelope, budgets, capacity equations and benchmark workload |
 | [SRE.md](docs/SRE.md) | Deployment, SLOs, telemetry, backup, disaster recovery and lifecycle |
 | [RUNBOOKS.md](docs/RUNBOOKS.md) | Operator procedures for common failures |
+| [RELEASES.md](docs/RELEASES.md) | Signed release/SBOM verification and migration rollout |
 | [TESTING.md](docs/TESTING.md) | Correctness, security, recovery and load qualification |
 | [QUALITY-REVIEW.md](docs/QUALITY-REVIEW.md) | Independent audit findings, dispositions and verification links |
 | [CHECKLIST.md](docs/CHECKLIST.md) | Dependency-ordered implementation tasks and release gates |
@@ -59,4 +60,4 @@ Begin with one vertical slice: authenticate into a tenant, submit a purchase req
 
 The backend remains one Go module with separate process roles and bounded domain packages. Domain packages own their invariants; platform adapters assemble them, and one domain must not write another domain's tables. See [`internal/README.md`](internal/README.md) for current boundaries and dependency direction.
 
-The pinned toolchain is Go 1.27.1. Run `make check` to execute unit tests and `go vet`. The role dispatcher intentionally fails closed until a role implementation is registered; configuration validation alone does not imply that an API or worker is serving traffic.
+The pinned toolchain is Go 1.27.1. Run `make check` for unit/integration tests and `go vet`; use `make local-migration-test` for forced real-PostgreSQL locking/checksum/rollback tests, and `make local-migrate` to invoke the embedded migration bundle with the dedicated synthetic migrator role. The management HTTP handler provides liveness/readiness, build identity and bounded-cardinality metrics for runtime wiring. The role dispatcher intentionally fails closed until a role implementation is registered; configuration validation alone does not imply that an API or worker is serving traffic. Tagged releases currently build only Linux/amd64; verify the release checksum and GitHub attestations before use.
