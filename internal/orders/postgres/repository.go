@@ -289,6 +289,31 @@ func (r *Repository) PruneExpiredResponses(ctx context.Context, tenant tenancy.T
 	return deleted, err
 }
 
+// PruneExpiredStateUpdates deletes a bounded batch older than the 24-hour state-feed retention.
+// RLS independently limits the worker role to the same age boundary and tenant.
+func (r *Repository) PruneExpiredStateUpdates(ctx context.Context, tenant tenancy.TenantID, limit int) (int64, error) {
+	if limit < 1 || limit > maxPruneBatch {
+		return 0, fmt.Errorf("prune limit must be in [1,%d]", maxPruneBatch)
+	}
+	var deleted int64
+	err := tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `WITH expired AS (
+			SELECT tenant_id,sequence FROM keel_meta.state_updates
+			WHERE tenant_id=$1 AND created_at <= statement_timestamp()-interval '24 hours'
+			ORDER BY created_at,sequence
+			LIMIT $2
+		)
+		DELETE FROM keel_meta.state_updates AS updates USING expired
+		WHERE updates.tenant_id=expired.tenant_id AND updates.sequence=expired.sequence`, string(tenant), limit)
+		if err != nil {
+			return err
+		}
+		deleted, err = result.RowsAffected()
+		return err
+	})
+	return deleted, err
+}
+
 func validateScope(tenant tenancy.TenantID, metadata orders.EventMetadata, key, principal string) error {
 	if tenant == "" || metadata.TenantID != string(tenant) {
 		return fmt.Errorf("%w: authenticated tenant and command metadata must match", orders.ErrInvalidCommand)
