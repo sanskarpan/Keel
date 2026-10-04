@@ -35,7 +35,7 @@ func run() error {
 		"listen_address", cfg.ListenAddress,
 	)
 	if err := runtime.Dispatch(ctx, cfg.Role, runtime.Registry{}); err != nil {
-		logger.Error("Keel runtime role is not available yet", "role", cfg.Role, "error", err)
+		logger.Error("Keel runtime role is not available yet", "role", cfg.Role, "error_code", "role_not_registered")
 		return err
 	}
 	return nil
