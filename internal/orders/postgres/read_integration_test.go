@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -105,5 +106,76 @@ func TestPostgreSQLAuthoritativeReadWatermarkAndBoundedHistory(t *testing.T) {
 	}
 	if _, err := appRepo.PageEvents(ctx, tenant, created.Snapshot.OrderID, 0, 1); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("corrupt history page error=%v, want corrupt state", err)
+	}
+}
+
+func TestPostgreSQLConcurrentCommandAndProjectorReadsShareOneSnapshot(t *testing.T) {
+	appDB, tenant, appRepo := repositoryTestDB(t)
+	projectorDSN := os.Getenv("KEEL_TEST_PROJECTOR_DATABASE_URL")
+	if projectorDSN == "" {
+		t.Skip("set projector database URL for concurrent command/projector coverage")
+	}
+	projectorDB := integrationDB(t, projectorDSN, 3)
+	projectorRepo, err := NewRepository(projectorDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor, err := projector.New(projectorRepo, projector.DefaultConsumerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	created, err := appRepo.Create(ctx, tenant, testCreate("read-race-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "read-race-create-"+nextUUID(), "principal:requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope []byte
+	if err := tenancy.WithTenantTx(ctx, appDB, tenant, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT safe_envelope FROM keel_meta.event_outbox WHERE tenant_id=$1 AND aggregate_id=$2 AND aggregate_version=1`, string(tenant), created.Snapshot.OrderID).Scan(&envelope)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	ready := make(chan struct{}, 2)
+	results := make(chan error, 2)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		ready <- struct{}{}
+		<-start
+		_, err := appRepo.Submit(ctx, tenant, created.Snapshot.OrderID, 1, testSubmit(), testMetadata(string(tenant), created.Snapshot.OrderID), "read-race-submit-"+nextUUID(), "principal:requester-1")
+		results <- err
+	}()
+	go func() {
+		defer workers.Done()
+		ready <- struct{}{}
+		<-start
+		_, err := processor.Process(ctx, string(tenant), projectionRecord(t, envelope, time.Now().UnixNano()))
+		results <- err
+	}()
+	<-ready
+	<-ready
+	close(start)
+
+	for i := 0; i < 40; i++ {
+		view, page, err := appRepo.ReadOrderWithHistory(ctx, tenant, created.Snapshot.OrderID, 0, 100)
+		if err != nil {
+			t.Fatalf("concurrent authoritative/history read %d: %v", i, err)
+		}
+		if view.Snapshot.Version < 1 || view.Snapshot.Version > 2 || view.ProjectionWatermark > 1 || view.ProjectionWatermark > view.Snapshot.Version || uint64(len(page.Items)) != view.Snapshot.Version || len(page.Items) == 0 || page.Items[0].Version != view.Snapshot.Version || page.HasMore {
+			t.Fatalf("read mixed command/projector snapshot: view=%+v page=%+v", view, page)
+		}
+		if view.Snapshot.Version == 1 && view.Snapshot.Status != orders.Draft || view.Snapshot.Version == 2 && view.Snapshot.Status != orders.Submitted {
+			t.Fatalf("command snapshot version/status mismatch: %+v", view.Snapshot)
+		}
+	}
+	workers.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent command/projector operation: %v", err)
+		}
 	}
 }
