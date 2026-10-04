@@ -14,6 +14,8 @@ Tests are release evidence for implementation, not generated assertions mirrorin
 
 Use property/model-based state-machine tests and controlled concurrent transactions. Compare to an independently implemented simple reference model. Record counterexamples/seeds.
 
+K1.1 implements that reference model in `internal/orders`: prove every allowed and forbidden status transition, contiguous version and aggregate-identity checks, unique event IDs, deterministic replay, stored-snapshot equality, evidence-digest binding, requester/approver separation, terminal-state immutability, stale-version conflicts, and exact decimal-quantity boundaries. The reference transition table is independent of the production reducer. These pure tests do not substitute for the later real-PostgreSQL transaction, RLS, idempotency or outbox tests.
+
 ## 2. Integration matrix
 
 Run real PostgreSQL/pgvector, Kafka and Redis containers plus Temporal test environment. Test DB commit/offset commit boundaries, publish acknowledgement loss, outbox relay crash, consumer rebalance, event gaps, dedupe retention (including retries after detail expiry) and provider request uncertainty. Local schema/role behavior must match production grants, including non-owner roles; testing only as a superuser is insufficient.
