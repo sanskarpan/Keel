@@ -1,0 +1,273 @@
+{
+  "access_date": "2026-10-04",
+  "method": "Official public HTML/docs; standard-library HTTP retrieval and visible-text extraction. Content hashes identify text read; vendor claims not independently verified.",
+  "records": [
+    {
+      "name": "ZIP",
+      "url": "https://ziphq.com/platform/intake-to-procure",
+      "error": "HTTP Error 404: Not Found",
+      "usable_content": false
+    },
+    {
+      "name": "ZIP-suppliers",
+      "url": "https://ziphq.com/platform/supplier-management",
+      "error": "HTTP Error 404: Not Found",
+      "usable_content": false
+    },
+    {
+      "name": "Procurify",
+      "url": "https://www.procurify.com/product/",
+      "final_url": "https://www.procurify.com/platform/",
+      "status": 200,
+      "text_bytes": 5312,
+      "text_sha256": "e18b70417804744942f7ae8539b2bd9666d74eaba552e54be868ab45391a21e8",
+      "usable_content": true
+    },
+    {
+      "name": "Precoro",
+      "url": "https://precoro.com/",
+      "final_url": "https://precoro.com/",
+      "status": 200,
+      "text_bytes": 26544,
+      "text_sha256": "fa2fa0d1cb32ad2ebe5cdb79286313c7e882e1917960deb1a3c0bafe981115fb",
+      "usable_content": true
+    },
+    {
+      "name": "Ramp",
+      "url": "https://ramp.com/procurement",
+      "final_url": "https://ramp.com/procurement",
+      "status": 200,
+      "text_bytes": 22400,
+      "text_sha256": "ce414aa80df2e4808e2d02490741f612d2b399fd2cbed0aad7926958a2d7cda2",
+      "usable_content": true
+    },
+    {
+      "name": "Ironclad",
+      "url": "https://ironcladapp.com/product/",
+      "final_url": "https://ironcladapp.com/product/ai-based-contract-management",
+      "status": 200,
+      "text_bytes": 15754,
+      "text_sha256": "0ea401fcdee0e9456dc84ed77549b11d8f6fb54e56365d627ec39e4664af2aff",
+      "usable_content": true
+    },
+    {
+      "name": "Vanta",
+      "url": "https://www.vanta.com/products/vendor-risk-management",
+      "final_url": "https://www.vanta.com/products/third-party-risk-management",
+      "status": 200,
+      "text_bytes": 17777,
+      "text_sha256": "5e271fc297f5921b617ca88424072742c1cd0fae2c65ce667875282caddea38f",
+      "usable_content": true
+    },
+    {
+      "name": "Uffizzi",
+      "url": "https://www.uffizzi.com/preview-environments",
+      "error": "HTTP Error 503: Service Unavailable",
+      "usable_content": false
+    },
+    {
+      "name": "Bunnyshell",
+      "url": "https://www.bunnyshell.com/",
+      "final_url": "https://www.bunnyshell.com/",
+      "status": 200,
+      "text_bytes": 9301,
+      "text_sha256": "cc710b7a4908fbd1c20886d9d078d1f6f55c85b29a8be2033f36ec25ced4084f",
+      "usable_content": true
+    },
+    {
+      "name": "Qovery",
+      "url": "https://www.qovery.com/preview-environments",
+      "error": "HTTP Error 404: Not Found",
+      "usable_content": false
+    },
+    {
+      "name": "env0",
+      "url": "https://www.env0.com/features/cost-management",
+      "error": "HTTP Error 404: Not Found",
+      "usable_content": false
+    },
+    {
+      "name": "Port",
+      "url": "https://docs.port.io/actions-and-automations/",
+      "error": "HTTP Error 404: Not Found",
+      "usable_content": false
+    },
+    {
+      "name": "Gremlin",
+      "url": "https://www.gremlin.com/reliability-management",
+      "error": "HTTP Error 404: Not Found",
+      "usable_content": false
+    },
+    {
+      "name": "Harness",
+      "url": "https://developer.harness.io/docs/internal-developer-portal/",
+      "final_url": "https://developer.harness.io/docs/internal-developer-portal",
+      "status": 200,
+      "text_bytes": 1642,
+      "text_sha256": "643e156763792fefaf2260f2e508f7eb1a01d7c637e487bdc4d7a7cf6d62c892",
+      "usable_content": false
+    },
+    {
+      "name": "Stripe-billing",
+      "url": "https://docs.stripe.com/billing/subscriptions/webhooks",
+      "final_url": "https://docs.stripe.com/billing/subscriptions/webhooks",
+      "status": 200,
+      "text_bytes": 27120,
+      "text_sha256": "fc2ecc2bbe64639b7c02f6186364f178bd1f9765363439bae8cb559e3c2d632e",
+      "usable_content": true
+    },
+    {
+      "name": "WorkOS-SCIM",
+      "url": "https://workos.com/docs/directory-sync",
+      "final_url": "https://workos.com/docs/directory-sync",
+      "status": 200,
+      "text_bytes": 8307,
+      "text_sha256": "63ec16e56ac3e03b2fa90d72d6a121d9363d79a8cea0ac67146b3f477119fba0",
+      "usable_content": true
+    },
+    {
+      "name": "ZIP",
+      "url": "https://ziphq.com/",
+      "final_url": "https://zip.com/",
+      "status": 200,
+      "text_bytes": 8818,
+      "text_sha256": "fa0989ffb072be2f18af7d60e12c2dbf1f3186de9ac18246a2ad82bbec0a551c",
+      "usable_content": true
+    },
+    {
+      "name": "Qovery",
+      "url": "https://www.qovery.com/",
+      "final_url": "https://www.qovery.com/",
+      "status": 200,
+      "text_bytes": 8078,
+      "text_sha256": "ac922aa7844d01121367775ab296f27805bbe22e65c5d49cdae47c66e5812a6b",
+      "usable_content": true
+    },
+    {
+      "name": "Qovery-docs",
+      "url": "https://hub.qovery.com/docs/using-qovery/configuration/environment/",
+      "final_url": "https://www.qovery.com/docs/getting-started/introduction",
+      "status": 200,
+      "text_bytes": 3013,
+      "text_sha256": "37a3209d4b1ffd3cd1dd36531dea4e176f4b9edcacbb5f54fd75b45c8f9d88b8",
+      "usable_content": true
+    },
+    {
+      "name": "env0",
+      "url": "https://www.env0.com/",
+      "final_url": "https://www.envzero.com/",
+      "status": 200,
+      "text_bytes": 7635,
+      "text_sha256": "5b5782623801192aba5cd6b37c89d14d723c9800bd78c31a117f698df8dc3607",
+      "usable_content": true
+    },
+    {
+      "name": "Port",
+      "url": "https://docs.port.io/",
+      "final_url": "https://docs.port.io/",
+      "status": 200,
+      "text_bytes": 16204,
+      "text_sha256": "94803816c7eb76dfcb179971ac5d76ea9789aefed617d77c209830f14d15a7e2",
+      "usable_content": true
+    },
+    {
+      "name": "Gremlin",
+      "url": "https://www.gremlin.com/",
+      "final_url": "https://www.gremlin.com/",
+      "status": 200,
+      "text_bytes": 13215,
+      "text_sha256": "31bb8938604d48f02b105784a40486e42a8168f4bf3429872d1ab27c88be7d20",
+      "usable_content": true
+    },
+    {
+      "name": "Harness",
+      "url": "https://www.harness.io/products/internal-developer-portal",
+      "final_url": "https://www.harness.io/products/internal-developer-portal",
+      "status": 200,
+      "text_bytes": 13148,
+      "text_sha256": "8ec07dadb9184fb9298ecbda0add9e7572839ea8768952816341452010fbaf01",
+      "usable_content": true
+    },
+    {
+      "name": "ZIP-intake",
+      "url": "https://zip.com/products/intake-to-procure",
+      "final_url": "https://zip.com/products/intake-to-procure",
+      "status": 200,
+      "text_bytes": 7952,
+      "text_sha256": "1318654b3b33178315c52e7e0a7eb244b5c3e5f5938b3579f66ecc485d424d4e",
+      "usable_content": true
+    },
+    {
+      "name": "ZIP-suppliers",
+      "url": "https://zip.com/products/supplier-onboarding",
+      "final_url": "https://zip.com/products/supplier-onboarding",
+      "status": 200,
+      "text_bytes": 8123,
+      "text_sha256": "84e25456d2e2a82ca38368d0e7a1dc6ee190a4da30b851472985baccb6554701",
+      "usable_content": true
+    },
+    {
+      "name": "ZIP-budgets",
+      "url": "https://zip.com/products/budgets",
+      "final_url": "https://zip.com/products/budgets",
+      "status": 200,
+      "text_bytes": 8128,
+      "text_sha256": "a6f9c18731ce95f8f4ee88ecd5437ca5952e0db5765147d37ae49cc7c059f816",
+      "usable_content": true
+    },
+    {
+      "name": "Precoro-suppliers",
+      "url": "https://precoro.com/solutions/supplier-management",
+      "final_url": "https://precoro.com/solutions/supplier-management",
+      "status": 200,
+      "text_bytes": 26827,
+      "text_sha256": "c880a63255f9e37f0dafebf1d72e7bf9906820c080a9328d27ec8f860d547208",
+      "usable_content": true
+    },
+    {
+      "name": "Precoro-orders",
+      "url": "https://precoro.com/to/purchase-order-software",
+      "final_url": "https://precoro.com/to/purchase-order-software",
+      "status": 200,
+      "text_bytes": 26667,
+      "text_sha256": "7941ed82c3c77750005e729b320b59cafee083ea962e6e0acafa6a5a2486a031",
+      "usable_content": true
+    },
+    {
+      "name": "Bunnyshell-preview",
+      "url": "https://www.bunnyshell.com/ephemeral-environments/",
+      "final_url": "https://www.bunnyshell.com/ephemeral-environments/",
+      "status": 200,
+      "text_bytes": 14047,
+      "text_sha256": "9887099dd06a7ccf1da926f1866d430a7cf87543c85eabac8fb27a4e92f626fe",
+      "usable_content": true
+    },
+    {
+      "name": "Qovery-preview",
+      "url": "https://www.qovery.com/solutions/ephemeral-environments",
+      "final_url": "https://www.qovery.com/solutions/ephemeral-environments",
+      "status": 200,
+      "text_bytes": 4758,
+      "text_sha256": "a15f5a4d5ba9edb6316716b3a42f73a628bcc618859b6519d1c7da0b868f2a5f",
+      "usable_content": true
+    },
+    {
+      "name": "Gremlin-reliability",
+      "url": "https://www.gremlin.com/product/reliability-management",
+      "final_url": "https://www.gremlin.com/product/reliability-management",
+      "status": 200,
+      "text_bytes": 11002,
+      "text_sha256": "0712345216b08a0f3982e36fa4ca39eca4b28ce391b3af20c10fc8d02c7d8198",
+      "usable_content": true
+    },
+    {
+      "name": "Gremlin-scoring",
+      "url": "https://www.gremlin.com/blog/how-gremlins-reliability-score-works/",
+      "final_url": "https://www.gremlin.com/blog/how-gremlins-reliability-score-works",
+      "status": 200,
+      "text_bytes": 19054,
+      "text_sha256": "99177b5a80c8d0be583fe58ed1c3b7ecbc56e246ca1d239231343ce9eede55d9",
+      "usable_content": true
+    }
+  ]
+}
