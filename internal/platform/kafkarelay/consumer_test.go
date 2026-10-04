@@ -101,16 +101,16 @@ func TestConsumerNeverCommitsWhenDurableProcessingFailsOrIsAmbiguous(t *testing.
 }
 
 func TestNewConsumerRequiresCanonicalOrderTopic(t *testing.T) {
-	if _, err := NewConsumer([]string{"localhost:9092"}, "keel.test.jobs.v1", "order-projector", &fakeRecordProcessor{}); err == nil {
+	if _, err := NewLocalSyntheticConsumer([]string{"localhost:9092"}, "keel.test.jobs.v1", "order-projector", &fakeRecordProcessor{}); err == nil {
 		t.Fatal("consumer accepted a non-order topic")
 	}
-	if _, err := New([]string{"localhost:9092"}, "keel.test.jobs.v1"); err == nil {
+	if _, err := NewLocalSyntheticBroker([]string{"localhost:9092"}, "keel.test.jobs.v1"); err == nil {
 		t.Fatal("producer accepted a non-order topic")
 	}
-	if _, err := New([]string{"localhost:9092"}, "keel."+strings.Repeat("a", 245)+".orders.v1"); err == nil {
+	if _, err := NewLocalSyntheticBroker([]string{"localhost:9092"}, "keel."+strings.Repeat("a", 245)+".orders.v1"); err == nil {
 		t.Fatal("producer accepted an overlong Kafka topic")
 	}
-	if _, err := NewConsumer([]string{"localhost:9092"}, "keel.test.orders.v1", "bad group id", &fakeRecordProcessor{}); err == nil {
+	if _, err := NewLocalSyntheticConsumer([]string{"localhost:9092"}, "keel.test.orders.v1", "bad group id", &fakeRecordProcessor{}); err == nil {
 		t.Fatal("consumer accepted an invalid group ID")
 	}
 }
