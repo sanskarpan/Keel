@@ -27,7 +27,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 
 ## K2 — Durable supplier onboarding
 
-- [ ] K2.1 Implement supplier invitations, validated upload flow and sandbox scan/extraction. Acceptance: single-use expiring tenant/case-scoped invitation; hashed supplier/session credentials; checksum/size/type verification; bounded PDF/DOCX/TXT quarantine; least-privilege RLS worker with lease fencing; real ClamAV/Tika contract tests on a no-egress network; scanner/extractor failures fail closed; local storage and provider/runtime limits are documented without claiming hosted readiness.
+- [x] K2.1 Implement supplier invitations, validated upload flow and sandbox scan/extraction. Owner: Keel platform (named person unassigned); PR #118 (closes #17); evidence: `docs/K2.1-EVIDENCE.md`, `internal/supplier/intake`, migration `0008_supplier_evidence_intake`, pinned no-egress ClamAV/Tika contract test, and PR contract run #66; decision: single-use expiring tenant/case-scoped invitation, hashed supplier/session credentials, byte/hash/type verification, bounded PDF/DOCX/TXT quarantine, least-privilege RLS worker with lease fencing, fail-closed scanner/extractor behavior, and local-only limitations verified. OIDC/API runtime wiring, production object storage/encryption/retention, signature freshness operations, and hosted-provider qualification remain open under K0/K8; no hosted-readiness claim.
 - [ ] K2.2 Add case/evidence/policy/deadline model and durable workflow intents.
 - [ ] K2.3 Implement deterministic Temporal workflow IDs, retry-safe start and deduplicated signals.
 - [ ] K2.4 Add human approval/separation-of-duties checks and deadline race serialization.
