@@ -1,4 +1,4 @@
-.PHONY: test vet fmt check local-up local-down local-health local-seed
+.PHONY: test vet fmt check contract local-up local-down local-health local-seed
 
 COMPOSE_FILE := deploy/compose/compose.yaml
 
@@ -10,6 +10,9 @@ vet:
 
 fmt:
 	gofmt -w cmd internal
+
+contract:
+	GOTOOLCHAIN=local go test ./internal/contracts/...
 
 check: test vet
 
