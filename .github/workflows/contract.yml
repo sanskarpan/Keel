@@ -71,6 +71,8 @@ jobs:
         env:
           KEEL_TEST_KAFKA_IMAGE: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
         run: bash scripts/test-kafka-secure.sh
+      - name: Verify pinned malware scanner and extraction sandbox
+        run: bash scripts/test-intake-sandbox.sh
       - name: Install forced-RLS fixture in PostgreSQL
         env:
           PGPASSWORD: keel-local-only
@@ -109,6 +111,7 @@ jobs:
           KEEL_TEST_WORKER_DATABASE_URL: postgres://keel_local_worker:keel-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_PROJECTOR_DATABASE_URL: postgres://keel_local_projector:keel-projector-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_OPERATOR_DATABASE_URL: postgres://keel_local_operator:keel-operator-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_FILE_PROCESSOR_DATABASE_URL: postgres://keel_local_file_processor:keel-file-processor-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_ADMIN_DATABASE_URL: postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_KAFKA_BROKERS: localhost:19092
           KEEL_TEST_KAFKA_TOPIC: keel.test.orders.v1
@@ -121,6 +124,7 @@ jobs:
           KEEL_TEST_WORKER_DATABASE_URL: postgres://keel_local_worker:keel-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_PROJECTOR_DATABASE_URL: postgres://keel_local_projector:keel-projector-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_OPERATOR_DATABASE_URL: postgres://keel_local_operator:keel-operator-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_FILE_PROCESSOR_DATABASE_URL: postgres://keel_local_file_processor:keel-file-processor-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_ADMIN_DATABASE_URL: postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_KAFKA_BROKERS: localhost:19092
           KEEL_TEST_KAFKA_TOPIC: keel.test.orders.v1
