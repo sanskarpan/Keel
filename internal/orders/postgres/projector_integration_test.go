@@ -322,7 +322,7 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	if err != nil || len(events) != 2 {
 		t.Fatalf("source order events=%d err=%v", len(events), err)
 	}
-	broker, err := kafkarelay.New(brokers, topic)
+	broker, err := kafkarelay.NewLocalSyntheticBroker(brokers, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	assertProjectionVersion(t, adminDB, string(tenant), created.Snapshot.OrderID, 2, string(orders.Submitted))
 	// This time Kafka did commit the offset; only the response was lost. Restart must continue
 	// after v2 without reapplying it, which is the other valid outcome of an ambiguous commit.
-	consumer3, err := kafkarelay.NewConsumer(brokers, topic, groupID, processor)
+	consumer3, err := kafkarelay.NewLocalSyntheticConsumer(brokers, topic, groupID, processor)
 	if err != nil {
 		t.Fatal(err)
 	}

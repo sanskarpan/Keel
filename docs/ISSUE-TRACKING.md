@@ -33,7 +33,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K1.4` | task | K1.4 Implement publish-head claims, broker acknowledgement/retry/fencing and stable event IDs. | [PR #110 (closes issue #12)](https://github.com/sanskarpan/Keel/pull/110) |
 | `K1.4-OPS` | task | Add an audited, tenant-scoped operator repair path for blocked outbox streams. | [PR #114 (closes issue #108)](https://github.com/sanskarpan/Keel/pull/114) |
-| `K1.4-SEC` | task | Qualify authenticated TLS Kafka transport and fail closed for non-local plaintext configuration. | [Open issue](https://github.com/sanskarpan/Keel/issues/109) |
+| `K1.4-SEC` | task | Qualify authenticated TLS Kafka transport and fail closed for non-local plaintext configuration. | [PR #115 (closes issue #109)](https://github.com/sanskarpan/Keel/pull/115) |
 
 | `K1.5` | task | K1.5 Add durable inbox, contiguous projection apply, conflict quarantine and gap replay. | [PR #111 (closes issue #13)](https://github.com/sanskarpan/Keel/pull/111) |
 
