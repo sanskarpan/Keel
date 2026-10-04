@@ -475,6 +475,16 @@ func appendCommandSideEffects(ctx context.Context, tx *sql.Tx, event orders.Even
 	if err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.outbox_delivery
+		(tenant_id,event_id,aggregate_id,aggregate_version)
+		VALUES ($1,$2,$3,$4)`, tenant, event.Metadata.EventID, event.Metadata.OrderID, event.Version); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.outbox_publish_heads
+		(tenant_id,aggregate_id,next_version)
+		VALUES ($1,$2,1) ON CONFLICT (tenant_id,aggregate_id) DO NOTHING`, tenant, event.Metadata.OrderID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.state_feed_counters (tenant_id,last_sequence)
 		VALUES ($1,0) ON CONFLICT (tenant_id) DO NOTHING`, tenant); err != nil {
 		return err

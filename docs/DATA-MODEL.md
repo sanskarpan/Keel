@@ -19,8 +19,9 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `order_heads` | `(tenant,order)`, version, reconstructable command_snapshot, snapshot_hash | Lock before mutation |
 | `order_events` | `(tenant,order,version)` PK; unique `(tenant,event_id)`; type/schema, metadata, payload reference/hash | API append; update/delete denied |
 | `order_projections` | `(tenant,order)`, applied_version, user-facing fields | Consumer writer; API reader |
-| `event_outbox` | immutable event FK, aggregate/version, schema version, allowlisted JSON envelope | App transaction inserts; app and worker can select; K1.4 adds separate relay claim/delivery state |
-| `publish_heads` | `(tenant,aggregate)`, next_version, claim_owner, lease_epoch, expires_at | One intended publisher per stream |
+| `event_outbox` | immutable event FK, aggregate/version, schema version, allowlisted JSON envelope | App transaction inserts; app and worker can select; delivery state is stored separately |
+| `outbox_delivery` | `(tenant,event_id)`, aggregate/version, pending/published/blocked state, attempt count, retry time, coarse error code | App inserts pending in command transaction; worker updates delivery outcome; corrupt head remains blocked for reviewed repair |
+| `outbox_publish_heads` | `(tenant,aggregate)`, next_version, claim_owner, lease_epoch, lease expiry | One fenced publisher claim per stream; advances only after broker acknowledgement |
 | `event_inbox` | `(tenant,consumer,event_id)` unique; aggregate/version; received/applied/deferred state | Consumer transaction |
 | `deferred_events` | same logical key; expected_version, retry deadline and replay request | Consumer gap repair |
 | `documents` | `(tenant,id)`, owner/classification/current_version/withdrawn_at | API/doc worker |
@@ -56,7 +57,7 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 
 - `order_events(tenant_id, order_id, version)` supports stream replay; event ID unique constraint deduplicates transport.
 - `jobs(status,next_run_at,tenant_id)` partial index for runnable jobs, and `(tenant_id,status,created_at)` for UI/quotas. Fair scheduler tracks per-tenant virtual finish and active counts; a bounded claim procedure picks tenants before jobs to prevent a hot tenant dominating SKIP LOCKED.
-- `publish_heads(lease_expires_at,next_version)` supports metadata claims; event reads always include tenant/aggregate/version.
+- `outbox_publish_heads(tenant_id,lease_expires_at,aggregate_id)` supports expired-lease claims; `outbox_delivery(tenant_id,next_attempt_at,aggregate_id,aggregate_version)` supports due retries. A claim joins only the head's exact `next_version`, so later events cannot bypass a pending or delayed earlier event.
 - `webhook_deliveries(state,next_attempt_at)` partial index; per-endpoint concurrency guard prevents retry storms.
 - `document_terms(tenant_id,visibility_class,corpus_version,term_id)` postings lookup; include tf/chunk ID. Statistics use tenant/visibility/version keys.
 - HNSW cosine index applies to one compatible embedding model family/version. Add tenant/model/visibility B-tree filters. Exact path for small/selective corpora. Observe actual query plans under skew; a global HNSW index is not a tenant-local index.
@@ -82,7 +83,7 @@ RLS protects against tenant-context mistakes in trusted services. It is not a co
 
 ## 5. Leases and fencing
 
-Claims set owner, increment `lease_epoch` and use DB time for expiry. Heartbeat/final result updates use `WHERE owner=:owner AND epoch=:epoch AND expiry>clock_timestamp()`. Failure to update means stop committing. External providers cannot always honor the fence; their attempt records expose any duplicate charge/outcome ambiguity.
+Claims set owner, increment `lease_epoch` and use database time for expiry. The publisher loads only the currently claimed head event, validates the complete allowlisted envelope, publishes synchronously outside the transaction, then marks delivery published and advances `next_version` in one transaction guarded by owner, epoch, expected version and an unexpired lease. Broker failure records an allowlisted coarse code, increments attempts, schedules bounded exponential retry with deterministic jitter, and releases the claim. A permanently invalid envelope is durably marked `blocked` with a coarse error code and releases its lease without advancing the head; later versions remain stopped until reviewed repair resolves the corrupt version. A stale worker cannot acknowledge or record failure after lease expiry/reclaim. A broker acknowledgement lost after acceptance can still cause duplicate delivery; stable event IDs and consumer inbox deduplication handle this at least-once boundary. Broker partition ordering is keyed by tenant/aggregate; the database head remains the source of publish order.
 
 Claim procedures return tenant/logical IDs without raw documents. Subsequent operations use the correct tenant-scoped transaction. Do not use an unlimited BYPASSRLS service account for every background task.
 

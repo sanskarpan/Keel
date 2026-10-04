@@ -32,6 +32,33 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 20
+      kafka:
+        image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+          KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:19092
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+          KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+          KAFKA_CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+          KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_MIN_INSYNC_REPLICAS: 1
+          KAFKA_NUM_PARTITIONS: 3
+        ports:
+          - 19092:19092
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 20s
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 release line, immutable commit
@@ -51,6 +78,13 @@ jobs:
           pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
           -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1
           -f /workspace/deploy/compose/init/20-keel-tenant-roles.sql
+      - name: Create order-event Kafka topic
+        run: >-
+          docker run --rm --network host
+          --entrypoint /opt/kafka/bin/kafka-topics.sh
+          apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+          --bootstrap-server 127.0.0.1:19092 --create --if-not-exists
+          --topic keel.order-events.test --partitions 3 --replication-factor 1
       - name: Apply embedded PostgreSQL migrations
         env:
           KEEL_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
@@ -60,6 +94,8 @@ jobs:
           KEEL_TEST_DATABASE_URL: postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_WORKER_DATABASE_URL: postgres://keel_local_worker:keel-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_ADMIN_DATABASE_URL: postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_KAFKA_BROKERS: localhost:19092
+          KEEL_TEST_KAFKA_TOPIC: keel.order-events.test
           KEEL_TEST_AGENT_PASSWORD: keel-agent-local-only
           KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
         run: make check
@@ -68,6 +104,8 @@ jobs:
           KEEL_TEST_DATABASE_URL: postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_WORKER_DATABASE_URL: postgres://keel_local_worker:keel-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_ADMIN_DATABASE_URL: postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_KAFKA_BROKERS: localhost:19092
+          KEEL_TEST_KAFKA_TOPIC: keel.order-events.test
           KEEL_TEST_AGENT_PASSWORD: keel-agent-local-only
           KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
         run: GOTOOLCHAIN=local go test -race ./...
