@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keel.example.invalid/contracts/events/order-submitted.v1.schema.json",
+  "title": "Keel order.submitted event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "schema_version", "tenant_id", "aggregate_type", "aggregate_id", "aggregate_version", "occurred_at", "actor_ref", "causation_id", "correlation_id", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "type": "string", "const": "order.submitted" },
+    "schema_version": { "type": "integer", "const": 1 },
+    "tenant_id": { "type": "string", "format": "uuid" },
+    "aggregate_type": { "type": "string", "const": "order" },
+    "aggregate_id": { "type": "string", "format": "uuid" },
+    "aggregate_version": { "type": "integer", "minimum": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "actor_ref": { "type": "string", "pattern": "^(principal|service-principal):[A-Za-z0-9._~-]{1,120}$" },
+    "causation_id": { "type": "string", "format": "uuid" },
+    "correlation_id": { "type": "string", "format": "uuid" },
+    "traceparent": { "type": "string", "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["supplier_id", "evidence_digest"],
+      "properties": {
+        "supplier_id": { "type": "string", "format": "uuid" },
+        "evidence_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

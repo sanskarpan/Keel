@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keel.example.invalid/contracts/deployment-recipe.schema.json",
+  "title": "Keel/Ghostlight shared deployment recipe v1.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "product", "source_sha", "images", "migration_bundle", "event_schema_bundle", "configuration_schema", "health_contract", "roles", "dependencies", "test_profiles", "resource_profile", "signature"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.1" },
+    "product": { "type": "string", "enum": ["keel", "ghostlight"] },
+    "source_sha": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "web"],
+      "properties": {
+        "backend": { "$ref": "#/$defs/image" },
+        "web": { "$ref": "#/$defs/image" }
+      }
+    },
+    "migration_bundle": { "$ref": "#/$defs/digest" },
+    "event_schema_bundle": { "$ref": "#/$defs/digest" },
+    "configuration_schema": { "$ref": "#/$defs/digest" },
+    "health_contract": { "type": "string", "const": "1" },
+    "roles": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/role" } },
+    "dependencies": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/dependency" } },
+    "test_profiles": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["smoke", "isolation", "replay", "load", "chaos"] } },
+    "resource_profile": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+    "signature": { "type": "string", "format": "uri", "maxLength": 2048 }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "image": { "type": "string", "pattern": "^([a-z0-9.-]+(:[0-9]+)?/)?[a-z0-9._/-]+@sha256:[0-9a-f]{64}$" },
+    "role": { "enum": ["api", "relay", "projector", "ai-executor", "temporal-worker", "webhook-worker", "billing-worker", "notification-worker", "procurement-worker"] },
+    "dependency": { "enum": ["postgres", "pgvector", "kafka", "temporal", "redis", "s3", "oidc"] }
+  }
+}

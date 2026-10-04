@@ -1,0 +1,34 @@
+name: contract
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Go and contract validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 release line, immutable commit
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5 release line, immutable commit
+        with:
+          go-version-file: .go-version
+          cache: true
+      - name: Validate contracts, tests, and static analysis
+        run: make check
+      - name: Race-check packages
+        run: GOTOOLCHAIN=local go test -race ./...
+      - name: Build all packages
+        run: GOTOOLCHAIN=local go build ./...
