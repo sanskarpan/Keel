@@ -20,7 +20,7 @@
 }
 ```
 
-No raw PII, prompts or credentials in envelopes/headers. Event schema registration checks compatibility. Only opaque references and approved typed business facts are public to the bus. Protected context lives behind authorized retrieval.
+This is the future domain-event model, not the current `keel.<env>.orders.v1` Kafka wire format. K1.4 emits only the seven identity/status metadata fields documented in §4; actor, causation, correlation and payload fields shown above are not currently serialized to Kafka. No raw PII, prompts or credentials belong in envelopes/headers. Schema registration checks compatibility before a future contract exposes approved typed business facts.
 
 ## 2. Topics
 
@@ -42,15 +42,19 @@ Do not mark published before acknowledgement. Do not claim unrelated outbox rows
 
 ## 4. Consumer transaction and gaps
 
-Consumer validates size/schema, identifies trusted transport environment and tenant, and performs an inbox insert and projection mutation in one tenant transaction. For aggregate event version `v`: if applied version >=v, verify matching logical event/payload digest and treat as duplicate; if applied version=v-1, apply and advance; if applied version<v-1, persist deferred gap and schedule bounded source-of-truth replay. Conflicting same-version payloads quarantine and page operators.
+The order projector accepts only the bounded metadata envelope (`tenant_id`, `aggregate_id`, `aggregate_version`, `event_id`, `event_type`, `schema_version`, `occurred_at`). It resolves the exact tuple from retained immutable `event_outbox.safe_envelope`, verifies the canonical digest and metadata, then projects only order status/version; private order facts never enter Kafka or the read model. `event_outbox` is the versioned replay source and remains FK-linked to immutable order history. A future event schema requiring protected facts needs a separately authorized projection source.
 
-Commit Kafka offset only after DB commit. DB commit with a lost offset commit redelivers; inbox uniqueness suppresses effects. Invalid schema/poison records are durably quarantined before advancing the transport offset; an aggregate requiring the missing event remains explicitly blocked/degraded. No silent gap skip.
+For aggregate version `v`, the projector serializes on the tenant/order projection row. It records an inbox row unique by consumer/event ID and consumer/order/version. K1.5 pins the live projection to `order-projection-v1`; a second identity cannot share this projection until generation-scoped storage is added. A matching previously applied identity is a duplicate; a conflicting event identity or digest is quarantined and never advances the projection. A structurally valid tenant/event claim with no matching canonical outbox row is not trusted as tenant identity and goes to tenantless transport quarantine. Only a canonical row that proves tenant and event identity may produce tenant-scoped conflict metadata. Version `applied+1` applies only a legal status transition. A higher version is durably deferred; bounded replay loads missing canonical envelopes from PostgreSQL and applies only a contiguous chain. Missing or corrupt source rows move the deferred head to a durable blocked state and leave the aggregate behind rather than skipping a version. K1.5 implements live projection and per-aggregate gap repair; shadow projection generations and atomic read-pointer cutover remain a later rebuild phase.
+
+Kafka callers process one message at a time per partition and commit its offset only after the database transaction succeeds. A DB commit with a lost offset commit redelivers; inbox uniqueness suppresses effects. Invalid schema/poison records with no trustworthy tenant identity are recorded in tenantless quarantine by trusted topic/partition/offset plus payload digest and bounded reason, without raw bytes. Persist that quarantine before advancing the transport offset; if persistence fails, leave the offset uncommitted. The broker adapter and rebalance/commit-boundary fault tests remain explicit K1.7 work. No silent gap skip.
+
+The decoder rejects duplicate JSON object keys and duplicate or unknown identity headers. Kafka adapters must preserve header occurrences as an ordered list until validation; converting headers to a map first loses duplicate evidence.
 
 Job receivers commit after durable inbox/job insertion. They do not process a five-minute model generation inside a Kafka consumer poll loop. Executors claim the DB queue with fair tenant scheduling and fenced leases. KEDA therefore observes both receiver lag and durable runnable backlog. Consumer and executor throughput/age are reported separately.
 
 ## 5. Replay and schema evolution
 
-Replay retains original event IDs and aggregate versions. A new consumer identity rebuilds an isolated projection, validates counts/hashes/invariants against canonical event streams, then switches its read pointer. Replaying into a live projection reuses inbox/effect uniqueness; it must not create new webhook deliveries or model calls unintentionally.
+Replay retains original event IDs and aggregate versions. K1.5 pins the live status projection to one consumer identity because its projection key has no generation dimension. A second consumer identity must not be started against this table. A future rebuild must add generation-scoped inbox/projection state, replay-boundary validation and an atomic read-pointer switch before it can use a new identity. Replaying into a live projection reuses inbox/effect uniqueness; it must not create new webhook deliveries or model calls unintentionally.
 
 Event schemas are additive by default. Historical payload interpretation uses the recorded schema version and a deterministic upcaster. Consumer compatibility is tested against all retained historical fixtures. Breaking semantics introduce a new event type/major topic and controlled migration. Removing fields requires archive/replay/workflow compatibility review, not merely green current-code tests.
 

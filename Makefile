@@ -78,6 +78,7 @@ local-orders-test: local-migrate
 	docker compose -f $(COMPOSE_FILE) exec -T postgres env \
 	  KEEL_TEST_DATABASE_URL='postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	  KEEL_TEST_WORKER_DATABASE_URL='postgres://keel_local_worker:keel-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
+	  KEEL_TEST_PROJECTOR_DATABASE_URL='postgres://keel_local_projector:keel-projector-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	  KEEL_TEST_ADMIN_DATABASE_URL='postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	  KEEL_TEST_KAFKA_BROKERS='kafka:9092' \
 	  KEEL_TEST_KAFKA_TOPIC='keel.order-events.test' \

@@ -18,12 +18,14 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `workflow_intents` | stable workflow ID, start/signal type, input hash, payload reference, status, attempts, lease_epoch | Metadata claim role; scoped dispatch |
 | `order_heads` | `(tenant,order)`, version, reconstructable command_snapshot, snapshot_hash | Lock before mutation |
 | `order_events` | `(tenant,order,version)` PK; unique `(tenant,event_id)`; type/schema, metadata, payload reference/hash | API append; update/delete denied |
-| `order_projections` | `(tenant,order)`, applied_version, user-facing fields | Consumer writer; API reader |
+| `order_projections` | `(tenant,order)`, applied_version and status only | Projector writer; API reader; forced RLS |
 | `event_outbox` | immutable event FK, aggregate/version, schema version, allowlisted JSON envelope | App transaction inserts; app and worker can select; delivery state is stored separately |
 | `outbox_delivery` | `(tenant,event_id)`, aggregate/version, pending/published/blocked state, attempt count, retry time, coarse error code | App inserts pending in command transaction; worker updates delivery outcome; corrupt head remains blocked for reviewed repair |
 | `outbox_publish_heads` | `(tenant,aggregate)`, next_version, claim_owner, lease_epoch, lease expiry | One fenced publisher claim per stream; advances only after broker acknowledgement |
-| `event_inbox` | `(tenant,consumer,event_id)` unique; aggregate/version; received/applied/deferred state | Consumer transaction |
-| `deferred_events` | same logical key; expected_version, retry deadline and replay request | Consumer gap repair |
+| `event_inbox` | `(tenant,consumer,event_id)` and `(tenant,consumer,aggregate,version)` unique; canonical envelope hash; source/state | Projector transaction; forced RLS |
+| `deferred_events` | `(tenant,consumer,aggregate,version)`, expected missing version, bounded retry state and blocked reason | Projector gap repair; forced RLS |
+| `event_quarantine` | tenant/consumer/event/hash/reason; no raw envelope | Projector writer; forced RLS |
+| `transport_quarantine` | trusted Kafka topic/partition/offset, payload hash and bounded reason; no raw payload or tenant claim, including unmatched tenant/event claims | Projector insert plus restricted metadata read |
 | `documents` | `(tenant,id)`, owner/classification/current_version/withdrawn_at | API/doc worker |
 | `document_versions` | `(tenant,doc,version)`, immutable object/version ID/hash, scan/publication state | Immutable after publish |
 | `document_chunks` | `(tenant,chunk)`, document_version FK, text reference/hash, tokenizer/corpus version, length | Retrieval; sensitive content encrypted where required |
