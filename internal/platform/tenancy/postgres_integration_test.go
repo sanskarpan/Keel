@@ -82,6 +82,14 @@ func TestPostgreSQLTenantIsolation(t *testing.T) {
 	appDB := databaseForUser(t, appDSN, "keel_local_app", "keel-app-local-only")
 	agentDB := databaseForUser(t, appDSN, "keel_local_agent_alpha", agentPassword)
 	ctx := context.Background()
+	var agentSessionUser string
+	var agentCapability bool
+	if err := agentDB.QueryRowContext(ctx, `SELECT session_user::text,pg_catalog.pg_has_role(session_user,'keel_agent','MEMBER')`).Scan(&agentSessionUser, &agentCapability); err != nil {
+		t.Fatal(err)
+	}
+	if agentSessionUser != "keel_local_agent_alpha" || !agentCapability {
+		t.Fatalf("agent integration did not use the bound read-only login: session_user=%q keel_agent_member=%v", agentSessionUser, agentCapability)
+	}
 	alpha, err := ParseTenantID(tenantAlpha)
 	if err != nil {
 		t.Fatal(err)
