@@ -5,9 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"regexp"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/sanskarpan/keel/internal/orders/outbox"
@@ -21,54 +20,116 @@ func validOrderTopic(topic string) bool {
 }
 
 type Broker struct {
-	writer *kafka.Writer
+	mu       sync.Mutex
+	closed   bool
+	brokers  []string
+	topic    string
+	security *SecurityConfig
+	writer   *kafka.Writer
 }
 
-func New(brokers []string, topic string) (*Broker, error) {
-	if len(brokers) == 0 {
-		return nil, errors.New("at least one Kafka broker address is required")
-	}
+func validateTopic(topic string) error {
 	if !validOrderTopic(topic) {
-		return nil, errors.New("Kafka order topic name is invalid")
+		return errors.New("Kafka order topic name is invalid")
 	}
-	addresses := make([]string, 0, len(brokers))
-	seen := make(map[string]struct{}, len(brokers))
-	for _, address := range brokers {
-		address = strings.TrimSpace(address)
-		host, port, err := net.SplitHostPort(address)
-		if err != nil || host == "" || port == "" {
-			return nil, fmt.Errorf("invalid Kafka broker address %q", address)
-		}
-		if _, exists := seen[address]; exists {
-			continue
-		}
-		seen[address] = struct{}{}
-		addresses = append(addresses, address)
-	}
+	return nil
+}
+
+func newWriter(addresses []string, topic string, security *SecurityConfig) (*kafka.Writer, error) {
 	writer := &kafka.Writer{
-		Addr:                   kafka.TCP(addresses...),
-		Topic:                  topic,
-		Balancer:               &kafka.Hash{},
-		MaxAttempts:            1,
-		WriteBackoffMin:        50 * time.Millisecond,
-		WriteBackoffMax:        50 * time.Millisecond,
-		ReadTimeout:            10 * time.Second,
-		WriteTimeout:           10 * time.Second,
-		RequiredAcks:           kafka.RequireAll,
-		Async:                  false,
-		AllowAutoTopicCreation: false,
+		Addr: kafka.TCP(addresses...), Topic: topic, Balancer: &kafka.Hash{},
+		MaxAttempts: 1, WriteBackoffMin: 50 * time.Millisecond, WriteBackoffMax: 50 * time.Millisecond,
+		ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second,
+		RequiredAcks: kafka.RequireAll, Async: false, AllowAutoTopicCreation: false,
 	}
-	return &Broker{writer: writer}, nil
+	if security != nil {
+		transport, err := secureKafkaTransport(*security)
+		if err != nil {
+			return nil, err
+		}
+		writer.Transport = transport
+	}
+	return writer, nil
+}
+
+// NewLocalSynthetic is the only plaintext constructor. It accepts only loopback
+// brokers or the fixed Kafka alias used by the local Compose profile.
+func NewLocalSyntheticBroker(brokers []string, topic string) (*Broker, error) {
+	addresses, err := validateLocalBrokers(brokers)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateTopic(topic); err != nil {
+		return nil, err
+	}
+	writer, err := newWriter(addresses, topic, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Broker{brokers: addresses, topic: topic, writer: writer}, nil
+}
+
+// NewSecure requires verified TLS and SASL/SCRAM-SHA-512 for every broker,
+// including loopback endpoints.
+func NewSecure(brokers []string, topic string, security SecurityConfig) (*Broker, error) {
+	addresses, err := normalizeBrokers(brokers)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateTopic(topic); err != nil {
+		return nil, err
+	}
+	writer, err := newWriter(addresses, topic, &security)
+	if err != nil {
+		return nil, err
+	}
+	return &Broker{brokers: addresses, topic: topic, security: cloneSecurityConfig(security), writer: writer}, nil
+}
+
+func (b *Broker) replaceSecurity(security SecurityConfig) error {
+	if b == nil {
+		return errors.New("Kafka writer is not configured")
+	}
+	writer, err := newWriter(b.brokers, b.topic, &security)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		_ = writer.Close()
+		return errors.New("Kafka writer is closed")
+	}
+	old := b.writer
+	oldSecurity := b.security
+	b.writer = writer
+	b.security = cloneSecurityConfig(security)
+	if err := old.Close(); err != nil {
+		return redactKafkaError(fmt.Errorf("close previous Kafka connection generation: %w", err), oldSecurity)
+	}
+	return nil
+}
+
+// RotateSecurity validates the replacement credentials/trust before pausing
+// writes, then swaps generations under the write lock. Existing in-flight writes
+// finish before the previous transport is closed.
+func (b *Broker) RotateSecurity(security SecurityConfig) error {
+	return b.replaceSecurity(security)
 }
 
 func (b *Broker) Publish(ctx context.Context, message outbox.Message) error {
-	if b == nil || b.writer == nil {
+	if b == nil {
 		return errors.New("Kafka writer is not configured")
 	}
 	if message.SchemaVersion < 1 || message.TenantID == "" || message.AggregateID == "" || message.EventID == "" || message.AggregateVersion < 1 || len(message.Payload) == 0 {
 		return errors.New("outbox message is incomplete")
 	}
-	return b.writer.WriteMessages(ctx, kafka.Message{
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.writer == nil {
+		return errors.New("Kafka writer is closed")
+	}
+	err := b.writer.WriteMessages(ctx, kafka.Message{
 		Key:   message.Key(),
 		Value: message.Payload,
 		Headers: []kafka.Header{
@@ -77,11 +138,18 @@ func (b *Broker) Publish(ctx context.Context, message outbox.Message) error {
 			{Key: "aggregate_version", Value: []byte(fmt.Sprintf("%d", message.AggregateVersion))},
 		},
 	})
+	return redactKafkaError(err, b.security)
 }
 
 func (b *Broker) Close() error {
-	if b == nil || b.writer == nil {
+	if b == nil {
 		return nil
 	}
-	return b.writer.Close()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	return redactKafkaError(b.writer.Close(), b.security)
 }
