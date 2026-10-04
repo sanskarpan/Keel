@@ -28,7 +28,7 @@ var (
 	ErrIdempotencyInProgress    = errors.New("idempotent operation is still in progress")
 	ErrIdempotencyRecordExpired = errors.New("idempotency result expired; operation was not re-executed")
 	ErrNaturalReferenceConflict = errors.New("external reference already exists for this tenant")
-	ErrNotFound                 = errors.New("order not found")
+	ErrNotFound                 = orders.ErrNotFound
 	ErrCorruptState             = errors.New("stored order state failed integrity validation")
 	idempotencyKeyPattern       = regexp.MustCompile(`^[A-Za-z0-9._~-]{16,128}$`)
 	principalPattern            = regexp.MustCompile(`^(principal|service-principal):[A-Za-z0-9._~-]{1,120}$`)
