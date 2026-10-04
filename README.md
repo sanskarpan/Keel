@@ -26,6 +26,7 @@ This is a design package for a new production-oriented product. Nothing in this 
 | [TESTING.md](docs/TESTING.md) | Correctness, security, recovery and load qualification |
 | [QUALITY-REVIEW.md](docs/QUALITY-REVIEW.md) | Independent audit findings, dispositions and verification links |
 | [CHECKLIST.md](docs/CHECKLIST.md) | Dependency-ordered implementation tasks and release gates |
+| [ISSUE-TRACKING.md](docs/ISSUE-TRACKING.md) | Direct links from every checklist item and gate to its phase-tracked issue |
 | [DECISIONS.md](docs/DECISIONS.md) | Architecture decisions with alternatives and consequences |
 
 The [shared contract](shared/CONTRACTS.md) governs deployment by Ghostlight. The [topic map](TOPIC-COVERAGE.md) defines portfolio completion.
