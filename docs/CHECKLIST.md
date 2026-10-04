@@ -6,7 +6,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 
 - [ ] K0.1 Lock supported language/dependency versions, images and provider capabilities; close Q-01; close Q-03/Q-04/Q-09 or document each as disabled/not applicable in the selected pilot profile with owner, reason and evidence. Q-01 always blocks a pilot. Local synthetic profile pinned in `docs/TECHNOLOGY-BASELINE.md`; hosted version/provider support and a named accountable owner remain open, so no pilot is enabled.
 - [x] K0.2 Create Go role entry point, module boundaries, structured redacting logger and validated configuration. Owner: Keel platform (named person unassigned); PR #98; evidence: `cmd/keel`, `internal/platform`, `go test -race ./...`, `go build ./...`; decision: role bootstrap only, unimplemented roles fail closed.
-- [ ] K0.3 Build local real-dependency Compose profile and deterministic two-tenant seeds.
+- [x] K0.3 Build local real-dependency Compose profile and deterministic two-tenant seeds. Owner: Keel platform (named person unassigned); PR #99; evidence: `deploy/compose/README.md`, `deploy/compose/compose.yaml`, `make local-up`, `make local-health`, `make local-seed`; decision: loopback-only, synthetic development profile and not a pilot/production deployment.
 - [ ] K0.4 Define OpenAPI/event schemas and shared deployment recipe fixtures; contract CI checks.
 - [ ] K0.5 Create schema owner/app/worker/agent roles and FORCE RLS transaction wrapper.
 - [ ] K0.6 Implement migration locking/checksums, health/version/metrics and signed artifact/SBOM pipeline.
