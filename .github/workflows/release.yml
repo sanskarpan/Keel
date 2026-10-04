@@ -1,0 +1,89 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, inventory and attest release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Require a SemVer release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Refusing malformed release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: .go-version
+          cache: true
+      - name: Verify source
+        run: |
+          GOTOOLCHAIN=local go test ./...
+          GOTOOLCHAIN=local go vet ./...
+          GOTOOLCHAIN=local go test -race ./...
+      - name: Build immutable Linux amd64 release artifact
+        id: build
+        run: |
+          mkdir -p dist
+          version="${GITHUB_REF_NAME#v}"
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local go build \
+            -trimpath -buildvcs=false \
+            -ldflags "-s -w -X github.com/sanskarpan/keel/internal/platform/buildinfo.Version=${version} -X github.com/sanskarpan/keel/internal/platform/buildinfo.Revision=${GITHUB_SHA} -X github.com/sanskarpan/keel/internal/platform/buildinfo.BuildDate=${built_at}" \
+            -o dist/keel-linux-amd64 ./cmd/keel
+          tar -C dist -czf "dist/keel-${GITHUB_REF_NAME}-linux-amd64.tar.gz" keel-linux-amd64
+          echo "binary=dist/keel-linux-amd64" >> "$GITHUB_OUTPUT"
+          echo "archive=dist/keel-${GITHUB_REF_NAME}-linux-amd64.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "sbom=dist/keel-${GITHUB_REF_NAME}-linux-amd64.spdx.json" >> "$GITHUB_OUTPUT"
+      - name: Generate SPDX SBOM for the release binary
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          file: dist/keel-linux-amd64
+          format: spdx-json
+          output-file: dist/keel-${{ github.ref_name }}-linux-amd64.spdx.json
+          syft-version: v1.54.0
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Sign release archive with GitHub artifact provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: ${{ steps.build.outputs.archive }}
+      - name: Sign binary and bind its SPDX SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: ${{ steps.build.outputs.binary }}
+          sbom-path: ${{ steps.build.outputs.sbom }}
+      - name: Create source-attached GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist && sha256sum "keel-${GITHUB_REF_NAME}-linux-amd64.tar.gz" "keel-${GITHUB_REF_NAME}-linux-amd64.spdx.json" > SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.build.outputs.archive }}" \
+            "${{ steps.build.outputs.sbom }}" \
+            dist/SHA256SUMS \
+            --verify-tag --generate-notes
