@@ -35,7 +35,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 | `K1.4-OPS` | task | Add an audited, tenant-scoped operator repair path for blocked outbox streams. | [Open issue](https://github.com/sanskarpan/Keel/issues/108) |
 | `K1.4-SEC` | task | Qualify authenticated TLS Kafka transport and fail closed for non-local plaintext configuration. | [Open issue](https://github.com/sanskarpan/Keel/issues/109) |
 
-| `K1.5` | task | K1.5 Add durable inbox, contiguous projection apply, conflict quarantine and gap replay. | [Open issue](https://github.com/sanskarpan/Keel/issues/13) |
+| `K1.5` | task | K1.5 Add durable inbox, contiguous projection apply, conflict quarantine and gap replay. | [PR #111 (closes issue #13)](https://github.com/sanskarpan/Keel/pull/111) |
 
 | `K1.6` | task | K1.6 Add order UI/history, projection watermark and authoritative command reads. | [Open issue](https://github.com/sanskarpan/Keel/issues/14) |
 
