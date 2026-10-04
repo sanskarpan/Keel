@@ -6,7 +6,7 @@ The canonical initial HTTP shape is [`contracts/openapi/openapi.yaml`](../contra
 
 Version prefix `/v1`. Authentication: Bearer OIDC access token or explicitly scoped integration API key. Tenant identity derives from validated membership/key; an optional tenant-selection header must be authorized before use. All data endpoints run tenant-scoped DB transactions. Public liveness contains no application data.
 
-Mutations require `Idempotency-Key`; aggregate changes require `If-Match: "<version>"`. Cursor pagination defaults 25, max 100, opaque authenticated cursors scoped to tenant/filter/order. Responses include request ID, trace reference and authoritative operation/version IDs. Cache-Control is `private,no-store` for personal/order/context content.
+Mutations require `Idempotency-Key`; aggregate changes require `If-Match: "<version>"`. Cursor pagination defaults 25, max 100. Order-history cursors are encrypted/authenticated and scoped to tenant, order and page size; the server key ring retains retired key IDs for at least the seven-day cursor lifetime. Responses include request ID, trace reference and authoritative operation/version IDs. Cache-Control is `private,no-store` for personal/order/context content.
 
 Problem response: `{type,title,status,code,detail,request_id,retry_after_seconds}`. Stable codes distinguish `not_authorized`, `resource_not_found`, `version_conflict`, `idempotency_conflict`, `idempotency_record_expired`, `currency_mismatch`, `budget_exceeded`, `dependency_unavailable`, `resync_required`. Cross-tenant IDs return 404; unauthenticated callers get 401. Errors never include raw SQL, provider keys, document text or unredacted URLs.
 
@@ -28,6 +28,7 @@ Problem response: `{type,title,status,code,detail,request_id,retry_after_seconds
 | `POST /v1/orders/{id}/cancel` | permitted actor; nonterminal state only |
 | `GET /v1/orders/{id}` | reader; command snapshot/version plus projection watermark |
 | `GET /v1/orders/{id}/events` | auditor/authorized reader; paginated redacted event history |
+| `GET /app/orders/{id}` | authorized order reader; responsive server-rendered order summary and paginated history timeline |
 | `POST /v1/approvals/{id}/decisions` | current approver; decision/reason/evidence digest; durable acknowledgement |
 | `POST /v1/inferences` | reader + AI entitlement; operation/context/prompt refs and max output; 202 |
 | `GET /v1/inferences/{id}` | inference owner/authorized reader; result and accounting state |
@@ -62,6 +63,8 @@ Admin/operator APIs are separately routed, strongly authenticated and never acce
 ```
 
 An inference references allowed operation `policy.explain`, prompt version, immutable context refs and output bound. The API computes model policy and tenant scope; clients cannot submit arbitrary tool manifests, privileged SQL or policy overrides.
+
+Order detail reads always take `status` and `version` from the command snapshot. `projection_watermark` and `projection_lag_versions` describe the independent read projection only; an absent projection has watermark zero. Its strong `ETag` includes both command version and projection watermark because both affect the representation; `X-Order-Version` carries the authoritative command version. Order snapshot and first timeline page are read from one repeatable-read transaction. History responses expose only event ID, aggregate version, event type and occurrence time; raw event data, actor references, evidence digests and internal trace/correlation IDs remain private. Neither the API handler nor order UI accepts a tenant selector from request input. The handler requires trusted authentication context and an authorization policy; OIDC/session middleware and API runtime deployment remain gated by K0.
 
 Response to accepted async work is `{operation_id,status_url,stream_subscription,result_state:"queued"}`. Return a durable operation before the client attaches SSE; execution is not dependent on the connection staying open.
 

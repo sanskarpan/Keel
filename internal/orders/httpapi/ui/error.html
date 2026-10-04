@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>{{.Title}} · Keel order workspace</title>
+    <link rel="stylesheet" href="/app/orders/assets/order.css">
+  </head>
+  <body>
+    <header class="topbar"><span class="brand">Keel</span><span>Orders</span></header>
+    <main id="main" class="page" tabindex="-1">
+      <section class="card error-card" aria-labelledby="error-title" role="alert">
+        <p class="eyebrow">Order workspace</p>
+        <h1 id="error-title">{{.Title}}</h1>
+        <p>{{.Detail}}</p>
+        <p class="error-code">Reference: {{.Code}}</p>
+      </section>
+    </main>
+  </body>
+</html>

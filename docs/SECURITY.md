@@ -31,6 +31,8 @@ Read-only transaction mode is defense in depth, not the privilege boundary; a ro
 
 Trusted API and worker roles use `WithTenantTx` to set a transaction-local `keel.tenant_id` only after server-side authorization. PostgreSQL custom GUCs are caller-settable, so this protects against omitted tenant predicates and routine application mistakes; it does not make a compromised cross-tenant app/worker credential tenant-bound. Agent identities are separately bound by `session_user`. Scope service roles, audit context changes, enforce network separation, and offer a dedicated tenant database tier for customers requiring a stronger physical boundary.
 
+Order read handlers accept tenant and principal identity only from trusted middleware context and require a resource authorization decision before querying. They return non-enumerating 404s for denied resources. Public timeline rows use a reviewed allowlist of event ID, version, type and occurrence time; private event payloads, actor references, evidence digests and trace/correlation IDs are excluded. History cursors use AES-256-GCM with a key ID, associated-data domain and seven-day expiry; the encrypted claims bind tenant, order and page size. Cursor key material is injected into the handler, never accepted from a request, and old keys remain available for the full token lifetime after rotation.
+
 ## 4. PII handling and context retention
 
 Central Go logging and extraction/model adapters accept structured allowlisted fields. PII scrubbing runs before emission; raw request bodies, SQL parameters, document text, provider headers and tokens are not log fields. Unknown text is dropped or hashed when safe redaction cannot be established. Redaction is best effort for content supplied to a model; publishing a recall claim requires an evaluated entity corpus.
@@ -48,6 +50,8 @@ Extraction jobs run with no cloud admin credentials, restricted object access, n
 ## 6. Identity and keys
 
 OIDC exact issuer/audience and asymmetric algorithm allowlist; reject algorithm confusion and missing expiry. Key cache has bounded stale use only for already-known signing keys; unknown keys fail closed during issuer outage. API keys are high-entropy secrets hashed at rest, scoped, rate-limited and rotated/revoked; display once.
+
+History-cursor encryption keys are separate from OIDC, API-key and database credentials. Keep a versioned key ring in the deployment secret provider; do not log tokens or claims. Removing an old key before its seven-day token expiry intentionally invalidates those cursors and should be treated as a user-visible pagination reset.
 
 Cloud access uses workload identity, not static environment credentials shared across roles. DB/API/provider secrets rotate with overlap and short cache lifetimes; rotation does not require image rebuild. TLS is required to every remote dependency; private networking does not justify disabled verification.
 

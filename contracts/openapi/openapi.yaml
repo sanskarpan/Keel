@@ -131,7 +131,11 @@ paths:
           description: Current authorized order state.
           headers:
             ETag:
-              schema: { type: string, pattern: '^"[1-9][0-9]*"$' }
+              description: Strong validator for the full order representation; includes both command version and projection watermark.
+              schema: { type: string, pattern: '^"[1-9][0-9]*-[0-9]+"$' }
+            X-Order-Version:
+              description: Authoritative command aggregate version for optimistic concurrency.
+              schema: { type: string, pattern: '^[1-9][0-9]*$' }
           content:
             application/json:
               schema:
@@ -139,6 +143,8 @@ paths:
         '401':
           $ref: '#/components/responses/Problem'
         '404':
+          $ref: '#/components/responses/Problem'
+        '400':
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
@@ -209,6 +215,8 @@ paths:
         '401':
           $ref: '#/components/responses/Problem'
         '404':
+          $ref: '#/components/responses/Problem'
+        '400':
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
@@ -339,18 +347,38 @@ components:
     Order:
       type: object
       additionalProperties: false
-      required: [order_id, status, version, currency, amount_minor, projection_watermark]
+      required: [order_id, status, version, external_reference, supplier_id, currency, amount_minor, line_items, projection_watermark, projection_lag_versions, updated_at]
       properties:
         order_id: { type: string, format: uuid }
-        status: { type: string, enum: [draft, submitted, verifying, approved, rejected, canceled] }
-        version: { type: integer, minimum: 1 }
+        status:
+          type: string
+          enum: [draft, submitted, verifying, approved, rejected, canceled]
+          description: Authoritative state from the transactional command snapshot.
+        version: { type: integer, format: int64, minimum: 1, description: Authoritative command aggregate version. }
+        external_reference: { type: string, minLength: 1, maxLength: 128 }
+        supplier_id: { type: string, format: uuid }
         currency:
           type: string
           pattern: '^[A-Z]{3}$'
           description: Three uppercase letters; the server validates the supported ISO 4217 currency catalog before mutation.
         amount_minor: { type: integer, minimum: 1, maximum: 9007199254740991 }
-        projection_watermark: { type: integer, minimum: 0 }
-        result_state: { type: string, enum: [accepted, queued, running, complete, failed] }
+        line_items:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [description, quantity]
+            properties:
+              description: { type: string, minLength: 1, maxLength: 500 }
+              quantity:
+                type: string
+                maxLength: 32
+                pattern: '^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$'
+                not: { pattern: '^0(\.0{1,6})?$' }
+        projection_watermark: { type: integer, format: int64, minimum: 0, description: Highest contiguous version applied by the asynchronous read projection; zero means no projection is available yet. }
+        projection_lag_versions: { type: integer, format: int64, minimum: 0, description: Authoritative version minus projection watermark. }
+        updated_at: { type: string, format: date-time }
     OrderEventPage:
       type: object
       additionalProperties: false
@@ -360,8 +388,19 @@ components:
           type: array
           maxItems: 100
           items:
-            $ref: '../events/order-submitted.v1.schema.json'
+            $ref: '#/components/schemas/OrderHistoryEvent'
         next_cursor: { type: string, minLength: 1, maxLength: 2048 }
+    OrderHistoryEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, version, type, occurred_at]
+      properties:
+        event_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        type:
+          type: string
+          enum: [order.created, order.submitted, order.verification_started, order.approved, order.rejected, order.canceled]
+        occurred_at: { type: string, format: date-time }
     Problem:
       type: object
       additionalProperties: false

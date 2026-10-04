@@ -1,0 +1,144 @@
+package postgres
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/sanskarpan/keel/internal/orders"
+	"github.com/sanskarpan/keel/internal/platform/tenancy"
+)
+
+// ReadOrder reads command authority and projector progress from one repeatable-read snapshot.
+// A missing projection is normal lag and is represented as watermark zero.
+func (r *Repository) ReadOrder(ctx context.Context, tenant tenancy.TenantID, orderID string) (view orders.ReadView, err error) {
+	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
+		var readErr error
+		view, readErr = readOrderInTx(ctx, tx, tenant, orderID)
+		return readErr
+	})
+	return view, err
+}
+
+// ReadOrderWithHistory returns the detail view and its first history page from one database
+// snapshot, so concurrent commands cannot produce a timeline newer than its displayed head.
+func (r *Repository) ReadOrderWithHistory(ctx context.Context, tenant tenancy.TenantID, orderID string, beforeVersion uint64, limit int) (view orders.ReadView, page orders.HistoryPage, err error) {
+	if limit < 1 || limit > 100 {
+		return orders.ReadView{}, orders.HistoryPage{}, errors.New("history page limit must be in [1,100]")
+	}
+	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
+		var readErr error
+		view, readErr = readOrderInTx(ctx, tx, tenant, orderID)
+		if readErr != nil {
+			return readErr
+		}
+		page, readErr = pageEventsInTx(ctx, tx, tenant, orderID, view.Snapshot.Version, beforeVersion, limit)
+		return readErr
+	})
+	return view, page, err
+}
+
+func readOrderInTx(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, orderID string) (orders.ReadView, error) {
+	snapshot, err := loadSnapshot(ctx, tx, tenant, orderID, false)
+	if err != nil {
+		return orders.ReadView{}, err
+	}
+	var updatedAt time.Time
+	if err := tx.QueryRowContext(ctx, `SELECT updated_at FROM keel_meta.order_heads WHERE tenant_id=$1 AND order_id=$2`, string(tenant), orderID).Scan(&updatedAt); err != nil {
+		return orders.ReadView{}, err
+	}
+	var watermark int64
+	var projectedStatus sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT applied_version,status FROM keel_meta.order_projections WHERE tenant_id=$1 AND aggregate_id=$2`, string(tenant), orderID).Scan(&watermark, &projectedStatus)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return orders.ReadView{}, err
+	}
+	if watermark < 0 || uint64(watermark) > snapshot.Version || (watermark == 0 && projectedStatus.Valid) || (watermark > 0 && !projectedStatus.Valid) || (uint64(watermark) == snapshot.Version && projectedStatus.String != string(snapshot.Status)) {
+		return orders.ReadView{}, fmt.Errorf("%w: projection conflicts with authoritative order state", ErrCorruptState)
+	}
+	return orders.ReadView{Snapshot: snapshot, ProjectionWatermark: uint64(watermark), UpdatedAt: updatedAt.UTC()}, nil
+}
+
+// PageEvents returns an integrity-checked descending page from immutable aggregate history.
+// beforeVersion is exclusive; zero starts at the authoritative command head.
+func (r *Repository) PageEvents(ctx context.Context, tenant tenancy.TenantID, orderID string, beforeVersion uint64, limit int) (page orders.HistoryPage, err error) {
+	if limit < 1 || limit > 100 {
+		return orders.HistoryPage{}, errors.New("history page limit must be in [1,100]")
+	}
+	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
+		snapshot, err := loadSnapshot(ctx, tx, tenant, orderID, false)
+		if err != nil {
+			return err
+		}
+		page, err = pageEventsInTx(ctx, tx, tenant, orderID, snapshot.Version, beforeVersion, limit)
+		return err
+	})
+	return page, err
+}
+
+func pageEventsInTx(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, orderID string, headVersion, beforeVersion uint64, limit int) (orders.HistoryPage, error) {
+	if headVersion >= uint64(^uint64(0)>>1) {
+		return orders.HistoryPage{}, fmt.Errorf("%w: order version is outside database history range", ErrCorruptState)
+	}
+	upper := beforeVersion
+	if upper == 0 {
+		upper = headVersion + 1
+	}
+	if upper < 2 || upper > headVersion+1 {
+		return orders.HistoryPage{}, errors.New("history cursor is outside the order version range")
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT aggregate_version,event_id::text,event_type,occurred_at,event_data,event_hash
+		FROM keel_meta.order_events WHERE tenant_id=$1 AND order_id=$2 AND aggregate_version<$3
+		ORDER BY aggregate_version DESC LIMIT $4`, string(tenant), orderID, int64(upper), limit+1)
+	if err != nil {
+		return orders.HistoryPage{}, err
+	}
+	defer rows.Close()
+	items := make([]orders.HistoryEvent, 0, limit+1)
+	expected := upper - 1
+	for rows.Next() {
+		var version int64
+		var eventID, eventType string
+		var occurredAt time.Time
+		var raw, storedHash []byte
+		if err := rows.Scan(&version, &eventID, &eventType, &occurredAt, &raw, &storedHash); err != nil {
+			return orders.HistoryPage{}, err
+		}
+		var event orders.Event
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&event); err != nil {
+			return orders.HistoryPage{}, fmt.Errorf("%w: decode history event", ErrCorruptState)
+		}
+		canonical, err := json.Marshal(event)
+		if err != nil || !bytes.Equal(digest(canonical), storedHash) || version < 1 || uint64(version) != expected || event.Version != expected || eventID != event.Metadata.EventID || eventType != string(event.Type) || !occurredAt.Equal(event.Metadata.OccurredAt) || event.Metadata.TenantID != string(tenant) || event.Metadata.OrderID != orderID {
+			return orders.HistoryPage{}, fmt.Errorf("%w: history event integrity check failed", ErrCorruptState)
+		}
+		items = append(items, orders.HistoryEvent{EventID: eventID, Version: uint64(version), Type: event.Type, OccurredAt: occurredAt.UTC()})
+		expected--
+	}
+	if err := rows.Err(); err != nil {
+		return orders.HistoryPage{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return orders.HistoryPage{}, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	} else if expected != 0 {
+		return orders.HistoryPage{}, fmt.Errorf("%w: event history has a version gap", ErrCorruptState)
+	}
+	if len(items) == 0 {
+		return orders.HistoryPage{}, fmt.Errorf("%w: event history is empty", ErrCorruptState)
+	}
+	page := orders.HistoryPage{Items: items, HasMore: hasMore}
+	if hasMore {
+		page.NextFrom = items[len(items)-1].Version
+	}
+	return page, nil
+}

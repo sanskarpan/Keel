@@ -37,7 +37,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K1.5` | task | K1.5 Add durable inbox, contiguous projection apply, conflict quarantine and gap replay. | [PR #111 (closes issue #13)](https://github.com/sanskarpan/Keel/pull/111) |
 
-| `K1.6` | task | K1.6 Add order UI/history, projection watermark and authoritative command reads. | [Open issue](https://github.com/sanskarpan/Keel/issues/14) |
+| `K1.6` | task | K1.6 Add order UI/history, projection watermark and authoritative command reads. | [PR #112 (closes issue #14)](https://github.com/sanskarpan/Keel/pull/112) |
 
 | `K1.7` | task | K1.7 Exercise command/relay/consumer crash and rebalance boundaries. | [Open issue](https://github.com/sanskarpan/Keel/issues/15) |
 
