@@ -7,14 +7,26 @@ import (
 	"strings"
 )
 
-const redacted = "[REDACTED]"
+const (
+	redacted = "[REDACTED]"
+	omitted  = "[OMITTED]"
+)
+
+var safeAttributeNames = map[string]struct{}{
+	"time": {}, "level": {}, "msg": {}, "requestid": {}, "traceid": {},
+	"role": {}, "environment": {}, "listenaddress": {}, "component": {},
+	"errorcode": {}, "errortype": {}, "durationms": {}, "httpstatus": {},
+	"operation": {}, "result": {}, "attempt": {}, "policyversion": {},
+	"count": {}, "retryafterms": {},
+}
 
 var sensitiveNames = map[string]struct{}{
 	"authorization": {}, "proxyauthorization": {}, "cookie": {}, "setcookie": {},
 	"password": {}, "passwd": {}, "secret": {}, "clientsecret": {}, "credential": {}, "credentials": {}, "auth": {},
 	"accesstoken": {}, "refreshtoken": {}, "token": {}, "apikey": {},
 	"privatekey": {}, "prompt": {}, "prompttext": {}, "document": {},
-	"documenttext": {}, "body": {}, "rawbody": {}, "sql": {}, "querytext": {},
+	"documenttext": {}, "body": {}, "rawbody": {}, "sql": {}, "query": {}, "querytext": {},
+	"url": {}, "uri": {}, "dsn": {}, "connectionstring": {}, "email": {},
 }
 
 // NewJSON returns a JSON logger with field-level redaction. Log messages themselves
@@ -31,6 +43,9 @@ func redactAttribute(groups []string, attr slog.Attr) slog.Attr {
 	attr.Value = attr.Value.Resolve()
 	if containsSensitiveName(attr.Key) || sensitiveGroup(groups) {
 		return slog.String(attr.Key, redacted)
+	}
+	if !isSafeAttribute(attr.Key) {
+		return slog.String(attr.Key, omitted)
 	}
 	if attr.Value.Kind() != slog.KindGroup {
 		return attr
@@ -61,5 +76,16 @@ func containsSensitiveName(key string) bool {
 		}
 	}
 	_, found := sensitiveNames[normalized.String()]
+	return found
+}
+
+func isSafeAttribute(key string) bool {
+	var normalized strings.Builder
+	for _, r := range strings.ToLower(key) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			normalized.WriteRune(r)
+		}
+	}
+	_, found := safeAttributeNames[normalized.String()]
 	return found
 }
