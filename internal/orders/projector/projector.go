@@ -125,6 +125,33 @@ func (p *Processor) Process(ctx context.Context, tenantID string, record Record)
 	return result, nil
 }
 
+// ProcessRecord derives only an untrusted tenant claim from the record so RLS can search that
+// tenant's canonical outbox. Only an exact canonical outbox match can affect a projection.
+// Records without a parseable tenant are digest-quarantined without creating a tenant claim.
+func (p *Processor) ProcessRecord(ctx context.Context, record Record) (Result, error) {
+	var claim struct {
+		TenantID string `json:"tenant_id"`
+	}
+	if len(record.Value) > MaxEnvelopeBytes {
+		return p.quarantineInvalidTransport(ctx, record)
+	}
+	if err := json.Unmarshal(record.Value, &claim); err != nil || !uuidPattern.MatchString(claim.TenantID) {
+		return p.quarantineInvalidTransport(ctx, record)
+	}
+	return p.Process(ctx, claim.TenantID, record)
+}
+
+func (p *Processor) quarantineInvalidTransport(ctx context.Context, record Record) (Result, error) {
+	if !topicPattern.MatchString(record.Topic) || record.Partition < 0 || record.Offset < 0 {
+		return Result{}, fmt.Errorf("%w: invalid broker coordinates", ErrInvalidRecord)
+	}
+	payloadHash := sha256.Sum256(record.Value)
+	if err := p.store.QuarantineTransport(ctx, record.Topic, record.Partition, record.Offset, payloadHash, "invalid_record"); err != nil {
+		return Result{}, fmt.Errorf("persist malformed-record quarantine: %w", err)
+	}
+	return Result{Disposition: Quarantined, ReasonCode: "invalid_record"}, nil
+}
+
 // ReplayGaps applies missing canonical outbox envelopes for one tenant. It is bounded so a
 // single tenant or corrupt stream cannot monopolize a projector worker.
 func (p *Processor) ReplayGaps(ctx context.Context, tenantID string, limit int) (int, error) {
