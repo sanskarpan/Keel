@@ -55,11 +55,13 @@ jobs:
         env:
           KEEL_TEST_DATABASE_URL: postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_AGENT_PASSWORD: keel-agent-local-only
+          KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
         run: make check
       - name: Race-check packages
         env:
           KEEL_TEST_DATABASE_URL: postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_AGENT_PASSWORD: keel-agent-local-only
+          KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
         run: GOTOOLCHAIN=local go test -race ./...
       - name: Build all packages
         run: GOTOOLCHAIN=local go build ./...

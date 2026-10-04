@@ -20,7 +20,7 @@ Use operation templates/status classifications, not arbitrary URLs as metric lab
 
 ## 2. Health and observability
 
-Implement shared health/version/metrics endpoints. Liveness never recursively probes failed dependencies. Readiness is role-specific and permits outbox buffering within its safe backlog; it does not require every webhook destination to be healthy.
+`internal/platform/health` supplies `/health/live`, `/health/startup`, `/health/ready`, `/version` and `/metrics` handlers plus a graceful HTTP server runner. Liveness never probes dependencies. Startup returns unavailable until the role marks initialization complete. Readiness executes caller-supplied role-specific probes with a two-second context budget and returns generic failure text; it fails closed when no probes are registered, permits outbox buffering within its safe backlog and does not require every webhook destination to be healthy. Keep the management listener private and apply network policy/authentication before deployment; these endpoints are not wired into the still-fail-closed role dispatcher. The initial metrics are process/build identity and bounded HTTP request count/duration labels; service-specific DB, queue, budget and stream measurements are added with their owning runtime features. Never put tenant, user, document, raw URL or query values into shared metric labels.
 
 Prometheus metrics: request latency/inflight/admission rejection, stream queues/disconnects, limiter failures, DB pool/lock/statement latency, outbox age, Kafka lag/gap/deadletter counts, runnable-job age/lease expiry, provider latency/tokens/attempt outcomes, budget reservation liabilities, webhook attempt status/retry age and workflow intent lag. Avoid tenant/document/user IDs in shared metric labels.
 
@@ -36,7 +36,7 @@ Dashboards separate internal API, provider, webhook receiver and queue SLIs. Ten
 
 ## 4. Deployments
 
-Build signed immutable images, SBOM and provenance. Run migration under dedicated identity, then roll runtime roles using readiness/startup and backward compatibility. API PDB/zone spreading protects baseline availability; worker interruption policies reflect lease-based recovery. Canary compares errors/latency/gaps and invariant metrics, not just HTTP health.
+The tag-triggered release workflow builds an immutable Linux/amd64 binary, emits an SPDX SBOM and checksum list, and obtains GitHub OIDC-backed provenance for the archive plus an SBOM attestation for the binary. Verify checksums and attestations before use. Run migrations under the dedicated migration login, then roll runtime roles using readiness/startup and backward compatibility. API PDB/zone spreading protects baseline availability; worker interruption policies reflect lease-based recovery. Canary compares errors/latency/gaps and invariant metrics, not just HTTP health. This is a release pipeline definition; no Keel release artifact has yet been published or qualified for production.
 
 Config/secrets are validated at startup. Provider, OIDC and webhook keys rotate with overlap. Disabling a provider, semantic cache, document indexing or integration is a documented kill switch. Kill switches never bypass budget/authorization controls. Rollback code only when schema/event/workflow compatibility remains valid; use forward repair for irreversible data changes.
 

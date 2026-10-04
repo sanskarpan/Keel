@@ -1,6 +1,14 @@
 # Operator runbooks
 
-Procedures below define required administrative tooling. They are not claims that a CLI already exists. Every mutation runs through an authorized API/tool with audit; direct ad hoc production SQL is a break-glass action.
+Procedures below define administrative tooling and operational controls. Every business mutation runs through an authorized API/tool with audit; the K0.6 migration CLI is the only normal schema-change path. Direct ad hoc production SQL is a break-glass action.
+
+## KB-00: Verify and apply a Keel release
+
+Download the release archive, SPDX SBOM and `SHA256SUMS` from the Keel GitHub Release. Verify file checksums with `sha256sum -c SHA256SUMS`, then run `gh attestation verify keel-vX.Y.Z-linux-amd64.tar.gz --repo sanskarpan/Keel`. Extract the binary and verify its subject-bound SBOM attestation with `gh attestation verify keel-linux-amd64 --repo sanskarpan/Keel --predicate-type https://spdx.dev/Document/v2.3`. Reject artifacts with missing/invalid checksum or attestation; attestations identify the producing workflow/source but do not prove the release is safe or production-qualified. See [`RELEASES.md`](RELEASES.md) for the full release contract.
+
+Before first use, provision a dedicated login that may `SET ROLE keel_schema_owner`, but is not a superuser, database owner, app, worker or agent login. Configure `KEEL_MIGRATION_DATABASE_URL` in a one-shot migration job secret store. Run the tagged binary's `migrate` command before compatible runtime rollout; never pass this DSN to product-facing workers or the model. The session advisory lock serializes concurrent migration jobs. The command creates `keel_meta.schema_migrations` if absent, verifies every recorded filename and SHA-256 against the binary, then commits one migration and its ledger row atomically.
+
+If a migration fails, stop rollout and preserve logs/checksums. Its transaction is rolled back and the advisory lock is released when the process exits or its DB session is terminated. Transaction-control statements are rejected before execution so a migration cannot commit outside runner ownership. Fix the cause and retry only after confirming the same immutable file is still correct. Once a migration is applied, do not edit it or delete/alter ledger rows; publish a new forward repair. Online/nontransactional DDL is not supported by this runner. Roll application code back only when its schema compatibility allows it; otherwise deploy a forward-compatible repair.
 
 ## KB-01: Outbox lag or broker outage
 

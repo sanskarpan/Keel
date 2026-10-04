@@ -29,6 +29,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_agent_beta') THEN
         CREATE ROLE keel_local_agent_beta LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_migrator') THEN
+        CREATE ROLE keel_local_migrator LOGIN PASSWORD 'keel-migrate-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
 END
 $$;
 
@@ -41,17 +44,22 @@ ALTER ROLE keel_local_app LOGIN PASSWORD 'keel-app-local-only' NOSUPERUSER NOCRE
 ALTER ROLE keel_local_worker LOGIN PASSWORD 'keel-worker-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_agent_alpha LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_agent_beta LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+ALTER ROLE keel_local_migrator LOGIN PASSWORD 'keel-migrate-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 
 GRANT keel_app TO keel_local_app;
 GRANT keel_worker TO keel_local_worker;
 GRANT keel_agent TO keel_local_agent_alpha;
 GRANT keel_agent TO keel_local_agent_beta;
+GRANT keel_schema_owner TO keel_local_migrator;
 
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 CREATE SCHEMA IF NOT EXISTS keel_private AUTHORIZATION keel_context_owner;
 CREATE SCHEMA IF NOT EXISTS tenant_data AUTHORIZATION keel_schema_owner;
+CREATE SCHEMA IF NOT EXISTS keel_meta AUTHORIZATION keel_schema_owner;
 ALTER SCHEMA keel_private OWNER TO keel_context_owner;
 ALTER SCHEMA tenant_data OWNER TO keel_schema_owner;
+ALTER SCHEMA keel_meta OWNER TO keel_schema_owner;
+REVOKE ALL ON SCHEMA keel_meta FROM PUBLIC;
 GRANT USAGE ON SCHEMA keel_private TO keel_app, keel_worker, keel_agent;
 GRANT USAGE ON SCHEMA tenant_data TO keel_app, keel_worker, keel_agent;
 

@@ -56,6 +56,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Startup'
+        '503':
+          description: Role initialization has not completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Startup'
   /version:
     get:
       tags: [health]
