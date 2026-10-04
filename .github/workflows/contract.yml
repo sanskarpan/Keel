@@ -67,6 +67,10 @@ jobs:
         with:
           go-version-file: .go-version
           cache: true
+      - name: Verify authenticated Kafka TLS and rotation
+        env:
+          KEEL_TEST_KAFKA_IMAGE: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
+        run: bash scripts/test-kafka-secure.sh
       - name: Install forced-RLS fixture in PostgreSQL
         env:
           PGPASSWORD: keel-local-only
