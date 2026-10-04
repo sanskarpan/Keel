@@ -30,6 +30,7 @@ func TestPostgreSQLTwoTenantOrderAPIIsolation(t *testing.T) {
 		{tenant: tenantBeta, order: betaOrderID, ref: "tenant-beta-api-" + nextUUID(), key: "tenant-beta-api-create-" + nextUUID()},
 	} {
 		metadata := testMetadata(string(item.tenant), item.order)
+		metadata.ActorRef = "principal:api-reader"
 		if _, err := repo.Create(ctx, item.tenant, testCreate(item.ref), metadata, item.key, "principal:api-reader"); err != nil {
 			t.Fatalf("create synthetic order for %s: %v", item.tenant, err)
 		}
