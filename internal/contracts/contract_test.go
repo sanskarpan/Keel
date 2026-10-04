@@ -73,7 +73,16 @@ func TestOpenAPIContractLoadsAndValidates(t *testing.T) {
 	if err := api.Validate(context.Background()); err != nil {
 		t.Fatalf("validate OpenAPI contract: %v", err)
 	}
-	for _, requiredPath := range []string{"/health/live", "/health/ready", "/health/startup", "/version", "/v1/orders", "/v1/orders/{order_id}/submit", "/v1/orders/{order_id}/events"} {
+	for _, requiredPath := range []string{
+		"/health/live", "/health/ready", "/health/startup", "/version",
+		"/v1/orders", "/v1/orders/{order_id}/submit", "/v1/orders/{order_id}/events",
+		"/v1/supplier-invitations",
+		"/v1/public/tenants/{tenant_id}/supplier-invitations/accept",
+		"/v1/public/tenants/{tenant_id}/supplier-upload-sessions/uploads",
+		"/v1/public/tenants/{tenant_id}/supplier-uploads/{upload_id}/content",
+		"/v1/public/tenants/{tenant_id}/supplier-uploads/{upload_id}/capability",
+		"/v1/public/tenants/{tenant_id}/supplier-uploads/{upload_id}",
+	} {
 		if _, ok := api.Paths.Map()[requiredPath]; !ok {
 			t.Errorf("OpenAPI contract is missing %s", requiredPath)
 		}

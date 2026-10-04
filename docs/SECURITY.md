@@ -47,6 +47,8 @@ Presigned URLs bind key, content length/type constraints, checksum and expiry; s
 
 Extraction jobs run with no cloud admin credentials, restricted object access, no external network, CPU/memory/time/output-size bounds and isolated temporary files. Never pass an uploaded filename into a shell command. Virus scanning and content classification precede publication/index eligibility.
 
+K2.1 enforces these boundaries in `internal/supplier/intake`: 256-bit purpose-separated invitation/session tokens are stored only as digests; recipient addresses are peppered HMAC digests; upload capabilities bind tenant, invitation, upload ID, declared size/hash, purpose and a <=15-minute expiry. The ingress validates the actual body before storing it and never persists the supplier filename. The local filesystem adapter is synthetic-only (0700 directory, 0600 UUID-named files, atomic create-if-absent). The separately granted `keel_file_processor` role has tenant RLS and only upload-row read/update access; lease epochs fence expired workers. Tika connects directly to the fixed internal endpoint, ignores proxy environment variables and rejects redirects. The CI sandbox runs ClamAV/Tika with no egress and bounded resources. Its bundled ClamAV signatures prove a deterministic contract only; production signature freshness/update ownership and encrypted/versioned cloud object storage are not yet qualified.
+
 ## 6. Identity and keys
 
 OIDC exact issuer/audience and asymmetric algorithm allowlist; reject algorithm confusion and missing expiry. Key cache has bounded stale use only for already-known signing keys; unknown keys fail closed during issuer outage. API keys are high-entropy secrets hashed at rest, scoped, rate-limited and rotated/revoked; display once.

@@ -20,6 +20,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_operator') THEN
         CREATE ROLE keel_operator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_file_processor') THEN
+        CREATE ROLE keel_file_processor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_agent') THEN
         CREATE ROLE keel_agent NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
     END IF;
@@ -34,6 +37,9 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_operator') THEN
         CREATE ROLE keel_local_operator LOGIN PASSWORD 'keel-operator-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_file_processor') THEN
+        CREATE ROLE keel_local_file_processor LOGIN PASSWORD 'keel-file-processor-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_agent_alpha') THEN
         CREATE ROLE keel_local_agent_alpha LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
@@ -53,11 +59,13 @@ ALTER ROLE keel_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPA
 ALTER ROLE keel_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_projector NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_operator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+ALTER ROLE keel_file_processor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_agent NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_local_app LOGIN PASSWORD 'keel-app-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_worker LOGIN PASSWORD 'keel-worker-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_projector LOGIN PASSWORD 'keel-projector-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_operator LOGIN PASSWORD 'keel-operator-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+ALTER ROLE keel_local_file_processor LOGIN PASSWORD 'keel-file-processor-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_agent_alpha LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_agent_beta LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_migrator LOGIN PASSWORD 'keel-migrate-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
@@ -66,6 +74,7 @@ GRANT keel_app TO keel_local_app;
 GRANT keel_worker TO keel_local_worker;
 GRANT keel_projector TO keel_local_projector;
 GRANT keel_operator TO keel_local_operator;
+GRANT keel_file_processor TO keel_local_file_processor;
 GRANT keel_agent TO keel_local_agent_alpha;
 GRANT keel_agent TO keel_local_agent_beta;
 GRANT keel_schema_owner TO keel_local_migrator;
@@ -78,7 +87,7 @@ ALTER SCHEMA keel_private OWNER TO keel_context_owner;
 ALTER SCHEMA tenant_data OWNER TO keel_schema_owner;
 ALTER SCHEMA keel_meta OWNER TO keel_schema_owner;
 REVOKE ALL ON SCHEMA keel_meta FROM PUBLIC;
-GRANT USAGE ON SCHEMA keel_private TO keel_app, keel_worker, keel_projector, keel_operator, keel_agent;
+GRANT USAGE ON SCHEMA keel_private TO keel_app, keel_worker, keel_projector, keel_operator, keel_file_processor, keel_agent;
 GRANT USAGE ON SCHEMA tenant_data TO keel_app, keel_worker, keel_agent;
 
 SET ROLE keel_context_owner;
@@ -105,7 +114,7 @@ AS $$
     END
 $$;
 REVOKE ALL ON FUNCTION keel_private.current_tenant_id() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION keel_private.current_tenant_id() TO keel_app, keel_worker, keel_projector, keel_operator, keel_agent;
+GRANT EXECUTE ON FUNCTION keel_private.current_tenant_id() TO keel_app, keel_worker, keel_projector, keel_operator, keel_file_processor, keel_agent;
 RESET ROLE;
 GRANT USAGE ON SCHEMA keel_private TO keel_schema_owner;
 GRANT EXECUTE ON FUNCTION keel_private.current_tenant_id() TO keel_schema_owner;

@@ -11,9 +11,12 @@
 | Kafka | `apache/kafka:4.3.1`, OCI index `sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | Apache Kafka release and official container. Single combined KRaft broker/controller only. No managed-service compatibility asserted. |
 | Redis | `redis:8.2.3`, OCI index `sha256:0908d9af26bf9b985e984a40a5eb82eed229b07a3317eee6843832c3cc3a9619` | Official Docker image and immutable manifest. Local cache/rate-limit development only. |
 | Temporal | `temporalio/auto-setup:1.29.7`, OCI index `sha256:f14912b699cf73015ad5c4fc18d522d4b014db90e794039214dfb7c022c2644f` | Official local auto-setup image. 1.29.7 is not the current Temporal server release; chosen to match an available, documented local bootstrap image. Not Temporal Cloud or production compatibility evidence. |
+| Malware scan contract | `clamav/clamav:1.5.4`, OCI index `sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0` | Official ClamAV image with a preloaded signature database. Contract CI runs it without egress and verifies clean/EICAR verdicts. This does not qualify signature freshness, update operations, production capacity, or an SLA. |
+| Document extraction contract | `apache/tika:3.3.1.0-full`, OCI index `sha256:d8e6ed96260ad89307a93195a1b856102987a818ac648502f8efbaf313d32470` | Official Apache Tika full image. Contract CI runs with no egress, read-only root, bounded tmpfs, CPU, memory and PID limits. This is parser contract evidence, not production capacity or high-availability qualification. |
+| Sandbox test runner | `alpine:3.22.2`, OCI index `sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412` | Minimal static-Go test runner inside the internal-only scanner network; it is not a runtime dependency. |
 | Compose | Docker Compose `2.40.3` verified in this workspace | `docker compose version`; supported contributor baseline is Compose v2. |
 
-Every image in `deploy/compose/compose.yaml` uses an immutable OCI index digest. A changed digest is an explicit reviewed baseline change. The repository now defines a tagged Linux/amd64 Go-binary release workflow with an SPDX SBOM, checksum list, GitHub artifact provenance and SBOM attestation. It does not build container images, verify local Compose image signatures, provide a CVE policy, qualify a platform matrix, or define an upgrade cadence; none of those are implied by digest pinning or artifact attestations.
+Every image in `deploy/compose/compose.yaml` and `scripts/test-intake-sandbox.sh` uses an immutable OCI index digest. A changed digest is an explicit reviewed baseline change. The repository now defines a tagged Linux/amd64 Go-binary release workflow with an SPDX SBOM, checksum list, GitHub artifact provenance and SBOM attestation. It does not build container images, verify local Compose image signatures, provide a CVE policy, qualify a platform matrix, or define an upgrade cadence; none of those are implied by digest pinning or artifact attestations.
 
 ## Provider capability decision
 
@@ -36,6 +39,10 @@ Workstream accountability is not an assigned person. No customer/pilot owner or 
 - Kafka release and Docker docs: <https://kafka.apache.org/community/downloads/> and <https://hub.docker.com/r/apache/kafka>
 - Redis tags: <https://hub.docker.com/_/redis/tags>
 - Temporal Docker builds and auto-setup: <https://github.com/temporalio/docker-builds/blob/main/docker/auto-setup.sh> and <https://github.com/temporalio/docker-builds/blob/main/docker-compose.yml>
+- ClamAV official Docker image behavior and preloaded-database guidance: <https://github.com/Cisco-Talos/clamav-docker/blob/main/clamav/README-alpine.md>
+- Apache Tika Server: <https://cwiki.apache.org/confluence/display/TIKA/TikaServer>
+- ClamAV image manifest: <https://hub.docker.com/v2/repositories/clamav/clamav/tags/1.5.4>
+- Apache Tika image manifest: <https://hub.docker.com/v2/repositories/apache/tika/tags/3.3.1.0-full>
 - AWS MSK supported versions: <https://docs.aws.amazon.com/msk/latest/developerguide/supported-kafka-versions.html>
 
 Digest evidence is tied to OCI image manifests returned by the registry on the decision date. It should be rechecked together with upstream security support windows before a production/hosted profile is selected.
