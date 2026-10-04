@@ -9,5 +9,6 @@ row run in one PostgreSQL transaction while the runner holds the fixed session a
 Keep files compatible with transactional PostgreSQL execution. Online operations such as
 `CREATE INDEX CONCURRENTLY` require an explicit future runner extension and separate acceptance;
 they cannot be placed in a regular migration file. The order aggregate/idempotency schema is
-introduced by migration `0001_orders_and_idempotency`; add later product tables with the owning
-domain migration and its access, retention, and recovery contracts.
+introduced by migration `0001_orders_and_idempotency`; transactional outbox/state-feed tables and
+their event-identity constraints are added by `0002` and `0003`. Add later product tables with the
+owning domain migration and its access, retention, and recovery contracts.
