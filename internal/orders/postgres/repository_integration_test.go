@@ -658,6 +658,16 @@ type failFirstAcknowledgeStore struct {
 	fail bool
 }
 
+type observedBroker struct {
+	outbox.Broker
+	lastErr error
+}
+
+func (b *observedBroker) Publish(ctx context.Context, message outbox.Message) error {
+	b.lastErr = b.Broker.Publish(ctx, message)
+	return b.lastErr
+}
+
 func (s *failFirstAcknowledgeStore) Acknowledge(ctx context.Context, claim outbox.Claim) error {
 	if s.fail {
 		s.fail = false
@@ -666,14 +676,35 @@ func (s *failFirstAcknowledgeStore) Acknowledge(ctx context.Context, claim outbo
 	return s.Store.Acknowledge(ctx, claim)
 }
 
+type targetDeliveryProcessor struct {
+	kafkarelay.RecordProcessor
+	eventID string
+	results []projector.Disposition
+}
+
+func (p *targetDeliveryProcessor) ProcessRecord(ctx context.Context, record projector.Record) (projector.Result, error) {
+	result, err := p.RecordProcessor.ProcessRecord(ctx, record)
+	if err == nil {
+		for _, header := range record.Headers {
+			if header.Key == "event_id" && string(header.Value) == p.eventID {
+				p.results = append(p.results, result.Disposition)
+				break
+			}
+		}
+	}
+	return result, err
+}
+
 func TestPostgreSQLRelayCrashAfterBrokerAcceptanceRedeliversSameEffect(t *testing.T) {
 	_, tenant, appRepo := repositoryTestDB(t)
 	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
 	workerDSN := os.Getenv("KEEL_TEST_WORKER_DATABASE_URL")
 	projectorDSN := os.Getenv("KEEL_TEST_PROJECTOR_DATABASE_URL")
-	if adminDSN == "" || workerDSN == "" || projectorDSN == "" {
-		t.Skip("set worker, projector, and test-admin database URLs for relay crash coverage")
+	brokers := strings.Split(os.Getenv("KEEL_TEST_KAFKA_BROKERS"), ",")
+	if adminDSN == "" || workerDSN == "" || projectorDSN == "" || strings.TrimSpace(brokers[0]) == "" {
+		t.Skip("set worker, projector, test-admin, and Kafka endpoints for relay crash coverage")
 	}
+	topic := "keel.k17-relay.orders.v1"
 	adminDB := integrationDB(t, adminDSN, 2)
 	workerDB := integrationDB(t, workerDSN, 2)
 	projectorDB := integrationDB(t, projectorDSN, 2)
@@ -694,32 +725,45 @@ func TestPostgreSQLRelayCrashAfterBrokerAcceptanceRedeliversSameEffect(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker := &recordingBroker{}
+	broker, err := kafkarelay.New(brokers, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	observed := &observedBroker{Broker: broker}
 	store := &failFirstAcknowledgeStore{Store: workerRepo, fail: true}
-	publisher, err := outbox.NewPublisher(store, broker, outbox.Config{LeaseDuration: 5 * time.Second, PublishTimeout: time.Second})
+	publisher, err := outbox.NewPublisher(store, observed, outbox.Config{LeaseDuration: 30 * time.Second, PublishTimeout: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	first, err := publisher.RunOnce(ctx, string(tenant), "relay-before-crash")
-	if err == nil || !first.Claimed || first.Published || len(broker.messages) != 1 {
-		t.Fatalf("crash after accepted broker write: result=%+v broker_messages=%d err=%v", first, len(broker.messages), err)
+	if err == nil || !first.Claimed || first.Published {
+		t.Fatalf("crash after actual Kafka acceptance: result=%+v broker_error=%v err=%v", first, observed.lastErr, err)
 	}
 	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.outbox_publish_heads SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND aggregate_id=$2`, string(tenant), created.Snapshot.OrderID); err != nil {
 		t.Fatal(err)
 	}
 	second, err := publisher.RunOnce(ctx, string(tenant), "relay-after-restart")
-	if err != nil || !second.Published || second.EventID != first.EventID || len(broker.messages) != 2 || broker.messages[0].EventID != broker.messages[1].EventID {
-		t.Fatalf("restart did not redeliver stable event identity: first=%+v second=%+v messages=%+v err=%v", first, second, broker.messages, err)
+	if err != nil || !second.Published || second.EventID != first.EventID {
+		t.Fatalf("restart did not redeliver stable event identity: first=%+v second=%+v err=%v", first, second, err)
 	}
-	for i, message := range broker.messages {
-		result, err := processor.Process(ctx, string(tenant), projectionRecord(t, message.Payload, time.Now().UnixNano()+int64(i)))
-		want := projector.Applied
-		if i == 1 {
-			want = projector.Duplicate
+	consumerProcessor := &targetDeliveryProcessor{RecordProcessor: processor, eventID: first.EventID}
+	consumer, err := kafkarelay.NewConsumer(brokers, topic, "keel-k17-relay-test", consumerProcessor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempts := 0; attempts < 100 && len(consumerProcessor.results) < 2; attempts++ {
+		if _, err := consumer.RunOnce(ctx); err != nil {
+			_ = consumer.Close()
+			t.Fatalf("consume actual Kafka relay records: %v", err)
 		}
-		if err != nil || result.Disposition != want {
-			t.Fatalf("projector delivery attempt %d result=%+v err=%v, want %s", i+1, result, err, want)
-		}
+	}
+	if len(consumerProcessor.results) != 2 || consumerProcessor.results[0] != projector.Applied || consumerProcessor.results[1] != projector.Duplicate {
+		_ = consumer.Close()
+		t.Fatalf("actual Kafka event delivery dispositions=%v, want applied then duplicate", consumerProcessor.results)
+	}
+	if err := consumer.Close(); err != nil {
+		t.Fatal(err)
 	}
 	assertProjectionVersion(t, adminDB, string(tenant), created.Snapshot.OrderID, 1, string(orders.Draft))
 	var effects int
