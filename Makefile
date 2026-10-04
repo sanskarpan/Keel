@@ -70,7 +70,13 @@ local-orders-test: local-migrate
 	@set -eu; \
 	docker compose -f $(COMPOSE_FILE) exec -T kafka /opt/kafka/bin/kafka-topics.sh \
 	  --bootstrap-server localhost:9092 --create --if-not-exists \
-	  --topic keel.order-events.test --partitions 3 --replication-factor 1; \
+	  --topic keel.test.orders.v1 --partitions 3 --replication-factor 1; \
+	docker compose -f $(COMPOSE_FILE) exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+	  --bootstrap-server localhost:9092 --create --if-not-exists \
+	  --topic keel.k17-relay.orders.v1 --partitions 3 --replication-factor 1; \
+	docker compose -f $(COMPOSE_FILE) exec -T kafka /opt/kafka/bin/kafka-topics.sh \
+	  --bootstrap-server localhost:9092 --create --if-not-exists \
+	  --topic keel.k17-consumer.orders.v1 --partitions 3 --replication-factor 1; \
 	test_bin=$$(mktemp /tmp/keel-orders-test.XXXXXX); \
 	trap 'rm -f "$$test_bin"; docker compose -f $(COMPOSE_FILE) exec -T postgres rm -f /tmp/keel-orders.test >/dev/null 2>&1 || true' EXIT; \
 	GOTOOLCHAIN=local go test -c -o "$$test_bin" ./internal/orders/postgres; \
@@ -81,5 +87,5 @@ local-orders-test: local-migrate
 	  KEEL_TEST_PROJECTOR_DATABASE_URL='postgres://keel_local_projector:keel-projector-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	  KEEL_TEST_ADMIN_DATABASE_URL='postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	  KEEL_TEST_KAFKA_BROKERS='kafka:9092' \
-	  KEEL_TEST_KAFKA_TOPIC='keel.order-events.test' \
+	  KEEL_TEST_KAFKA_TOPIC='keel.test.orders.v1' \
 	  /tmp/keel-orders.test -test.run TestPostgreSQL -test.count=1

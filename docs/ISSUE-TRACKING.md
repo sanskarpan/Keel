@@ -39,7 +39,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K1.6` | task | K1.6 Add order UI/history, projection watermark and authoritative command reads. | [PR #112 (closes issue #14)](https://github.com/sanskarpan/Keel/pull/112) |
 
-| `K1.7` | task | K1.7 Exercise command/relay/consumer crash and rebalance boundaries. | [Open issue](https://github.com/sanskarpan/Keel/issues/15) |
+| `K1.7` | task | K1.7 Exercise command/relay/consumer crash and rebalance boundaries. | [PR #113 (closes issue #15)](https://github.com/sanskarpan/Keel/pull/113) |
 
 | `K1-GATE` | gate | K1 gate: duplicates/reorder/replay never duplicate effects; event-derived state equals snapshot/projection. | [Open issue](https://github.com/sanskarpan/Keel/issues/16) |
 

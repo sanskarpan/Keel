@@ -14,7 +14,11 @@ import (
 	kafka "github.com/segmentio/kafka-go"
 )
 
-var topicPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
+var orderTopicPattern = regexp.MustCompile(`^keel\.[a-z0-9-]+\.orders\.v1$`)
+
+func validOrderTopic(topic string) bool {
+	return len(topic) <= 249 && orderTopicPattern.MatchString(topic)
+}
 
 type Broker struct {
 	writer *kafka.Writer
@@ -24,8 +28,8 @@ func New(brokers []string, topic string) (*Broker, error) {
 	if len(brokers) == 0 {
 		return nil, errors.New("at least one Kafka broker address is required")
 	}
-	if !topicPattern.MatchString(topic) || topic == "." || topic == ".." {
-		return nil, errors.New("Kafka topic name is invalid")
+	if !validOrderTopic(topic) {
+		return nil, errors.New("Kafka order topic name is invalid")
 	}
 	addresses := make([]string, 0, len(brokers))
 	seen := make(map[string]struct{}, len(brokers))
