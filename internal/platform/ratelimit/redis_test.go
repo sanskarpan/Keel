@@ -20,6 +20,9 @@ func TestLimiterValidationAndRegionFence(t *testing.T) {
 	if _, err := New(client, Config{Region: "us-east-1", HomeRegion: "eu-west-1", KeyID: "k1", Secret: []byte(strings.Repeat("s", 32)), ReplayTTL: time.Minute}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("non-home region was accepted: %v", err)
 	}
+	if _, err := New(client, Config{Region: "us-east-1", HomeRegion: "us-east-1", KeyID: strings.Repeat("k", maxKeyIDLength+1), Secret: []byte(strings.Repeat("s", 32)), ReplayTTL: time.Minute}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("oversized key identifier was accepted: %v", err)
+	}
 	if _, err := NewRedisClient(ClientConfig{Addr: "cache.example:6379", Region: "us-east-1", HomeRegion: "us-east-1",
 		Password: "secret", AllowSyntheticLoopback: true, DialTimeout: time.Second, ReadTimeout: time.Second,
 		WriteTimeout: time.Second, PoolSize: 4}); !errors.Is(err, ErrInvalidConfig) {
@@ -77,6 +80,11 @@ func TestRedisUnavailableFailsClosed(t *testing.T) {
 	request := Request{TenantID: "00000000-0000-4000-8000-000000000001", RouteID: "ai.generate",
 		RequestID: "00000000-0000-4000-8000-000000000002",
 		Policy:    Policy{Digest: strings.Repeat("a", 64), CapacityUnits: 1000, RefillUnitsPerSecond: 1, CostUnits: 1}}
+	request.RouteID = strings.Repeat("r", maxRouteLength+1)
+	if _, err := limiter.Allow(context.Background(), request); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("oversized route identifier was accepted: %v", err)
+	}
+	request.RouteID = "ai.generate"
 	if _, err := limiter.Allow(context.Background(), request); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("unavailable Redis did not fail closed: %v", err)
 	}
