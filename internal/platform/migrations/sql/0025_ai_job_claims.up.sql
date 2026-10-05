@@ -187,9 +187,9 @@ BEGIN
         RAISE EXCEPTION 'invalid AI job claim';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(p_tenant::text||'|'||p_provider||'|'||p_model,0));
-    SELECT max_concurrency,max_attempt_duration_ms,enabled,policy_sha256,max_output_tokens
+    SELECT p.max_concurrency,p.max_attempt_duration_ms,p.enabled,p.policy_sha256,p.max_output_tokens
       INTO cap_concurrency,cap_duration,is_enabled,configured_policy,token_cap
-      FROM keel_meta.ai_execution_profiles WHERE tenant_id=p_tenant AND provider_id=p_provider AND model_id=p_model;
+      FROM keel_meta.ai_execution_profiles p WHERE p.tenant_id=p_tenant AND p.provider_id=p_provider AND p.model_id=p_model;
     IF NOT FOUND OR NOT is_enabled THEN RETURN; END IF;
     SELECT count(*) INTO in_flight FROM keel_meta.ai_jobs
      WHERE tenant_id=p_tenant AND provider_id=p_provider AND model_id=p_model AND state='leased';
