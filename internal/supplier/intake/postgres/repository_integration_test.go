@@ -9,11 +9,18 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
+	"github.com/sanskarpan/keel/internal/retrieval/contracts"
+	"github.com/sanskarpan/keel/internal/retrieval/hybrid"
+	"github.com/sanskarpan/keel/internal/retrieval/index"
+	retrievalpg "github.com/sanskarpan/keel/internal/retrieval/postgres"
+	citationintake "github.com/sanskarpan/keel/internal/retrieval/source/intake"
 	"github.com/sanskarpan/keel/internal/supplier/cases"
 	casepg "github.com/sanskarpan/keel/internal/supplier/cases/postgres"
 	"github.com/sanskarpan/keel/internal/supplier/intake"
@@ -165,7 +172,17 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := workerRepo.Complete(ctx, job, nextIntakeUUID(t), document, now.Add(time.Second)); err != nil {
+	outputKey := nextIntakeUUID(t)
+	objects, err := intake.NewLocalStore(filepath.Join(t.TempDir(), "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = objects.Close() })
+	storedBytes, storedDigest, err := objects.Put(ctx, outputKey, bytesReader(document.Text), intake.MaxExtractedSize)
+	if err != nil || storedBytes != int64(len(document.Text)) || storedDigest != document.TextSHA256 {
+		t.Fatalf("persist extracted output: bytes=%d digest=%x err=%v", storedBytes, storedDigest, err)
+	}
+	if err := workerRepo.Complete(ctx, job, outputKey, document, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := workerRepo.Complete(ctx, job, nextIntakeUUID(t), document, now.Add(2*time.Second)); !errors.Is(err, ErrConflict) {
@@ -180,6 +197,84 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 	}
 	if state != "extracted" {
 		t.Fatalf("stored upload state = %q, want extracted", state)
+	}
+	if indexerDSN := os.Getenv("KEEL_TEST_RETRIEVAL_INDEXER_DATABASE_URL"); indexerDSN != "" {
+		indexerDB := openRoleDB(t, indexerDSN, "keel_local_retrieval_indexer", "keel-retrieval-indexer-local-only")
+		visibility := "supplier-intake-reader"
+		if err := tenancy.WithTenantTx(ctx, indexerDB, tenant, nil, func(tx *sql.Tx) error {
+			if _, err := tx.ExecContext(ctx, `SELECT set_config('keel.visibility_key',$1,true)`, visibility); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.retrieval_source_eligibility
+				(tenant_id,visibility_key,document_version_id,state,generation) VALUES ($1,$2,$3,'active',1)`, string(tenant), visibility, uploadID)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		documentID, err := uuid.Parse(uploadID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hasher, err := index.NewHMACTermHasher(string(tenant), "citation-test-v1", bytesOf(0x51, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(document.Text)
+		tokens, err := contracts.Tokenize(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chunk, err := index.PrepareChunk(documentID, contracts.Chunk{Ordinal: 0, Text: text, StartByte: 0, EndByte: len(text), TokenCount: len(tokens)}, hasher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		indexer, err := retrievalpg.New(indexerDB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buildID, manifest := uuid.New(), sha256.Sum256([]byte("supplier citation test manifest"))
+		spec := index.BuildSpec{ID: buildID, AnalyzerID: "keel.word.v1", ChunkerID: contracts.ChunkerID,
+			TermKeyID: hasher.KeyID(), ManifestDigest: manifest, ExpectedChunks: 1}
+		if err := indexer.BeginBuild(ctx, tenant, visibility, spec); err != nil {
+			t.Fatal(err)
+		}
+		if err := indexer.StageBatch(ctx, tenant, visibility, buildID, []index.Chunk{chunk}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := indexer.Finalize(ctx, tenant, visibility, buildID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := indexer.Publish(ctx, tenant, visibility, buildID, 0); err != nil {
+			t.Fatal(err)
+		}
+		reader, err := citationintake.NewReader(appDB, objects)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref := hybrid.CitationRef{ChunkID: chunk.ID, DocumentVersionID: documentID, Ordinal: chunk.Ordinal,
+			StartByte: chunk.StartByte, EndByte: chunk.EndByte, ContentDigest: chunk.ContentDigest}
+		resolved, err := reader.ReadCitationRange(ctx, tenant, visibility, ref)
+		if err != nil || string(resolved) != text {
+			t.Fatalf("read authorized extracted citation: %q err=%v", resolved, err)
+		}
+		forged := ref
+		forged.StartByte++
+		if _, err := reader.ReadCitationRange(ctx, tenant, visibility, forged); !errors.Is(err, hybrid.ErrCitationNotAuthorized) {
+			t.Fatalf("citation accepted an unindexed byte range: %v", err)
+		}
+		if _, err := reader.ReadCitationRange(ctx, tenant, visibility+"-other", ref); !errors.Is(err, hybrid.ErrCitationNotAuthorized) {
+			t.Fatalf("citation was readable from a different cohort: %v", err)
+		}
+		appRetrieval, err := retrievalpg.New(appDB)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := appRetrieval.WithdrawSource(ctx, tenant, visibility, uuid.New(), documentID, uuid.New()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reader.ReadCitationRange(ctx, tenant, visibility, ref); !errors.Is(err, hybrid.ErrCitationNotAuthorized) {
+			t.Fatalf("withdrawn citation remained readable: %v", err)
+		}
 	}
 	var visible int
 	if err := tenancy.WithTenantTx(ctx, appDB, otherTenant, nil, func(tx *sql.Tx) error {
