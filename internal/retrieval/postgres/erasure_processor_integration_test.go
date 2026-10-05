@@ -121,6 +121,64 @@ func TestPostgreSQLErasureActionProcessorOrdersReceiptsAndCompletes(t *testing.T
 	}
 }
 
+func TestPostgreSQLErasureActionProcessorDurablyBlocksPolicyOutcomes(t *testing.T) {
+	for _, code := range []string{"legal_hold_active", "legal_hold_unknown"} {
+		t.Run(code, func(t *testing.T) {
+			appDB, indexerDB := retrievalTestDBs(t)
+			app, err := New(appDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker, err := New(indexerDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			tenant := tenancy.TenantID(uuid.NewString())
+			visibility := "erasure-hold-block:" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+			hasher, err := index.NewHMACTermHasher(string(tenant), "erasure-hold-block-v1", []byte(strings.Repeat("h", 32)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			chunk := preparedChunk(t, hasher, uuid.New(), "hold decision policy block")
+			createReadyBuild(t, worker, tenant, visibility, buildSpec(uuid.New(), hasher.KeyID(), 1), chunk)
+			request, err := app.WithdrawSource(ctx, tenant, visibility, uuid.New(), chunk.DocumentVersionID, uuid.New())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var order []string
+			executors := testErasureExecutors(&order)
+			executors[ErasureActionLegalHoldCheck] = testErasureExecutor(func(context.Context, ErasureJob, string, string) (ErasureActionExecution, error) {
+				order = append(order, ErasureActionLegalHoldCheck)
+				blocked, err := NewErasureActionBlockError(code)
+				if err != nil {
+					return ErasureActionExecution{}, err
+				}
+				return ErasureActionExecution{}, blocked
+			})
+			processor, err := NewErasureActionProcessor(worker, "hold-block-worker", time.Minute, time.Second, executors)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, claimed, err := processor.ProcessOne(ctx, tenant, visibility)
+			if err != nil || !claimed || job.ID != request.ID || job.State != "blocked" ||
+				!job.LastErrorCode.Valid || job.LastErrorCode.String != code || job.LeaseOwner.Valid {
+				t.Fatalf("policy-blocked job=%+v claimed=%t err=%v", job, claimed, err)
+			}
+			if len(order) != 1 || order[0] != ErasureActionLegalHoldCheck {
+				t.Fatalf("destructive action ran after policy block: %v", order)
+			}
+			if _, claimed, err := processor.ProcessOne(ctx, tenant, visibility); err != nil || claimed {
+				t.Fatalf("blocked job was automatically retried: claimed=%t err=%v", claimed, err)
+			}
+			backlog, err := worker.ReadErasureBacklog(ctx, tenant, visibility)
+			if err != nil || backlog.Blocked != 1 {
+				t.Fatalf("blocked job disappeared from backlog metrics: %+v err=%v", backlog, err)
+			}
+		})
+	}
+}
+
 func TestPostgreSQLErasureActionProcessorRenewsLeaseDuringProviderAction(t *testing.T) {
 	appDB, indexerDB := retrievalTestDBs(t)
 	app, err := New(appDB)

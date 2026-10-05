@@ -42,9 +42,25 @@ type HoldClearance struct {
 	Release         func() error
 }
 
+// LegalHoldDecisionError lets a provider identify an active hold. Other
+// clearance failures are treated as unknown by the manifest check.
+type LegalHoldDecisionError struct {
+	Decision string
+}
+
+const LegalHoldActive = "active"
+
+func (e *LegalHoldDecisionError) Error() string {
+	if e != nil && e.Decision == LegalHoldActive {
+		return "active legal hold"
+	}
+	return "legal-hold decision is unknown"
+}
+
 // LegalHoldAuthority acquires a clearance permit for one fenced deletion.
 // A read-only check without serialization is insufficient because a hold
-// could become active between the check and object deletion.
+// could become active between the check and object deletion. Implementations
+// must fail closed for active, unknown, stale, or unavailable policy state.
 type LegalHoldAuthority interface {
 	AcquireClearance(context.Context, ErasureFence) (HoldClearance, error)
 }

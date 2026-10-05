@@ -15,7 +15,31 @@ var (
 	ErrErasureActionFailed       = errors.New("retrieval erasure action failed and was rescheduled")
 	ErrErasureOutcomeInvalid     = errors.New("retrieval erasure action returned an invalid outcome")
 	ErrErasureReceiptWriteFailed = errors.New("retrieval erasure action receipt could not be recorded")
+	ErrErasurePolicyBlocked      = errors.New("retrieval erasure action is blocked by policy")
 )
+
+// ErasureActionBlockError marks an action result that must enter the durable
+// blocked state instead of consuming the transient failure budget. Its code
+// is constrained to the same content-free vocabulary stored by PostgreSQL.
+type ErasureActionBlockError struct{ code string }
+
+func NewErasureActionBlockError(code string) (*ErasureActionBlockError, error) {
+	if !erasureErrorCodePattern.MatchString(code) || code == "attempts_exhausted" {
+		return nil, errors.New("erasure policy block code is invalid")
+	}
+	return &ErasureActionBlockError{code: code}, nil
+}
+
+func (e *ErasureActionBlockError) Error() string { return ErrErasurePolicyBlocked.Error() }
+
+func (e *ErasureActionBlockError) Unwrap() error { return ErrErasurePolicyBlocked }
+
+func (e *ErasureActionBlockError) Code() string {
+	if e == nil {
+		return ""
+	}
+	return e.code
+}
 
 const MaxErasureActionDuration = 30 * time.Minute
 
@@ -121,6 +145,14 @@ func (p *ErasureActionProcessor) ProcessOne(ctx context.Context, tenant tenancy.
 		}
 		result, actionErr := p.executeUnderLease(ctx, tenant, visibility, job, action)
 		if actionErr != nil {
+			var policyBlock *ErasureActionBlockError
+			if errors.As(actionErr, &policyBlock) {
+				blocked, blockErr := p.repository.BlockErasureJob(ctx, tenant, visibility, p.workerID, job.ID, job.LeaseEpoch, policyBlock.Code())
+				if blockErr != nil {
+					return job, true, fmt.Errorf("persist policy-blocked retrieval erasure job: %w", blockErr)
+				}
+				return blocked, true, nil
+			}
 			return p.retry(ctx, tenant, visibility, job, "action_failed")
 		}
 		// Some actions (for example, supplier object erasure) must keep a
