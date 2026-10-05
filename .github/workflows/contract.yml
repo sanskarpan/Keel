@@ -84,6 +84,14 @@ jobs:
           pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
           -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1
           -f /workspace/deploy/compose/init/20-keel-tenant-roles.sql
+      - name: Enable pgvector extension in disposable PostgreSQL
+        env:
+          PGPASSWORD: keel-local-only
+        run: >-
+          docker run --rm --network host --env PGPASSWORD --entrypoint psql
+          pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+          -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1
+          -c "CREATE EXTENSION IF NOT EXISTS vector;"
       - name: Create order-event Kafka topic
         run: >-
           docker run --rm --network host
