@@ -147,6 +147,9 @@ REVOKE ALL ON keel_meta.retrieval_source_eligibility,keel_meta.retrieval_erasure
     FROM PUBLIC,keel_agent,keel_worker,keel_projector,keel_operator,keel_file_processor;
 GRANT SELECT,UPDATE (state,generation,changed_at) ON keel_meta.retrieval_source_eligibility TO keel_app;
 GRANT SELECT,INSERT ON keel_meta.retrieval_source_eligibility TO keel_retrieval_indexer;
+-- PostgreSQL requires UPDATE privilege to take row locks with FOR SHARE. The
+-- trigger still prevents indexers from mutating eligibility or reactivating rows.
+GRANT UPDATE (state) ON keel_meta.retrieval_source_eligibility TO keel_retrieval_indexer;
 GRANT SELECT,INSERT ON keel_meta.retrieval_erasure_jobs TO keel_app,keel_retrieval_indexer;
 GRANT USAGE ON SCHEMA keel_meta TO keel_app,keel_retrieval_indexer;
 GRANT SELECT ON keel_meta.retrieval_source_eligibility TO keel_app;
