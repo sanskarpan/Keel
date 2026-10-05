@@ -150,6 +150,13 @@ jobs:
           KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_TEMPORAL_ADDRESS: 127.0.0.1:7233
         run: make check
+      - name: Validate immutable retrieval evaluation corpus
+        run: GOTOOLCHAIN=local go run ./cmd/keel-corpus-lint research/retrieval/v1/corpus.json research/retrieval/v1/build-manifest.json research/retrieval/v1
+      - name: Reproduce synthetic retrieval reference results
+        run: |
+          result_file=$(mktemp)
+          GOTOOLCHAIN=local go run ./cmd/keel-corpus-eval research/retrieval/v1/corpus.json research/retrieval/v1/build-manifest.json "$result_file"
+          cmp "$result_file" research/retrieval/v1/reference-results.json
       - name: Report supplier workflow history budget measurement
         env:
           KEEL_TEST_TEMPORAL_ADDRESS: 127.0.0.1:7233
