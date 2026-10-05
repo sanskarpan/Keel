@@ -146,7 +146,7 @@ func (r *Repository) AdmitWith(ctx context.Context, in Admission, afterReserve f
 			return err
 		}
 		var activePeriod string
-		if err := tx.QueryRowContext(ctx, `SELECT period_id::text FROM keel_meta.ai_budget_period_heads WHERE tenant_id=$1 AND scope='inference' FOR SHARE`, string(in.Tenant)).Scan(&activePeriod); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT period_id::text FROM keel_meta.lock_ai_budget_period($1)`, string(in.Tenant)).Scan(&activePeriod); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrBudgetUnavailable
 			}
