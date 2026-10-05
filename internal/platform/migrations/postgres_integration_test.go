@@ -157,6 +157,9 @@ func TestPostgreSQLMigration022RejectsLegacyOutOfScopeReceipt(t *testing.T) {
 	if _, err := owner.ExecContext(ctx, `DROP POLICY seed_legacy_receipt ON keel_meta.`+quoteIdentifier(table)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := owner.ExecContext(ctx, `RESET ROLE`); err != nil {
+		t.Fatal(err)
+	}
 	_ = owner.Close()
 	t.Cleanup(func() {
 		conn, err := db.Conn(context.Background())
@@ -182,7 +185,6 @@ func TestPostgreSQLMigration022RejectsLegacyOutOfScopeReceipt(t *testing.T) {
 	}
 
 	owner = asSchemaOwner(t, db)
-	defer owner.Close()
 	if _, err := owner.ExecContext(ctx, `CREATE POLICY inspect_legacy_receipt ON keel_meta.`+quoteIdentifier(table)+`
 		TO keel_schema_owner USING (true)`); err != nil {
 		t.Fatal(err)
