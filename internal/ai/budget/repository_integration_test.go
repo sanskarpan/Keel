@@ -386,7 +386,7 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 	overflowTenantID, overflowPeriodID := uuid.NewString(), uuid.NewString()
 	overflowTenant, _ := tenancy.ParseTenantID(overflowTenantID)
 	maxInt64 := "9223372036854775807"
-	if _, err = admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_budget_accounts(tenant_id,period_id,scope,period_start,period_end,currency,hard_limit_micro_usd,committed_micro_usd) VALUES($1,$2,'inference',$3,$4,'USD',$5::bigint,$5::numeric-14)`, overflowTenantID, overflowPeriodID, periodStart, periodEnd, maxInt64); err != nil {
+	if _, err = admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_budget_accounts(tenant_id,period_id,scope,period_start,period_end,currency,hard_limit_micro_usd,committed_micro_usd,opening_committed_micro_usd) VALUES($1,$2,'inference',$3,$4,'USD',$5::bigint,$5::numeric-14,$5::numeric-14)`, overflowTenantID, overflowPeriodID, periodStart, periodEnd, maxInt64); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_budget_period_heads(tenant_id,scope,period_id) VALUES($1,'inference',$2)`, overflowTenantID, overflowPeriodID); err != nil {
