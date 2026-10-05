@@ -84,6 +84,8 @@ Exact normalized cache lookup precedes semantic lookup. Semantic candidates are 
 
 Provider fallback is allowed only before any client-visible token and within one additional attempt/budget/deadline. 429/503/network failures are classified. After content starts, emit a typed interrupted terminal event; never splice another model's answer into the same stream. Retries carry provider idempotency keys where supported and record uncertainty where not supported.
 
+The current K4.6.1 slice implements only the content-free decision core (`internal/ai/attempt`): pinned capability identity, a one-fallback bound, pre-reserved fallback allowance, no-charge/pre-acceptance checks, token/output refusal, idempotency-key derivation, and outcome replay fingerprints. It has no provider dispatcher, durable attempt ledger, streamed output transport, or K4.3 settlement integration; parent issue #36 remains open until those paths are persisted and provider-qualified.
+
 ## 8. Streaming
 
 Use one SSE connection per browser view for both persisted business-state events and transient model tokens. Messages include `kind`, `logical_operation_id`, event ID where durable, token sequence where transient, payload and correlation ID. Durable state updates use a per-tenant commit-ordered sequence; the cursor counter and state row commit atomically with the accepted aggregate mutation and idempotency result. The payload is an allowlist of IDs, version, status/event kind and schema version, never order descriptions, external references, amounts, supplier details or evidence. This feed orders tenant-visible update notifications; aggregate event order remains `(aggregate_id, aggregate_version)`. Token order is per inference/attempt.
