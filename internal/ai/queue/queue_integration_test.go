@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/sanskarpan/keel/internal/ai/budget"
+	"github.com/sanskarpan/keel/internal/ai/policy"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
 
@@ -42,7 +44,11 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		return db
 	}
 	appDB, workerDB, admin := open(appDSN), open(workerDSN), open(adminDSN)
-	repo, err := NewRepository(appDB, workerDB)
+	budgetRepo, err := budget.NewRepository(appDB, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := NewRepository(budgetRepo, workerDB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,12 +59,7 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	periodID := uuid.NewString()
-	provider, model := "offline-test", "model-v1"
-	policyHash := make([]byte, 32)
-	for i := range policyHash {
-		policyHash[i] = byte(i + 1)
-	}
-	policyDigest := hex.EncodeToString(policyHash)
+	provider, model := "offline-fake", "model-offline-v1"
 	now := time.Now().UTC()
 	periodStart, periodEnd := now.Add(-time.Hour), now.Add(time.Hour)
 	if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_budget_accounts
@@ -70,35 +71,36 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		VALUES($1,'inference',$2)`, tenantID, periodID); err != nil {
 		t.Fatal(err)
 	}
+	bundle := policy.Bundle{ID: "test", Version: "v1", Prompt: policy.PromptTemplate{ID: "summary", Version: "v1", Text: "Summarize {{document}}", Variables: []string{"document"}},
+		Provider: policy.ProviderPolicy{ID: provider, Version: "v1", ModelID: model}, Generation: policy.GenerationLimits{MaxInputBytes: 1024, MaxOutputTokens: 128},
+		Tools: policy.ToolPolicy{Version: "tools.none.v1"}, Scrubber: policy.ScrubberPolicy{Version: policy.ScrubberHighConfidenceV1}}
+	registry, err := policy.NewRegistry([]policy.Bundle{bundle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := registry.Prepare(policy.Request{BundleID: "test", BundleVersion: "v1", Variables: map[string]policy.InputSegment{"document": {Source: policy.SourceUser, Classification: policy.ClassificationGeneral, Text: "synthetic"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rateBook, err := budget.NewRateBook([]budget.RateCard{{ID: "offline", Version: "v1", ProviderID: provider, ProviderVersion: "v1", ModelID: model, Currency: "USD", InputMicroUSDPerMillionTokens: 1000, OutputMicroUSDPerMillionTokens: 1000, SafetyMarginBasisPoints: 1000, EffectiveFrom: now.Add(-time.Hour), EffectiveUntil: now.Add(time.Hour)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote, err := rateBook.QuoteWorstCase(call.Policy(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyHash, _ := hex.DecodeString(quote.PolicyDigest())
 	if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_execution_profiles
 		(tenant_id,provider_id,model_id,policy_sha256,max_concurrency,max_queue_depth,max_output_tokens,max_attempt_duration_ms)
 		VALUES($1,$2,$3,$4,2,8,128,10000)`, tenantID, provider, model, policyHash); err != nil {
 		t.Fatal(err)
 	}
-	principalDigest := make([]byte, 32)
-	requestDigest, rateDigest, quoteDigest := make([]byte, 32), make([]byte, 32), make([]byte, 32)
-	for i := range principalDigest {
-		principalDigest[i], requestDigest[i], rateDigest[i], quoteDigest[i] = 3, 4, 5, 6
-	}
 	createAdmission := func(principal string) JobSpec {
 		t.Helper()
-		inferenceID, attemptID, reservationID := uuid.NewString(), uuid.NewString(), uuid.NewString()
-		if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_inference_admissions
-			(tenant_id,inference_id,attempt_id,period_id,scope,principal_binding_sha256,request_sha256,policy_sha256,
-			rate_card_id,rate_card_version,rate_card_sha256,quote_sha256,max_liability_micro_usd,currency,
-			quoted_at,rate_effective_from,rate_effective_until)
-			VALUES($1,$2,$3,$4,'inference',$5,$6,$7,'test','v1',$8,$9,1000,'USD',$10,$11,$12)`,
-			tenantID, inferenceID, attemptID, periodID, principalDigest, requestDigest, policyHash,
-			rateDigest, quoteDigest, now, now.Add(-time.Hour), now.Add(time.Hour)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_budget_reservations
-			(tenant_id,reservation_id,inference_id,attempt_id,period_id,scope,amount_micro_usd,liability_state)
-			VALUES($1,$2,$3,$4,$5,'inference',1000,'reserved')`, tenantID, reservationID, inferenceID, attemptID, periodID); err != nil {
-			t.Fatal(err)
-		}
-		return JobSpec{Tenant: tenant, InferenceID: inferenceID, AttemptID: attemptID, PeriodID: periodID,
-			ProviderID: provider, ModelID: model, PolicySHA256: policyDigest, Principal: principal, MaxOutputTokens: 64}
+		return JobSpec{Admission: budget.Admission{Tenant: tenant, PeriodID: periodID, InferenceID: uuid.NewString(), AttemptID: uuid.NewString(), ReservationID: uuid.NewString(),
+			PeriodStart: periodStart, PeriodEnd: periodEnd, PrincipalBinding: "principal:" + principal, RequestDigest: hex.EncodeToString(make([]byte, 32)), Quote: quote},
+			ProviderID: provider, ModelID: model, MaxOutputTokens: 64}
 	}
 	firstSpec := createAdmission("principal:member-a")
 	secondSpec := createAdmission("principal:member-a")
@@ -145,7 +147,7 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	second, claimedSecond, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-b", 5*time.Second)
-	if err != nil || !claimedSecond || second.InferenceID != other.InferenceID {
+	if err != nil || !claimedSecond || second.InferenceID != other.Admission.InferenceID {
 		t.Fatalf("new principal starved behind existing principal: claim=%+v claimed=%t err=%v", second, claimedSecond, err)
 	}
 	if _, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-c", 5*time.Second); err != nil || claimed {
@@ -168,5 +170,40 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	otherTenant, _ := tenancy.ParseTenantID(uuid.NewString())
 	if _, claimed, err := repo.ClaimNext(ctx, otherTenant, provider, model, "worker-z", time.Second); err != nil || claimed {
 		t.Fatalf("cross-tenant job became visible: claimed=%t err=%v", claimed, err)
+	}
+	// A failure after the budget lock/reservation begins must roll the entire
+	// admission back when the execution profile is unavailable.
+	missingProfile := createAdmission("member-missing-profile")
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.ai_execution_profiles SET enabled=false WHERE tenant_id=$1 AND provider_id=$2 AND model_id=$3`, tenantID, provider, model); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Enqueue(ctx, missingProfile); !errors.Is(err, ErrQueueUnavailable) {
+		t.Fatalf("enqueue without an installed profile: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.ai_execution_profiles SET enabled=true WHERE tenant_id=$1 AND provider_id=$2 AND model_id=$3`, tenantID, provider, model); err != nil {
+		t.Fatal(err)
+	}
+	var admissions, reservations int
+	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.ai_inference_admissions WHERE tenant_id=$1 AND inference_id=$2`, tenantID, missingProfile.Admission.InferenceID).Scan(&admissions); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.ai_budget_reservations WHERE tenant_id=$1 AND inference_id=$2`, tenantID, missingProfile.Admission.InferenceID).Scan(&reservations); err != nil {
+		t.Fatal(err)
+	}
+	if admissions != 0 || reservations != 0 {
+		t.Fatalf("failed enqueue left budget state behind: admissions=%d reservations=%d", admissions, reservations)
+	}
+
+	// A queued request whose pinned policy/token bounds are no longer active is
+	// held safely and not delivered under newly changed execution limits.
+	stale := createAdmission("member-stale-profile")
+	if _, err := repo.Enqueue(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.ai_execution_profiles SET max_concurrency=10,max_output_tokens=32 WHERE tenant_id=$1 AND provider_id=$2 AND model_id=$3`, tenantID, provider, model); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-stale", 5*time.Second); err != nil || claimed {
+		t.Fatalf("job exceeding updated token cap was claimed: claimed=%t err=%v", claimed, err)
 	}
 }
