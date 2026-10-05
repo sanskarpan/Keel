@@ -112,6 +112,31 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	if active, err := app.ActiveBuild(ctx, tenant, otherVisibility); err != nil || active.ID != otherBuildID {
 		t.Fatalf("visibility cohort read wrong corpus: active=%+v err=%v", active, err)
 	}
+	withdrawalID := uuid.New()
+	withdrawalActor := uuid.New()
+	job, err := app.WithdrawSource(ctx, tenant, visibility, withdrawalActor, chunks[0].DocumentVersionID, withdrawalID)
+	if err != nil || job.State != "fenced" || job.EligibilityGeneration != 2 || job.RequestedBy != withdrawalActor {
+		t.Fatalf("withdrawal did not atomically fence and enqueue erasure: job=%+v err=%v", job, err)
+	}
+	replayed, err := app.WithdrawSource(ctx, tenant, visibility, withdrawalActor, chunks[0].DocumentVersionID, withdrawalID)
+	if err != nil || replayed.ID != job.ID || replayed.State != "fenced" {
+		t.Fatalf("replayed withdrawal was not idempotent: job=%+v err=%v", replayed, err)
+	}
+	persistedJob, err := app.ErasureJob(ctx, tenant, visibility, withdrawalID)
+	if err != nil || persistedJob.DocumentVersionID != chunks[0].DocumentVersionID || persistedJob.RequestedBy != withdrawalActor || persistedJob.State != "fenced" {
+		t.Fatalf("durable erasure state mismatch: job=%+v err=%v", persistedJob, err)
+	}
+	withdrawnResults, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID(), []index.TermID{invoice}, 5, 20)
+	if err != nil || len(withdrawnResults.Candidates) != 0 {
+		t.Fatalf("query returned withdrawn source: results=%+v err=%v", withdrawnResults, err)
+	}
+	staleBuildID := uuid.New()
+	if err := indexer.BeginBuild(ctx, tenant, visibility, buildSpec(staleBuildID, hasher.KeyID(), 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := indexer.StageBatch(ctx, tenant, visibility, staleBuildID, []index.Chunk{chunks[0]}); err == nil {
+		t.Fatal("withdrawn source version was reintroduced into a build")
+	}
 	if err := withScope(ctx, indexerDB, scope{tenant: tenant, visibility: visibility}, nil, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM keel_meta.retrieval_chunks WHERE tenant_id=$1 AND build_id=$2`, string(tenant), buildID)
 		return err
