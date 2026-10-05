@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
@@ -13,8 +14,9 @@ import (
 var ErrSourceNotRegistered = errors.New("retrieval source version is not registered in this cohort")
 
 // ErasureJob is a durable request to suppress one immutable source version.
-// State remains fenced until a separately qualified source/index cleanup worker
-// advances it; this repository does not claim physical or backup erasure.
+// Its lease state records cleanup orchestration; complete is only valid after
+// the caller has finished its configured actions. The repository itself does
+// not claim physical or backup erasure.
 type ErasureJob struct {
 	ID                    uuid.UUID
 	RequestedBy           uuid.UUID
@@ -24,6 +26,12 @@ type ErasureJob struct {
 	RequestedAt           string
 	AttemptCount          int
 	LastErrorCode         sql.NullString
+	AvailableAt           time.Time
+	LeaseOwner            sql.NullString
+	LeaseEpoch            int64
+	LeaseUntil            sql.NullTime
+	BlockedAt             sql.NullTime
+	CompletedAt           sql.NullTime
 }
 
 // WithdrawSource atomically installs a monotonic query-time tombstone and a
@@ -64,9 +72,11 @@ func (r *Repository) WithdrawSource(ctx context.Context, tenant tenancy.TenantID
 		if err != nil {
 			return fmt.Errorf("persist source erasure job: %w", err)
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT job_id,requested_by,document_version_id,eligibility_generation,state,requested_at::text,attempt_count,last_error_code
+		if err := tx.QueryRowContext(ctx, `SELECT job_id,requested_by,document_version_id,eligibility_generation,state,requested_at::text,attempt_count,last_error_code,
+			available_at,lease_owner,lease_epoch,lease_until,blocked_at,completed_at
 			FROM keel_meta.retrieval_erasure_jobs WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3`, string(s.tenant), s.visibility, jobID).
-			Scan(&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State, &job.RequestedAt, &job.AttemptCount, &job.LastErrorCode); err != nil {
+			Scan(&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State, &job.RequestedAt, &job.AttemptCount, &job.LastErrorCode,
+				&job.AvailableAt, &job.LeaseOwner, &job.LeaseEpoch, &job.LeaseUntil, &job.BlockedAt, &job.CompletedAt); err != nil {
 			return fmt.Errorf("read durable source erasure job: %w", err)
 		}
 		if job.RequestedBy != requestedBy || job.DocumentVersionID != documentVersionID || job.EligibilityGeneration != generation {
@@ -88,9 +98,11 @@ func (r *Repository) ErasureJob(ctx context.Context, tenant tenancy.TenantID, vi
 	}
 	var job ErasureJob
 	err = withScope(ctx, r.db, s, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `SELECT job_id,requested_by,document_version_id,eligibility_generation,state,requested_at::text,attempt_count,last_error_code
+		return tx.QueryRowContext(ctx, `SELECT job_id,requested_by,document_version_id,eligibility_generation,state,requested_at::text,attempt_count,last_error_code,
+			available_at,lease_owner,lease_epoch,lease_until,blocked_at,completed_at
 			FROM keel_meta.retrieval_erasure_jobs WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3`, string(s.tenant), s.visibility, jobID).
-			Scan(&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State, &job.RequestedAt, &job.AttemptCount, &job.LastErrorCode)
+			Scan(&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State, &job.RequestedAt, &job.AttemptCount, &job.LastErrorCode,
+				&job.AvailableAt, &job.LeaseOwner, &job.LeaseEpoch, &job.LeaseUntil, &job.BlockedAt, &job.CompletedAt)
 	})
 	return job, err
 }
