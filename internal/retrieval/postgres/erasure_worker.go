@@ -14,10 +14,12 @@ import (
 )
 
 const (
-	MaxErasureAttempts = 12
-	MinErasureLease    = time.Second
-	MaxErasureLease    = 15 * time.Minute
-	MaxErasureBackoff  = 24 * time.Hour
+	MaxErasureAttempts      = 12
+	MinErasureLease         = time.Second
+	MaxErasureLease         = 15 * time.Minute
+	MaxErasureBackoff       = 24 * time.Hour
+	MinErasureProgressDelay = time.Second
+	MaxErasureProgressDelay = 15 * time.Minute
 )
 
 var (
@@ -88,6 +90,43 @@ func (r *Repository) ClaimErasureJob(ctx context.Context, tenant tenancy.TenantI
 		return ErasureJob{}, false, err
 	}
 	return job, claimed, nil
+}
+
+// YieldErasureJob releases a live claim after a successful bounded action pass
+// that needs another lease to continue. The claim increment is refunded from
+// the failure budget, while the lease epoch remains monotonic for fencing.
+func (r *Repository) YieldErasureJob(ctx context.Context, tenant tenancy.TenantID, visibility, workerID string,
+	jobID uuid.UUID, epoch int64, delay time.Duration) (ErasureJob, error) {
+	if err := validateErasureWorkerRepository(r, ctx); err != nil {
+		return ErasureJob{}, err
+	}
+	s, err := newScope(tenant, visibility)
+	if err != nil {
+		return ErasureJob{}, err
+	}
+	if !erasureWorkerIDPattern.MatchString(workerID) || jobID == uuid.Nil || epoch < 1 ||
+		delay < MinErasureProgressDelay || delay > MaxErasureProgressDelay {
+		return ErasureJob{}, errors.New("erasure progress yield identity or delay is invalid")
+	}
+	var job ErasureJob
+	err = withScope(ctx, r.db, s, nil, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `UPDATE keel_meta.retrieval_erasure_jobs
+			SET state='cleanup_pending',available_at=clock_timestamp()+($6::bigint * interval '1 microsecond'),
+				attempt_count=GREATEST(attempt_count-1,0),last_error_code=NULL,
+				lease_owner=NULL,lease_until=NULL,updated_at=clock_timestamp()
+			WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3 AND state='cleanup_pending'
+			  AND lease_owner=$4 AND lease_epoch=$5 AND lease_until>clock_timestamp()
+			RETURNING `+erasureJobColumns, string(s.tenant), s.visibility, jobID, workerID, epoch, delay.Microseconds()).
+			Scan(erasureJobDestinations(&job)...)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrErasureLeaseLost
+		}
+		if err != nil {
+			return fmt.Errorf("yield retrieval erasure job after progress: %w", err)
+		}
+		return nil
+	})
+	return job, err
 }
 
 // RenewErasureJobLease extends a live claim without changing its fencing epoch.
