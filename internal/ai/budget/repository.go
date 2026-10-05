@@ -90,7 +90,16 @@ type AdmissionResult struct {
 
 // Admit serializes on the pre-provisioned account row. The selected period is immutable
 // on the admission and reservation; later settlement never consults the current period.
+// Admit keeps the standalone budget API for non-queued operations. Provider queue
+// admission should use AdmitWith so the reservation and job commit atomically.
 func (r *Repository) Admit(ctx context.Context, in Admission) (AdmissionResult, error) {
+	return r.AdmitWith(ctx, in, nil)
+}
+
+// AdmitWith performs the durable reservation and invokes afterReserve inside the
+// same tenant transaction. A callback failure rolls back both admission and reserve.
+// On idempotent replay it also runs, allowing the queue layer to verify the exact job.
+func (r *Repository) AdmitWith(ctx context.Context, in Admission, afterReserve func(*sql.Tx, AdmissionResult) error) (AdmissionResult, error) {
 	if err := validateAdmission(in); err != nil {
 		return AdmissionResult{}, err
 	}
@@ -128,6 +137,9 @@ func (r *Repository) Admit(ctx context.Context, in Admission) (AdmissionResult, 
 				return err
 			}
 			result = AdmissionResult{ReservationID: reservationID, PeriodID: in.PeriodID, Replayed: true}
+			if afterReserve != nil {
+				return afterReserve(tx, result)
+			}
 			return nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -175,6 +187,9 @@ func (r *Repository) Admit(ctx context.Context, in Admission) (AdmissionResult, 
 			return err
 		}
 		result = AdmissionResult{ReservationID: in.ReservationID, PeriodID: in.PeriodID}
+		if afterReserve != nil {
+			return afterReserve(tx, result)
+		}
 		return nil
 	})
 	if err != nil {
