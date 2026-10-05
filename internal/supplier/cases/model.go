@@ -31,7 +31,7 @@ const (
 	MaxEvidence      = 100
 	MaxEvidenceBytes = 100 << 20
 	MaxPolicySteps   = 32
-	MaxCaseEvents    = 135 // create + 100 evidence revisions + submit + 32 decisions + expiry
+	MaxCaseEvents    = 138 // create + 100 evidence revisions + submit + 32 decisions + expiry + cancel + 2 review events
 )
 
 type Status string
@@ -271,6 +271,18 @@ type CaseExpiredData struct {
 	DeadlineAt string `json:"deadline_at"`
 }
 
+type CaseCanceledData struct {
+	CancellationID string `json:"cancellation_id"`
+	Reason         string `json:"reason"`
+}
+
+type ManualReviewData struct {
+	ReviewID   string `json:"review_id"`
+	EvidenceID string `json:"evidence_id"`
+	Reason     string `json:"reason,omitempty"`
+	Outcome    string `json:"outcome,omitempty"`
+}
+
 func NewCase(tenantID, caseID, supplierID, actor string, policy Policy, now time.Time) (Case, Event, error) {
 	tenantID = strings.ToLower(tenantID)
 	caseID = strings.ToLower(caseID)
@@ -497,6 +509,74 @@ func Expire(current Case, now time.Time, previousHash string) (Case, Event, erro
 	updated.UpdatedAt = now.UTC().Truncate(time.Microsecond)
 	data, _ := json.Marshal(CaseExpiredData{DeadlineAt: current.DeadlineAt.UTC().Format(time.RFC3339Nano)})
 	event, err := (Event{CaseID: current.CaseID, Version: updated.Version, Type: "supplier.case.expired", Actor: "service-principal:keel-supplier-case-expirer",
+		OccurredAt: updated.UpdatedAt, Data: data, PrevHash: previousHash}).Seal()
+	if err == nil {
+		updated.LastEventHash = event.Hash
+	}
+	return updated, event, err
+}
+
+// Cancel records a request-scoped terminal transition before the immutable deadline.
+// The repository serializes it with approval and expiry under the case row lock.
+func Cancel(current Case, cancellationID, reason, actor string, now time.Time, previousHash string) (Case, Event, error) {
+	cancellationID = strings.ToLower(strings.TrimSpace(cancellationID))
+	reason = strings.TrimSpace(reason)
+	if (current.Status != Collecting && current.Status != Submitted) || now.IsZero() || !current.DeadlineAt.After(now) ||
+		!validPreviousHash(current, previousHash) || current.Version >= MaxCaseEvents ||
+		!uuidPattern.MatchString(cancellationID) || !strings.HasPrefix(actor, "principal:") || !validActor(actor) ||
+		len(reason) == 0 || len(reason) > 500 || !utf8.ValidString(reason) {
+		return Case{}, Event{}, ErrConflict
+	}
+	updated := current
+	updated.Status = Canceled
+	updated.Version++
+	updated.UpdatedAt = now.UTC().Truncate(time.Microsecond)
+	data, _ := json.Marshal(CaseCanceledData{CancellationID: cancellationID, Reason: reason})
+	event, err := (Event{CaseID: current.CaseID, Version: updated.Version, Type: "supplier.case.canceled", Actor: actor,
+		OccurredAt: updated.UpdatedAt, Data: data, PrevHash: previousHash}).Seal()
+	if err == nil {
+		updated.LastEventHash = event.Hash
+	}
+	return updated, event, err
+}
+
+// RequestManualReview opens an audited evidence-content review without changing the
+// supplier case approval state. Review can never bypass scanning or policy approvals.
+func RequestManualReview(current Case, reviewID, evidenceID, reason, actor string, now time.Time, previousHash string) (Case, Event, error) {
+	reviewID, evidenceID, reason = strings.ToLower(strings.TrimSpace(reviewID)), strings.ToLower(strings.TrimSpace(evidenceID)), strings.TrimSpace(reason)
+	if current.Status != Submitted || now.IsZero() || !current.DeadlineAt.After(now) || !validPreviousHash(current, previousHash) ||
+		current.Version >= MaxCaseEvents || !uuidPattern.MatchString(reviewID) || !uuidPattern.MatchString(evidenceID) ||
+		!strings.HasPrefix(actor, "principal:") || !validActor(actor) || len(reason) == 0 || len(reason) > 500 || !utf8.ValidString(reason) {
+		return Case{}, Event{}, ErrConflict
+	}
+	updated := current
+	updated.Version++
+	updated.UpdatedAt = now.UTC().Truncate(time.Microsecond)
+	data, _ := json.Marshal(ManualReviewData{ReviewID: reviewID, EvidenceID: evidenceID, Reason: reason})
+	event, err := (Event{CaseID: current.CaseID, Version: updated.Version, Type: "supplier.case.manual-review-requested", Actor: actor,
+		OccurredAt: updated.UpdatedAt, Data: data, PrevHash: previousHash}).Seal()
+	if err == nil {
+		updated.LastEventHash = event.Hash
+	}
+	return updated, event, err
+}
+
+// ResolveManualReview records a human evidence-content result. A positive result
+// confirms only that evidence item; it never approves the supplier case.
+func ResolveManualReview(current Case, reviewID, evidenceID, outcome, reason, actor string, now time.Time, previousHash string) (Case, Event, error) {
+	reviewID, evidenceID = strings.ToLower(strings.TrimSpace(reviewID)), strings.ToLower(strings.TrimSpace(evidenceID))
+	outcome, reason = strings.ToLower(strings.TrimSpace(outcome)), strings.TrimSpace(reason)
+	if current.Status != Submitted || now.IsZero() || !current.DeadlineAt.After(now) || !validPreviousHash(current, previousHash) ||
+		current.Version >= MaxCaseEvents || !uuidPattern.MatchString(reviewID) || !uuidPattern.MatchString(evidenceID) ||
+		(outcome != "confirmed" && outcome != "replacement-required") || !strings.HasPrefix(actor, "principal:") || !validActor(actor) ||
+		len(reason) == 0 || len(reason) > 500 || !utf8.ValidString(reason) {
+		return Case{}, Event{}, ErrConflict
+	}
+	updated := current
+	updated.Version++
+	updated.UpdatedAt = now.UTC().Truncate(time.Microsecond)
+	data, _ := json.Marshal(ManualReviewData{ReviewID: reviewID, EvidenceID: evidenceID, Outcome: outcome, Reason: reason})
+	event, err := (Event{CaseID: current.CaseID, Version: updated.Version, Type: "supplier.case.manual-review-resolved", Actor: actor,
 		OccurredAt: updated.UpdatedAt, Data: data, PrevHash: previousHash}).Seal()
 	if err == nil {
 		updated.LastEventHash = event.Hash
