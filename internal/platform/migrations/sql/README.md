@@ -18,5 +18,9 @@ vector builds, forced-RLS vector rows, and model-specific bounded HNSW index pro
 extension must be installed and enabled in the target database by the privileged database bootstrap
 before running application migrations; the restricted `keel_schema_owner` role must not install extensions.
 The disposable CI database explicitly enables pgvector before applying the migration chain.
+Migration `0016_retrieval_source_eligibility_erasure` adds a forced-RLS cohort/source withdrawal fence,
+blocks stale rebuild publication and query results, and persists idempotent fenced erasure requests.
+It is a logical suppression boundary: source-object deletion, physical index compaction, backup expiry,
+and a production cleanup worker require separately qualified adapters and runbooks.
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
