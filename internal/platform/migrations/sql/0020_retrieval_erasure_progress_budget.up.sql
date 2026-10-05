@@ -120,6 +120,20 @@ BEGIN
            NEW.lease_owner IS NULL AND NEW.lease_epoch=OLD.lease_epoch AND NEW.attempt_count=OLD.attempt_count AND
            NEW.failure_count=OLD.failure_count AND NEW.available_at=OLD.available_at AND NEW.last_error_code IS NULL AND
            NEW.completed_at IS NOT NULL AND NEW.blocked_at IS NULL THEN
+            IF EXISTS (
+                SELECT 1 FROM keel_meta.retrieval_erasure_action_manifest m
+                WHERE m.tenant_id=OLD.tenant_id AND m.visibility_key=OLD.visibility_key AND m.job_id=OLD.job_id
+                  AND m.required AND NOT EXISTS (
+                      SELECT 1 FROM keel_meta.retrieval_erasure_action_receipts r
+                      WHERE r.tenant_id=m.tenant_id AND r.visibility_key=m.visibility_key
+                        AND r.job_id=m.job_id AND r.action_key=m.action_key
+                        AND r.lease_epoch<=OLD.lease_epoch
+                  )
+            ) THEN RAISE EXCEPTION 'erasure job cannot complete until every required action has a receipt'; END IF;
+            IF NOT EXISTS (SELECT 1 FROM keel_meta.retrieval_erasure_action_manifest m
+                WHERE m.tenant_id=OLD.tenant_id AND m.visibility_key=OLD.visibility_key AND m.job_id=OLD.job_id) THEN
+                RAISE EXCEPTION 'erasure job cannot complete without an action manifest';
+            END IF;
             RETURN NEW;
         END IF;
         -- An exhausted pending job can be terminalized by the claim sweep.
