@@ -283,6 +283,13 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 		if err := eraser.Erase(ctx, tenant, visibility, documentID, withdrawal.EligibilityGeneration+1); !errors.Is(err, citationintake.ErrSourceErasureNotAuthorized) {
 			t.Fatalf("source erasure accepted a mismatched withdrawal generation: %v", err)
 		}
+		for _, key := range []string{objectKey, outputKey} {
+			object, err := objects.Open(ctx, key)
+			if err != nil {
+				t.Fatalf("mismatched generation deleted source object %q: %v", key, err)
+			}
+			_ = object.Close()
+		}
 		if err := eraser.Erase(ctx, tenant, visibility, documentID, withdrawal.EligibilityGeneration); err != nil {
 			t.Fatalf("erase withdrawn supplier source objects: %v", err)
 		}
