@@ -17,6 +17,8 @@ var (
 	ErrErasureReceiptWriteFailed = errors.New("retrieval erasure action receipt could not be recorded")
 )
 
+const MaxErasureActionDuration = 30 * time.Minute
+
 var erasureActionOrder = [...]string{
 	ErasureActionLegalHoldCheck,
 	ErasureActionSupplierSourceObject,
@@ -42,8 +44,11 @@ type ErasureActionExecution struct {
 }
 
 // ErasureActionExecutor runs one action for the current tenant/cohort job
-// lease. Destructive executors must independently obtain current legal-hold
-// clearance; the earlier legal_hold_check receipt only enforces manifest order.
+// lease. It must stop on context cancellation and make external effects
+// idempotent because a provider may complete just before a lease is lost.
+// Before destructive effects it must verify the current owner/lease epoch and
+// independently obtain current legal-hold clearance; the earlier
+// legal_hold_check receipt only enforces manifest order.
 type ErasureActionExecutor interface {
 	Execute(context.Context, ErasureJob, string, string) (ErasureActionExecution, error)
 }
@@ -114,7 +119,7 @@ func (p *ErasureActionProcessor) ProcessOne(ctx context.Context, tenant tenancy.
 		if recorded {
 			continue
 		}
-		result, actionErr := p.executors[action].Execute(ctx, job, string(tenant), visibility)
+		result, actionErr := p.executeUnderLease(ctx, tenant, visibility, job, action)
 		if actionErr != nil {
 			return p.retry(ctx, tenant, visibility, job, "action_failed")
 		}
@@ -157,6 +162,65 @@ func (p *ErasureActionProcessor) ProcessOne(ctx context.Context, tenant tenancy.
 		return p.retry(ctx, tenant, visibility, claimedJob, "completion_refused")
 	}
 	return job, true, nil
+}
+
+// executeUnderLease renews the current fencing epoch while an injected handler
+// runs and bounds a single action so a wedged provider cannot hold the job
+// forever. Losing the database lease cancels the handler immediately.
+func (p *ErasureActionProcessor) executeUnderLease(ctx context.Context, tenant tenancy.TenantID, visibility string,
+	job ErasureJob, action string) (ErasureActionExecution, error) {
+	actionCtx, cancel := context.WithTimeout(ctx, MaxErasureActionDuration)
+	renewCtx, renewCancel := context.WithTimeout(actionCtx, erasureLeaseRenewalTimeout(p.lease))
+	if _, err := p.repository.RenewErasureJobLease(renewCtx, tenant, visibility, p.workerID, job.ID, job.LeaseEpoch, p.lease); err != nil {
+		renewCancel()
+		cancel()
+		return ErasureActionExecution{}, fmt.Errorf("verify live retrieval erasure lease before action: %w", err)
+	}
+	renewCancel()
+	done := make(chan error, 1)
+	interval := p.lease / 3
+	if interval < MinErasureLease/3 {
+		interval = MinErasureLease / 3
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-actionCtx.Done():
+				done <- nil
+				return
+			case <-ticker.C:
+				renewCtx, renewCancel := context.WithTimeout(actionCtx, erasureLeaseRenewalTimeout(p.lease))
+				_, err := p.repository.RenewErasureJobLease(renewCtx, tenant, visibility, p.workerID, job.ID, job.LeaseEpoch, p.lease)
+				renewCancel()
+				if err != nil {
+					if actionCtx.Err() != nil {
+						done <- nil
+					} else {
+						done <- fmt.Errorf("renew retrieval erasure lease: %w", err)
+						cancel()
+					}
+					return
+				}
+			}
+		}
+	}()
+	result, actionErr := p.executors[action].Execute(actionCtx, job, string(tenant), visibility)
+	cancel()
+	leaseErr := <-done
+	if leaseErr != nil {
+		return ErasureActionExecution{}, leaseErr
+	}
+	return result, actionErr
+}
+
+func erasureLeaseRenewalTimeout(lease time.Duration) time.Duration {
+	timeout := lease / 4
+	if timeout < 100*time.Millisecond {
+		return 100 * time.Millisecond
+	}
+	return timeout
 }
 
 func validateErasureExecution(action string, result ErasureActionExecution) error {
