@@ -20,10 +20,12 @@ CREATE TABLE keel_meta.ai_execution_profiles (
 
 CREATE TABLE keel_meta.ai_job_fairness (
     tenant_id uuid NOT NULL,
+    provider_id text NOT NULL,
+    model_id text NOT NULL,
     principal_sha256 bytea NOT NULL CHECK (octet_length(principal_sha256)=32),
     last_claimed_at timestamptz,
     claim_count bigint NOT NULL DEFAULT 0 CHECK (claim_count>=0),
-    PRIMARY KEY (tenant_id,principal_sha256)
+    PRIMARY KEY (tenant_id,provider_id,model_id,principal_sha256)
 );
 
 CREATE TABLE keel_meta.ai_jobs (
@@ -49,8 +51,8 @@ CREATE TABLE keel_meta.ai_jobs (
     UNIQUE (tenant_id,attempt_id),
     FOREIGN KEY (tenant_id,provider_id,model_id)
         REFERENCES keel_meta.ai_execution_profiles(tenant_id,provider_id,model_id),
-    FOREIGN KEY (tenant_id,principal_sha256)
-        REFERENCES keel_meta.ai_job_fairness(tenant_id,principal_sha256),
+    FOREIGN KEY (tenant_id,provider_id,model_id,principal_sha256)
+        REFERENCES keel_meta.ai_job_fairness(tenant_id,provider_id,model_id,principal_sha256),
     FOREIGN KEY (tenant_id,inference_id,attempt_id)
         REFERENCES keel_meta.ai_inference_admissions(tenant_id,inference_id,attempt_id),
     FOREIGN KEY (tenant_id,inference_id,attempt_id,period_id,scope)
@@ -96,8 +98,8 @@ CREATE POLICY ai_budget_reservations_schema_owner ON keel_meta.ai_budget_reserva
 REVOKE ALL ON keel_meta.ai_execution_profiles,keel_meta.ai_job_fairness,keel_meta.ai_jobs FROM PUBLIC;
 GRANT USAGE ON SCHEMA keel_meta TO keel_app,keel_ai_worker;
 GRANT SELECT ON keel_meta.ai_execution_profiles TO keel_app,keel_ai_worker;
-GRANT SELECT (tenant_id,principal_sha256) ON keel_meta.ai_job_fairness TO keel_app;
-GRANT INSERT (tenant_id,principal_sha256) ON keel_meta.ai_job_fairness TO keel_app;
+GRANT SELECT (tenant_id,provider_id,model_id,principal_sha256) ON keel_meta.ai_job_fairness TO keel_app;
+GRANT INSERT (tenant_id,provider_id,model_id,principal_sha256) ON keel_meta.ai_job_fairness TO keel_app;
 GRANT SELECT ON keel_meta.ai_jobs TO keel_app;
 GRANT INSERT (tenant_id,inference_id,attempt_id,period_id,scope,provider_id,model_id,policy_sha256,principal_sha256,max_output_tokens)
     ON keel_meta.ai_jobs TO keel_app;
@@ -139,14 +141,14 @@ CREATE TRIGGER ai_job_transition_guard BEFORE UPDATE ON keel_meta.ai_jobs
 CREATE FUNCTION keel_meta.guard_ai_job_enqueue()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
 SET search_path=pg_catalog,keel_meta,pg_temp AS $$
-DECLARE admission_policy bytea; reservation_state text; configured_policy bytea; token_cap integer; queue_cap integer; queued_count integer;
+DECLARE admission_policy bytea; admission_principal bytea; reservation_state text; configured_policy bytea; token_cap integer; queue_cap integer; queued_count integer;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(NEW.tenant_id::text||'|'||NEW.provider_id||'|'||NEW.model_id,0));
     IF NEW.state<>'queued' OR NEW.attempt_count<>0 OR NEW.lease_epoch<>0 OR NEW.lease_owner IS NOT NULL OR
        NEW.lease_until IS NOT NULL OR NEW.attempt_deadline_at IS NOT NULL THEN
         RAISE EXCEPTION 'AI jobs must enter the queue in the unclaimed state';
     END IF;
-    SELECT a.policy_sha256 INTO admission_policy
+    SELECT a.policy_sha256,a.principal_binding_sha256 INTO admission_policy,admission_principal
       FROM keel_meta.ai_inference_admissions a
      WHERE a.tenant_id=NEW.tenant_id AND a.inference_id=NEW.inference_id AND a.attempt_id=NEW.attempt_id;
     SELECT r.liability_state INTO reservation_state
@@ -157,7 +159,7 @@ BEGIN
     SELECT p.policy_sha256,p.max_output_tokens,p.max_queue_depth INTO configured_policy,token_cap,queue_cap
       FROM keel_meta.ai_execution_profiles p
      WHERE p.tenant_id=NEW.tenant_id AND p.provider_id=NEW.provider_id AND p.model_id=NEW.model_id AND p.enabled;
-    IF admission_policy IS NULL OR reservation_state IS DISTINCT FROM 'reserved' OR
+    IF admission_policy IS NULL OR admission_principal IS DISTINCT FROM NEW.principal_sha256 OR reservation_state IS DISTINCT FROM 'reserved' OR
        configured_policy IS DISTINCT FROM NEW.policy_sha256 OR admission_policy IS DISTINCT FROM NEW.policy_sha256 OR
        token_cap IS NULL OR NEW.max_output_tokens>token_cap THEN
         RAISE EXCEPTION 'AI job does not match active reserved admission and execution profile';
@@ -175,7 +177,7 @@ RETURNS TABLE(inference_id uuid,attempt_id uuid,lease_epoch bigint,attempt_count
               lease_until timestamptz,attempt_deadline_at timestamptz)
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path=pg_catalog,keel_meta,keel_private,pg_temp AS $$
-DECLARE cap_concurrency integer; cap_duration integer; is_enabled boolean; in_flight integer;
+DECLARE cap_concurrency integer; cap_duration integer; is_enabled boolean; configured_policy bytea; token_cap integer; in_flight integer;
         selected_inference uuid; selected_attempt uuid; selected_principal bytea; selected_epoch bigint;
         selected_count integer; selected_tokens integer;
 BEGIN
@@ -185,7 +187,8 @@ BEGIN
         RAISE EXCEPTION 'invalid AI job claim';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(p_tenant::text||'|'||p_provider||'|'||p_model,0));
-    SELECT max_concurrency,max_attempt_duration_ms,enabled INTO cap_concurrency,cap_duration,is_enabled
+    SELECT max_concurrency,max_attempt_duration_ms,enabled,policy_sha256,max_output_tokens
+      INTO cap_concurrency,cap_duration,is_enabled,configured_policy,token_cap
       FROM keel_meta.ai_execution_profiles WHERE tenant_id=p_tenant AND provider_id=p_provider AND model_id=p_model;
     IF NOT FOUND OR NOT is_enabled THEN RETURN; END IF;
     SELECT count(*) INTO in_flight FROM keel_meta.ai_jobs
@@ -194,9 +197,9 @@ BEGIN
     SELECT j.inference_id,j.attempt_id,j.principal_sha256,j.lease_epoch,j.attempt_count,j.max_output_tokens
       INTO selected_inference,selected_attempt,selected_principal,selected_epoch,selected_count,selected_tokens
       FROM keel_meta.ai_jobs j JOIN keel_meta.ai_job_fairness f
-        ON f.tenant_id=j.tenant_id AND f.principal_sha256=j.principal_sha256
+        ON f.tenant_id=j.tenant_id AND f.provider_id=j.provider_id AND f.model_id=j.model_id AND f.principal_sha256=j.principal_sha256
      WHERE j.tenant_id=p_tenant AND j.provider_id=p_provider AND j.model_id=p_model AND j.state='queued'
-       AND j.available_at<=clock_timestamp()
+       AND j.available_at<=clock_timestamp() AND j.policy_sha256=configured_policy AND j.max_output_tokens<=token_cap
      ORDER BY f.last_claimed_at ASC NULLS FIRST,j.available_at,j.created_at,j.inference_id
      LIMIT 1 FOR UPDATE OF j,f SKIP LOCKED;
     IF NOT FOUND THEN RETURN; END IF;
@@ -209,7 +212,7 @@ BEGIN
      RETURNING j.inference_id,j.attempt_id,j.lease_epoch,j.attempt_count,j.max_output_tokens,j.lease_until,j.attempt_deadline_at
       INTO inference_id,attempt_id,lease_epoch,attempt_count,max_output_tokens,lease_until,attempt_deadline_at;
     UPDATE keel_meta.ai_job_fairness SET last_claimed_at=clock_timestamp(),claim_count=claim_count+1
-     WHERE tenant_id=p_tenant AND principal_sha256=selected_principal;
+     WHERE tenant_id=p_tenant AND provider_id=p_provider AND model_id=p_model AND principal_sha256=selected_principal;
     RETURN NEXT;
 END $$;
 
