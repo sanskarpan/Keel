@@ -3,6 +3,7 @@ package budget
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/url"
 	"os"
 	"sync"
@@ -91,6 +92,31 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 	repo, err := NewRepository(app, allowReconciliation{}, control, allowBudgetControl{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The app role intentionally cannot take a row lock by reading the raw
+	// period-head table; it must use the tenant-checking definer function.
+	err = tenancy.WithTenantTx(ctx, app, tenant, nil, func(tx *sql.Tx) error {
+		var lockedPeriod string
+		return tx.QueryRowContext(ctx, `SELECT period_id::text FROM keel_meta.ai_budget_period_heads WHERE tenant_id=$1 AND scope='inference' FOR SHARE`, tenantID).Scan(&lockedPeriod)
+	})
+	if err == nil {
+		t.Fatal("application role directly row-locked the period head")
+	}
+	lockMismatchTenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	err = tenancy.WithTenantTx(ctx, app, tenant, nil, func(tx *sql.Tx) error {
+		var period string
+		return tx.QueryRowContext(ctx, `SELECT period_id::text FROM keel_meta.lock_ai_budget_period($1)`, string(lockMismatchTenant)).Scan(&period)
+	})
+	if err == nil {
+		t.Fatal("period-lock function accepted a tenant other than the transaction context")
+	}
+	missingTenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	err = tenancy.WithTenantTx(ctx, app, missingTenant, nil, func(tx *sql.Tx) error {
+		var period string
+		return tx.QueryRowContext(ctx, `SELECT period_id::text FROM keel_meta.lock_ai_budget_period($1)`, string(missingTenant)).Scan(&period)
+	})
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing period head should return no row, got %v", err)
 	}
 	requestDigest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	makeAdmission := func() Admission {
