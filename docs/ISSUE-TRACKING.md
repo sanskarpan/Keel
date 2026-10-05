@@ -100,6 +100,8 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K4.5` | task | K4.5 Implement exact and scoped semantic cache, entity/polarity checks and labeled precision gate with >=600 independent eligible pairs per serving policy and one-sided 95% lower confidence bound >=99.5%. | [Open issue](https://github.com/sanskarpan/Keel/issues/35) |
 
+| `K4.5-cache-core` | task | Add fail-closed cache eligibility and a content-free exact precision qualification harness; partial implementation for parent [issue #35](https://github.com/sanskarpan/Keel/issues/35), tracked by [issue #192](https://github.com/sanskarpan/Keel/issues/192). Close only this subtask after its linked PR and CI pass; parent remains open for live serving and independent quality qualification. |
+
 | `K4.6` | task | K4.6 Add at most one pre-token fallback, provider idempotency capability and charged-attempt records. | [Open issue](https://github.com/sanskarpan/Keel/issues/36) |
 
 | `K4.7` | task | K4.7 Add global home-region Redis rate limiting and bounded degradation policies. | [Open issue](https://github.com/sanskarpan/Keel/issues/37) |
