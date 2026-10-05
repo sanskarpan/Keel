@@ -86,9 +86,9 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | Checklist ID | Type | Checklist item | GitHub issue |
 |---|---|---|---|
-| `K4.1` | task | K4.1 Build typed read-only agent query broker with protected session-role mapping. | [Open issue](https://github.com/sanskarpan/Keel/issues/31) |
+| `K4.1` | task | K4.1 Build typed read-only agent query broker with protected session-role mapping. Initial internal slice: [issue #184](https://github.com/sanskarpan/Keel/issues/184), [PR #185](https://github.com/sanskarpan/Keel/pull/185); parent remains open. | [Open parent issue](https://github.com/sanskarpan/Keel/issues/31) |
 
-| `K4.2` | task | K4.2 Implement versioned prompt/provider/tool policy and PII scrubbing before provider/logging. | [Open issue](https://github.com/sanskarpan/Keel/issues/32) |
+| `K4.2` | task | K4.2 Implement versioned prompt/provider/tool policy and PII scrubbing before provider/logging. Offline slice: [issue #182](https://github.com/sanskarpan/Keel/issues/182), [merged PR #183](https://github.com/sanskarpan/Keel/pull/183); parent remains open. | [Open parent issue](https://github.com/sanskarpan/Keel/issues/32) |
 
 | `K4.3` | task | K4.3 Implement durable reserve/settle/unknown-liability ledger and safe price quoting. | [Open issue](https://github.com/sanskarpan/Keel/issues/33) |
 
