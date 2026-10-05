@@ -401,7 +401,11 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 		if !clearHold.released {
 			t.Fatal("legal-hold clearance was not released after the destructive action")
 		}
-		if err := eraser.EraseClaimed(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch); err != nil {
+		retry, err := citationintake.NewEraser(appDB, objects, &testLegalHoldAuthority{}, receiptWriter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := retry.EraseClaimed(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch); err != nil {
 			t.Fatalf("retry idempotent source object erasure: %v", err)
 		}
 		for _, key := range []string{objectKey, outputKey} {
