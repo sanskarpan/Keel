@@ -11,5 +11,7 @@ Keep files compatible with transactional PostgreSQL execution. Online operations
 they cannot be placed in a regular migration file. The order aggregate/idempotency schema is
 introduced by migration `0001_orders_and_idempotency`; transactional outbox/state-feed tables,
 event-identity constraints, and the age-bound feed retention policy are added by `0002` through
-`0004`. Add later product tables with the owning domain migration and its access, retention, and
-recovery contracts.
+`0004`. Migration `0014_retrieval_lexical_publication` adds tenant/visibility-scoped immutable
+lexical builds, posting/statistic reconciliation, and a generation-fenced active-corpus pointer.
+Add later product tables with the owning domain migration and its access, retention, and recovery
+contracts.

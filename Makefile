@@ -1,4 +1,4 @@
-.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-temporal-test
+.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
 
 COMPOSE_FILE := deploy/compose/compose.yaml
 
@@ -130,6 +130,18 @@ local-workflow-dispatch-test: local-migrate
 	   KEEL_TEST_WORKER_DATABASE_URL='postgres://keel_local_worker:keel-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	   KEEL_TEST_ADMIN_DATABASE_URL='postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	   /tmp/keel-workflow-dispatch.test -test.run TestPostgreSQLWorkflowIntentLeaseOrderingAndFencing -test.count=1
+
+local-retrieval-test: local-migrate
+	@set -eu; \
+	 test_bin=$$(mktemp /tmp/keel-retrieval-test.XXXXXX); \
+	 trap 'rm -f "$$test_bin"; docker compose -f $(COMPOSE_FILE) exec -T postgres rm -f /tmp/keel-retrieval.test >/dev/null 2>&1 || true' EXIT; \
+	 GOTOOLCHAIN=local go test -c -o "$$test_bin" ./internal/retrieval/postgres; \
+	 docker cp "$$test_bin" $$(docker compose -f $(COMPOSE_FILE) ps -q postgres):/tmp/keel-retrieval.test; \
+	 docker compose -f $(COMPOSE_FILE) exec -T postgres env \
+	   KEEL_TEST_DATABASE_URL='postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
+	   KEEL_TEST_RETRIEVAL_INDEXER_DATABASE_URL='postgres://keel_local_retrieval_indexer:keel-retrieval-indexer-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
+	   KEEL_TEST_ADMIN_DATABASE_URL='postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
+	   /tmp/keel-retrieval.test -test.run TestPostgreSQL -test.count=1
 
 local-temporal-test:
 	KEEL_TEST_TEMPORAL_ADDRESS=127.0.0.1:7233 GOTOOLCHAIN=local go test ./internal/supplier/caseworkflow -run TestTemporalServerSignalWithStartDeduplicatesAndReplaysAfterWorkerRestart -count=1

@@ -29,6 +29,7 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `documents` | `(tenant,id)`, owner/classification/current_version/withdrawn_at | API/doc worker |
 | `document_versions` | `(tenant,doc,version)`, immutable object/version ID/hash, scan/publication state | Immutable after publish |
 | `document_chunks` | `(tenant,chunk)`, document_version FK, text reference/hash, tokenizer/corpus version, length | Retrieval; sensitive content encrypted where required |
+
 | `chunk_embeddings` | `(tenant,chunk,model_id)`, vector payload/dimension and checksum bound to immutable model manifest | Dimension, tokenizer, normalization and distance are checked against the immutable model/index identity; no fixed production dimension is assumed |
 | `document_terms` | `(tenant,visibility_class,corpus_version,term_id,chunk_id)`, term_frequency | Inverted lexical postings; RLS |
 | `corpus_statistics` | `(tenant,visibility_class,corpus_version)`, N, total_length, publication pointer | Atomic corpus switch |
@@ -38,6 +39,8 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `job_results` | `(tenant,job,logical_effect)` unique, content_ref/hash, model identity, outcome | Fenced executor commit |
 | `context_records` | encrypted object ref, prompt/query/doc/version hashes, access policy/expiry | Authorized replay only |
 | `cache_entries` | tenant/access/context/model/prompt/tool scope, embedding, response ref, expires_at | Eligible complete responses only |
+
+K3.2 lexical publication tables live in `keel_meta`: `retrieval_corpus_builds` holds immutable analyzer/chunker/key/manifest identity and a guarded build state; `retrieval_corpus_heads` holds one active build and monotonically increasing generation per `(tenant,visibility_key)`; `retrieval_chunks` holds source-version citation metadata and a content digest but no text; `retrieval_term_postings` holds tenant-and-key-version-bound HMAC term IDs and per-chunk frequency; `retrieval_term_statistics` holds build-local document frequency. Forced RLS scopes every table by `current_tenant_id()` and the exact `keel.visibility_key` transaction setting. `keel_app` is read-only and `keel_retrieval_indexer` owns staging/finalization/publication privileges. Triggers prevent mutation after validation and constrain pointer changes to ready builds. Old published builds become retired but are retained; physical cleanup, source deletion propagation and key rotation are later lifecycle work and must be designed with a safe retention policy before being enabled.
 | `budget_accounts` | `(tenant,period,scope)` PK, hard_limit, committed, reserved, version | Row-lock admission; nonnegative checked counters |
 | `budget_reservations` | `(tenant,id)`, inference unique, quote_id, amount, liability_state, expiry | Exactly one reservation per inference |
 | `usage_ledger` | logical_source/attempt/type unique; signed amount, confidence, quote/provider invoice ref | Append-only accounting |
