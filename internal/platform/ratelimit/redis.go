@@ -223,18 +223,24 @@ end
 local capacity = tonumber(ARGV[1])
 local refill = tonumber(ARGV[2])
 local cost = tonumber(ARGV[3])
+-- Store milli-tokens so requests during a partial refill interval do not
+-- discard fractional credit when the bucket's update timestamp advances.
+capacity = capacity * 1000
+cost = cost * 1000
 local ttl = tonumber(ARGV[4])
 local request_ttl = tonumber(ARGV[5])
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-local state = redis.call('HMGET', KEYS[1], 'tokens', 'updated_ms')
+local state = redis.call('HMGET', KEYS[1], 'tokens_milli', 'updated_ms')
 local tokens = capacity
 if state[1] then
     tokens = tonumber(state[1])
     local updated = tonumber(state[2])
     if now < updated then now = updated end
     local elapsed = now - updated
-    local replenished = math.floor(elapsed * refill / 1000)
+    -- Refill is expressed as milli-tokens per millisecond, so fractional
+    -- units remain exact for the full bounded capacity/refill range.
+    local replenished = elapsed * refill
     if replenished >= capacity - tokens then tokens = capacity else tokens = tokens + replenished end
 end
 local allowed = 0
@@ -243,11 +249,11 @@ if tokens >= cost then
     allowed = 1
     tokens = tokens - cost
 else
-    retry_ms = math.ceil((cost - tokens) * 1000 / refill)
+    retry_ms = math.ceil((cost - tokens) / refill)
 end
-redis.call('HSET', KEYS[1], 'tokens', tokens, 'updated_ms', now)
+redis.call('HSET', KEYS[1], 'tokens_milli', tokens, 'updated_ms', now)
 redis.call('PEXPIRE', KEYS[1], ttl)
-redis.call('HSET', KEYS[2], 'fingerprint', ARGV[6], 'allowed', allowed, 'remaining', tokens, 'retry_ms', retry_ms)
+redis.call('HSET', KEYS[2], 'fingerprint', ARGV[6], 'allowed', allowed, 'remaining', math.floor(tokens / 1000), 'retry_ms', retry_ms)
 redis.call('PEXPIRE', KEYS[2], request_ttl)
-return {allowed, tokens, retry_ms, 0}
+return {allowed, math.floor(tokens / 1000), retry_ms, 0}
 `)
