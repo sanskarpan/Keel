@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -34,6 +36,17 @@ func TestPostgreSQLErasureWorkerLeaseRetryAndPoisonState(t *testing.T) {
 	request, err := app.WithdrawSource(ctx, tenant, visibility, uuid.New(), chunk.DocumentVersionID, uuid.New())
 	if err != nil || request.State != "fenced" || request.AttemptCount != 0 {
 		t.Fatalf("withdrawal request=%+v err=%v", request, err)
+	}
+	scope, err := newScope(tenant, visibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actionCount int
+	if err := withScope(ctx, appDB, scope, nil, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.retrieval_erasure_action_manifest
+			WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3`, string(tenant), visibility, request.ID).Scan(&actionCount)
+	}); err != nil || actionCount != 6 {
+		t.Fatalf("seeded action manifest count=%d err=%v", actionCount, err)
 	}
 
 	if _, claimed, err := app.ClaimErasureJob(ctx, tenant, visibility, "app-role", 3*time.Second); err == nil || claimed {
@@ -93,6 +106,63 @@ func TestPostgreSQLErasureWorkerLeaseRetryAndPoisonState(t *testing.T) {
 	completionClaim, claimed, err := worker.ClaimErasureJob(ctx, tenant, visibility, "eraser-a", 3*time.Second)
 	if err != nil || !claimed || completionClaim.ID != completedRequest.ID {
 		t.Fatalf("completion claim=%+v claimed=%t err=%v", completionClaim, claimed, err)
+	}
+	if _, err := worker.CompleteErasureJob(ctx, tenant, visibility, "eraser-a", completionClaim.ID, completionClaim.LeaseEpoch); !errors.Is(err, ErrErasureActionManifestIncomplete) {
+		t.Fatalf("job completed without action receipts: %v", err)
+	}
+	actorID := uuid.New()
+	if _, err := worker.RecordErasureActionReceipt(ctx, tenant, visibility, "eraser-a", completionClaim.ID,
+		completionClaim.LeaseEpoch, ErasureActionLegalHoldCheck, ErasureReceiptNotApplicable, actorID,
+		"no hold adapter", sha256.Sum256([]byte("invalid legal hold decision"))); err == nil {
+		t.Fatal("legal hold check was accepted as not applicable")
+	}
+	if _, err := worker.RecordErasureActionReceipt(ctx, tenant, visibility, "eraser-b", completionClaim.ID,
+		completionClaim.LeaseEpoch, ErasureActionLegalHoldCheck, ErasureReceiptComplete, actorID,
+		"", sha256.Sum256([]byte("stale worker"))); err == nil {
+		t.Fatal("receipt from a non-owner worker was accepted")
+	}
+	if _, err := worker.RecordErasureActionReceipt(ctx, tenancy.TenantID(uuid.NewString()), visibility, "eraser-a", completionClaim.ID,
+		completionClaim.LeaseEpoch, ErasureActionLegalHoldCheck, ErasureReceiptComplete, actorID,
+		"", sha256.Sum256([]byte("cross-tenant"))); err == nil {
+		t.Fatal("cross-tenant receipt was accepted")
+	}
+	actions := []struct {
+		key, disposition, reason string
+	}{
+		{ErasureActionLegalHoldCheck, ErasureReceiptComplete, ""},
+		{ErasureActionSupplierSourceObject, ErasureReceiptComplete, ""},
+		{ErasureActionDerivedIndex, ErasureReceiptComplete, ""},
+		{ErasureActionCacheRevocation, ErasureReceiptNotApplicable, "synthetic fixture has no content cache"},
+		{ErasureActionQueuedWorkRevocation, ErasureReceiptNotApplicable, "synthetic fixture has no queued retrieval work"},
+		{ErasureActionBackupExpiry, ErasureReceiptNotApplicable, "synthetic fixture has no managed backup adapter"},
+	}
+	for _, action := range actions {
+		digest := sha256.Sum256([]byte("test receipt:" + action.key))
+		receipt, err := worker.RecordErasureActionReceipt(ctx, tenant, visibility, "eraser-a", completionClaim.ID,
+			completionClaim.LeaseEpoch, action.key, action.disposition, actorID, action.reason, digest)
+		if err != nil || receipt.ActionKey != action.key || receipt.LeaseOwner != "eraser-a" {
+			t.Fatalf("record receipt %s: receipt=%+v err=%v", action.key, receipt, err)
+		}
+		if action.key == ErasureActionLegalHoldCheck {
+			replayed, err := worker.RecordErasureActionReceipt(ctx, tenant, visibility, "eraser-a", completionClaim.ID,
+				completionClaim.LeaseEpoch, action.key, action.disposition, actorID, action.reason, digest)
+			if err != nil || replayed.RecordedAt != receipt.RecordedAt {
+				t.Fatalf("identical receipt replay was not idempotent: replay=%+v err=%v", replayed, err)
+			}
+			if _, err := worker.RecordErasureActionReceipt(ctx, tenant, visibility, "eraser-a", completionClaim.ID,
+				completionClaim.LeaseEpoch, action.key, action.disposition, actorID, action.reason, sha256.Sum256([]byte("tampered"))); !errors.Is(err, ErrErasureActionReceiptConflict) {
+				t.Fatalf("conflicting receipt replay was accepted: %v", err)
+			}
+		}
+	}
+	if err := withScope(ctx, indexerDB, scope, nil, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE keel_meta.retrieval_erasure_action_receipts
+			SET disposition='not_applicable',decision_reason='tampered'
+			WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3 AND action_key=$4`,
+			string(tenant), visibility, completionClaim.ID, ErasureActionLegalHoldCheck)
+		return err
+	}); err == nil {
+		t.Fatal("indexer modified an immutable erasure action receipt")
 	}
 	completed, err := worker.CompleteErasureJob(ctx, tenant, visibility, "eraser-a", completionClaim.ID, completionClaim.LeaseEpoch)
 	if err != nil || completed.State != "complete" || !completed.CompletedAt.Valid || completed.LeaseOwner.Valid {
