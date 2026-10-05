@@ -14,6 +14,23 @@ import (
 	"github.com/sanskarpan/keel/internal/retrieval/index"
 )
 
+func TestErasureExecutionOnlyAllowsNotApplicableForDisabledCapabilities(t *testing.T) {
+	for _, action := range []string{ErasureActionCacheRevocation, ErasureActionQueuedWorkRevocation} {
+		result := ErasureActionExecution{Disposition: ErasureReceiptNotApplicable, ActorID: uuid.New(),
+			Reason: "not mounted in the documented profile", ReceiptSHA256: sha256.Sum256([]byte(action))}
+		if err := validateErasureExecution(action, result); err != nil {
+			t.Errorf("disabled capability %s rejected N/A: %v", action, err)
+		}
+	}
+	for _, action := range []string{ErasureActionLegalHoldCheck, ErasureActionSupplierSourceObject, ErasureActionDerivedIndex, ErasureActionBackupExpiry} {
+		result := ErasureActionExecution{Disposition: ErasureReceiptNotApplicable, ActorID: uuid.New(),
+			Reason: "provider not configured", ReceiptSHA256: sha256.Sum256([]byte(action))}
+		if err := validateErasureExecution(action, result); !errors.Is(err, ErrErasureOutcomeInvalid) {
+			t.Errorf("required action %s accepted N/A outcome, err=%v", action, err)
+		}
+	}
+}
+
 type testErasureExecutor func(context.Context, ErasureJob, string, string) (ErasureActionExecution, error)
 
 func (f testErasureExecutor) Execute(ctx context.Context, job ErasureJob, tenant, visibility string) (ErasureActionExecution, error) {
@@ -477,7 +494,7 @@ func testErasureExecutors(order *[]string) map[string]ErasureActionExecutor {
 		action := action
 		result[action] = testErasureExecutor(func(_ context.Context, _ ErasureJob, _, _ string) (ErasureActionExecution, error) {
 			*order = append(*order, action)
-			if action == ErasureActionCacheRevocation || action == ErasureActionQueuedWorkRevocation || action == ErasureActionBackupExpiry {
+			if erasureActionMayBeNotApplicable(action) {
 				outcome := completeTestErasureAction(action)
 				outcome.Disposition = ErasureReceiptNotApplicable
 				outcome.Reason = "synthetic action-plan fixture has no mounted provider"
