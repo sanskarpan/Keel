@@ -112,6 +112,17 @@ func (p *ErasureActionProcessor) ProcessOne(ctx context.Context, tenant tenancy.
 		if actionErr != nil {
 			return p.retry(ctx, tenant, visibility, job, "action_failed")
 		}
+		// Some actions (for example, supplier object erasure) must keep a
+		// provider permit until their receipt is committed, so the executor
+		// writes that receipt itself. Observe it before asking for a second
+		// outcome or insert; this also makes response-loss replay idempotent.
+		recorded, checkErr = p.hasReceipt(ctx, tenant, visibility, job.ID, action)
+		if checkErr != nil {
+			return p.retry(ctx, tenant, visibility, job, "receipt_check_failed")
+		}
+		if recorded {
+			continue
+		}
 		if err := validateErasureExecution(action, result); err != nil {
 			return p.retry(ctx, tenant, visibility, job, "action_outcome_invalid")
 		}
