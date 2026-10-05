@@ -66,16 +66,16 @@ func TestMetricsExportLatestBacklogSnapshot(t *testing.T) {
 		t.Fatalf("backlog gauges were exported before a snapshot: %s", before)
 	}
 	metrics.ObserveErasureBacklog(postgres.ErasureBacklog{
-		SampledAt:         time.Unix(1_800_000_000, 0),
-		Fenced:            2,
-		CleanupPending:    4,
-		Blocked:           3,
-		Due:               1,
-		Deferred:          2,
-		Leased:            1,
-		ExpiredLease:      0,
-		OldestOutstanding: 17 * time.Second,
-		Truncated:         true,
+		SampledAt:                   time.Unix(1_800_000_000, 0),
+		Fenced:                      2,
+		CleanupPending:              4,
+		Blocked:                     3,
+		Due:                         1,
+		Deferred:                    2,
+		Leased:                      1,
+		ExpiredLease:                0,
+		OldestOutstandingAgeSeconds: 17,
+		Truncated:                   true,
 	})
 	output := metrics.PrometheusMetrics()
 	for _, expected := range []string{
