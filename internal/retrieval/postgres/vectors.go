@@ -363,7 +363,9 @@ func (r *Repository) searchVector(ctx context.Context, tenant tenancy.TenantID, 
 	workCtx, cancel := context.WithTimeout(ctx, VectorSearchTimeout)
 	defer cancel()
 	result := VectorSearchResult{}
-	err = withScope(workCtx, r.db, s, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
+	// Source row locks require a read-write PostgreSQL transaction. The app
+	// database role still has only SELECT plus its guarded withdrawal columns.
+	err = withScope(workCtx, r.db, s, &sql.TxOptions{Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
 		if err := readActiveVectorBuild(workCtx, tx, s, modelID, revision, &result.Build); err != nil {
 			return err
 		}
