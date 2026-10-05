@@ -273,7 +273,7 @@ func validateErasureExecution(action string, result ErasureActionExecution) erro
 		return ErrErasureOutcomeInvalid
 	}
 	if result.Disposition == ErasureReceiptNotApplicable &&
-		(action == ErasureActionLegalHoldCheck || len(result.Reason) == 0 || len(result.Reason) > 512) {
+		(!erasureActionMayBeNotApplicable(action) || len(result.Reason) == 0 || len(result.Reason) > 512) {
 		return ErrErasureOutcomeInvalid
 	}
 	return nil

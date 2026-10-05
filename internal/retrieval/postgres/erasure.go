@@ -88,8 +88,8 @@ func (r *Repository) RecordErasureActionReceipt(ctx context.Context, tenant tena
 		}
 	} else {
 		reason = strings.TrimSpace(reason)
-		if actionKey == ErasureActionLegalHoldCheck || len(reason) == 0 || len(reason) > 512 {
-			return ErasureActionReceipt{}, errors.New("not-applicable decision requires an allowed action and a reason of at most 512 bytes")
+		if !erasureActionMayBeNotApplicable(actionKey) || len(reason) == 0 || len(reason) > 512 {
+			return ErasureActionReceipt{}, errors.New("not-applicable decision is not allowed for this action or its reason is invalid")
 		}
 	}
 	var receipt ErasureActionReceipt
@@ -145,6 +145,13 @@ func (r *Repository) RecordErasureActionReceipt(ctx context.Context, tenant tena
 		return nil
 	})
 	return receipt, err
+}
+
+// Only capabilities explicitly absent from the current runtime profile may be
+// recorded as not applicable. Required erasure work must never be skipped by
+// a worker merely because its production provider is not configured.
+func erasureActionMayBeNotApplicable(action string) bool {
+	return action == ErasureActionCacheRevocation || action == ErasureActionQueuedWorkRevocation
 }
 
 func validErasureAction(action string) bool {
