@@ -88,7 +88,7 @@ func (m *Metrics) PrometheusMetrics() string {
 		writeGauge("keel_erasure_worker_backlog_deferred_jobs", "Sampled erasure jobs waiting for retry backoff.", backlog.Deferred)
 		writeGauge("keel_erasure_worker_backlog_leased_jobs", "Sampled erasure jobs with a live worker lease.", backlog.Leased)
 		writeGauge("keel_erasure_worker_backlog_expired_lease_jobs", "Sampled erasure jobs with an expired worker lease.", backlog.ExpiredLease)
-		writeGauge("keel_erasure_worker_backlog_oldest_age_seconds", "Age of the oldest sampled outstanding erasure job.", backlog.OldestOutstanding.Seconds())
+		writeGauge("keel_erasure_worker_backlog_oldest_age_seconds", "Age of the oldest sampled outstanding erasure job.", backlog.OldestOutstandingAgeSeconds)
 		truncated := 0
 		if backlog.Truncated {
 			truncated = 1
