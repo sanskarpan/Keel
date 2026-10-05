@@ -23,7 +23,7 @@ func (p staticPrincipal) Resolve(context.Context, *http.Request) (Principal, boo
 	return p.principal, p.ok
 }
 
-type allowCaseActions struct{ publish, create, manage, submit bool }
+type allowCaseActions struct{ publish, create, manage, submit, decide bool }
 
 func (a allowCaseActions) CanPublishReviewPolicy(context.Context, Principal) bool { return a.publish }
 func (a allowCaseActions) CanCreateSupplierCase(context.Context, Principal, string, string) bool {
@@ -35,6 +35,9 @@ func (a allowCaseActions) CanManageSupplierCase(context.Context, Principal, stri
 func (a allowCaseActions) CanSubmitSupplierCase(context.Context, Principal, string) bool {
 	return a.submit
 }
+func (a allowCaseActions) CanDecideSupplierCase(context.Context, Principal, string) bool {
+	return a.decide
+}
 
 type fakeRepository struct {
 	created      cases.Case
@@ -44,6 +47,8 @@ type fakeRepository struct {
 	policy       cases.Policy
 	attached     bool
 	submitted    bool
+	decided      bool
+	decision     cases.StepDecision
 }
 
 func (r *fakeRepository) PublishPolicy(_ context.Context, _ tenancy.TenantID, p cases.Policy, _ string) (cases.Policy, error) {
@@ -70,6 +75,14 @@ func (r *fakeRepository) Submit(_ context.Context, t tenancy.TenantID, id, actor
 	r.submitted = true
 	r.actor = actor
 	return cases.Case{CaseID: id, Status: cases.Submitted, Version: 3}, nil
+}
+func (r *fakeRepository) Decide(_ context.Context, t tenancy.TenantID, id string, decision cases.StepDecision) (cases.Case, error) {
+	r.decided = true
+	r.decision = decision
+	return cases.Case{CaseID: id, Status: cases.Submitted, Version: 4}, nil
+}
+func (r *fakeRepository) Expire(_ context.Context, _ tenancy.TenantID, id string) (cases.Case, error) {
+	return cases.Case{CaseID: id, Status: cases.Expired}, nil
 }
 func (r *fakeRepository) Get(_ context.Context, _ tenancy.TenantID, id string) (postgres.CaseView, error) {
 	return postgres.CaseView{Case: cases.Case{CaseID: id, Status: cases.Collecting, Version: 1}}, nil
@@ -158,5 +171,24 @@ func TestSupplierCaseRoutesRequireIdentityAndScopedAuthorization(t *testing.T) {
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound || repo.attached {
 		t.Fatal("unauthorized caller reached evidence repository")
+	}
+}
+
+func TestDecisionRouteUsesTrustedPrincipalAndRejectsCallerAuthorityFields(t *testing.T) {
+	tenant, _ := tenancy.ParseTenantID("11111111-1111-4111-8111-111111111111")
+	repo := &fakeRepository{}
+	h := testHandler(t, Principal{TenantID: tenant, ActorRef: "principal:reviewer-2"}, true, allowCaseActions{decide: true}, repo)
+	body := `{"decision_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","step_key":"risk-review","outcome":"approve","reason":"verified"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/supplier-cases/cccccccc-cccc-4ccc-8ccc-cccccccccccc/decisions", strings.NewReader(body))
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code != http.StatusOK || !repo.decided || repo.decision.Actor != "principal:reviewer-2" || repo.decision.Role != "" {
+		t.Fatalf("decision did not use trusted identity: status=%d decision=%+v body=%s", res.Code, repo.decision, res.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/supplier-cases/cccccccc-cccc-4ccc-8ccc-cccccccccccc/decisions", strings.NewReader(`{"decision_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","step_key":"risk-review","outcome":"approve","actor":"principal:attacker","role":"owner"}`))
+	res = httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("caller-supplied actor/role accepted: status=%d body=%s", res.Code, res.Body.String())
 	}
 }
