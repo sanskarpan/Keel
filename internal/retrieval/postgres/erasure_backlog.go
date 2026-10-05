@@ -13,19 +13,22 @@ const MaxErasureBacklogSample = 10_000
 
 // ErasureBacklog contains bounded, scope-local counts. Counts are exact until
 // the sample limit is reached; Truncated signals that reported counts are
-// lower bounds. OldestOutstandingAge uses database time and includes blocked
-// jobs that still require operator action, but excludes completed jobs.
+// lower bounds. OldestOutstandingAgeSeconds uses database time and includes
+// blocked jobs that still require operator action, but excludes completed jobs.
 type ErasureBacklog struct {
-	SampledAt         time.Time
-	Fenced            int64
-	CleanupPending    int64
-	Blocked           int64
-	Due               int64
-	Deferred          int64
-	Leased            int64
-	ExpiredLease      int64
-	OldestOutstanding time.Duration
-	Truncated         bool
+	SampledAt      time.Time
+	Fenced         int64
+	CleanupPending int64
+	Blocked        int64
+	Due            int64
+	Deferred       int64
+	Leased         int64
+	ExpiredLease   int64
+	// OldestOutstandingAgeSeconds is a nonnegative database-time age. Keep this
+	// as float64 seconds: valid PostgreSQL timestamps can span more than the
+	// ~292-year range representable by time.Duration.
+	OldestOutstandingAgeSeconds float64
+	Truncated                   bool
 }
 
 // ReadErasureBacklog returns a bounded summary for one authorized tenant and
@@ -78,6 +81,6 @@ func (r *Repository) ReadErasureBacklog(ctx context.Context, tenant tenancy.Tena
 	if err != nil {
 		return ErasureBacklog{}, fmt.Errorf("read scoped retrieval erasure backlog: %w", err)
 	}
-	backlog.OldestOutstanding = time.Duration(ageSeconds * float64(time.Second))
+	backlog.OldestOutstandingAgeSeconds = ageSeconds
 	return backlog, nil
 }
