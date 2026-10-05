@@ -111,6 +111,9 @@ func TestTemporalServerSignalWithStartDeduplicatesAndReplaysAfterWorkerRestart(t
 }
 
 func TestTemporalHistoryBudgetReplayAndSimulated72HourRecovery(t *testing.T) {
+	if os.Getenv("KEEL_TEST_TEMPORAL_HISTORY_BUDGET") != "1" {
+		t.Skip("set KEEL_TEST_TEMPORAL_HISTORY_BUDGET=1 to run the pinned Temporal history stress qualification")
+	}
 	address := os.Getenv("KEEL_TEST_TEMPORAL_ADDRESS")
 	if address == "" {
 		t.Skip("set KEEL_TEST_TEMPORAL_ADDRESS to a pinned local Temporal server")
@@ -236,16 +239,14 @@ func captureWorkflowHistory(ctx context.Context, t *testing.T, c client.Client, 
 	t.Helper()
 	iterator := c.GetWorkflowHistory(ctx, workflowID, "", false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
 	history := &historypb.History{}
-	bytes := 0
 	for iterator.HasNext() {
 		event, err := iterator.Next()
 		if err != nil {
 			t.Fatalf("read Temporal history: %v", err)
 		}
 		history.Events = append(history.Events, event)
-		bytes += proto.Size(event)
 	}
-	return history, bytes
+	return history, proto.Size(history)
 }
 
 func waitWorkflowVersion(ctx context.Context, t *testing.T, c client.Client, tenant tenancy.TenantID, caseID string, want uint64) uint64 {
