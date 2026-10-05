@@ -413,6 +413,96 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
       x-keel-phase: K2.4
+  /v1/supplier-cases/{case_id}/cancel:
+    parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [supplier cases]
+      operationId: cancelSupplierCase
+      summary: Cancel a collecting or submitted case before its immutable deadline.
+      description: The case row lock arbitrates cancellation against approval and expiry. Actor and tenant are trusted context, and identical cancellation IDs are idempotent.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CancelSupplierCaseRequest' }
+      responses:
+        '200':
+          description: Case canceled; pending invitations are revoked and future evidence writes are blocked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierCase' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.5
+  /v1/supplier-cases/{case_id}/manual-reviews:
+    parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [supplier cases]
+      operationId: requestSupplierEvidenceManualReview
+      summary: Create an auditable human review for one frozen evidence item.
+      description: Manual review confirms evidence content only and cannot bypass malware scanning, extraction, or supplier-case approval policy.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RequestSupplierManualReview' }
+      responses:
+        '200':
+          description: Review task and event committed atomically.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierCase' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.5
+  /v1/supplier-cases/{case_id}/manual-reviews/{review_id}/resolution:
+    parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: review_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [supplier cases]
+      operationId: resolveSupplierEvidenceManualReview
+      summary: Record a reviewer’s confirmation or replacement-required finding.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResolveSupplierManualReview' }
+      responses:
+        '200':
+          description: Resolution and case event committed atomically; supplier-case approval remains governed by the frozen policy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierCase' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.5
   /v1/public/tenants/{tenant_id}/supplier-invitations/accept:
     parameters:
       - $ref: '#/components/parameters/TenantID'
@@ -853,6 +943,29 @@ components:
         step_key: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
         outcome: { type: string, enum: [approve, reject] }
         reason: { type: string, maxLength: 500 }
+    CancelSupplierCaseRequest:
+      type: object
+      additionalProperties: false
+      required: [cancellation_id, reason]
+      properties:
+        cancellation_id: { type: string, format: uuid }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    RequestSupplierManualReview:
+      type: object
+      additionalProperties: false
+      required: [review_id, evidence_id, reason]
+      properties:
+        review_id: { type: string, format: uuid }
+        evidence_id: { type: string, format: uuid }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    ResolveSupplierManualReview:
+      type: object
+      additionalProperties: false
+      required: [evidence_id, outcome, reason]
+      properties:
+        evidence_id: { type: string, format: uuid }
+        outcome: { type: string, enum: [confirmed, replacement-required] }
+        reason: { type: string, minLength: 1, maxLength: 500 }
     SupplierCase:
       type: object
       additionalProperties: false
