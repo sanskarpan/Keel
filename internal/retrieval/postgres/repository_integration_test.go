@@ -115,8 +115,9 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	if _, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID()+"-wrong", []index.TermID{invoice}, 5, 20); !errors.Is(err, ErrTermKeyMismatch) {
 		t.Fatalf("wrong term key was accepted: %v", err)
 	}
-	if _, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID(), []index.TermID{invoice, hasher.ID("total")}, 5, 1); !errors.Is(err, ErrPostingBudgetExceeded) {
-		t.Fatalf("posting budget overflow did not fail closed: %v", err)
+	partial, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID(), []index.TermID{invoice, hasher.ID("total")}, 5, 1)
+	if !errors.Is(err, ErrPostingBudgetExceeded) || len(partial.Candidates) != 0 || partial.PostingRows != 0 {
+		t.Fatalf("posting budget overflow returned a partial result: result=%+v err=%v", partial, err)
 	}
 	if _, err := app.ActiveBuild(ctx, otherTenant, visibility); !errors.Is(err, ErrNoActiveBuild) {
 		t.Fatalf("another tenant read a corpus: %v", err)
