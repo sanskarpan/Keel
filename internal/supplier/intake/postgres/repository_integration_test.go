@@ -14,6 +14,8 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
+	"github.com/sanskarpan/keel/internal/supplier/cases"
+	casepg "github.com/sanskarpan/keel/internal/supplier/cases/postgres"
 	"github.com/sanskarpan/keel/internal/supplier/intake"
 )
 
@@ -60,7 +62,21 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 	}
 	otherTenant, _ := tenancy.ParseTenantID("22222222-2222-4222-8222-222222222222")
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	invitationID, caseID, supplierID := nextIntakeUUID(t), nextIntakeUUID(t), nextIntakeUUID(t)
+	invitationID, supplierID := nextIntakeUUID(t), nextIntakeUUID(t)
+	policyID := nextIntakeUUID(t)
+	casesRepo, err := casepg.New(appDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := cases.Policy{TenantID: string(tenant), PolicyID: policyID, Version: 1, Name: "Supplier intake integration", Deadline: 4 * time.Hour, Steps: []cases.ReviewStep{{Key: "review", Role: "risk:reviewer"}}}
+	if _, err := casesRepo.PublishPolicy(ctx, tenant, policy, "principal:buyer-1"); err != nil {
+		t.Fatal(err)
+	}
+	createdCase, err := casesRepo.Create(ctx, tenant, nextIntakeUUID(t), supplierID, policyID, 1, "principal:buyer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caseID := createdCase.CaseID
 	recipient, err := RecipientDigest("supplier@example.test", bytesOf(0x31, 32))
 	if err != nil {
 		t.Fatal(err)
