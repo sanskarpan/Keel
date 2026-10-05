@@ -23,6 +23,8 @@ Public ingress, application workloads, extraction sandbox, database, event bus, 
 | Compromised workload reads all secrets | Per-role workload identity, minimum IAM/DB grants, separate key providers | Runtime effective-access audit |
 | Operator abuse | JIT break-glass, separate admin routes, immutable audit and approval policy | Administrative-action negative tests |
 
+The K4.5 cache core binds opaque lookup keys to tenant, access, policy, prompt, tool, provider/model, context/source-set, locale, classification and cache-policy digests. This initial package permits only general-classification inputs and fails semantic candidates closed unless the verifier artifact and entity, numeric, date and polarity evidence match. It does not implement response storage or a production verifier; those require the separately reviewed encrypted-store, live-revocation and independently labeled quality gates in `docs/K4.5-CACHE-EVIDENCE.md`.
+
 ## 3. Database agent boundary
 
 The model invokes reviewed typed tools such as `search_policies`, `get_supplier_summary` and `get_order_summary`; it never receives a DSN, database credential, raw SQL tool or arbitrary database session. A query broker maps the authenticated principal to a per-tenant read-only PostgreSQL login. A protected `session_user -> tenant_id` mapping and fixed-path `SECURITY DEFINER` function bind each agent login to one tenant; RLS ignores caller-set tenant GUCs for those logins. Agent logins inherit only the SELECT-only `keel_agent` capability role and cannot become app, worker or migration roles. Provisioning creates the login and protected mapping together; revocation removes both under a controlled operation.
