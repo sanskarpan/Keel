@@ -382,6 +382,37 @@ paths:
         '422': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
       x-keel-phase: K2.2
+  /v1/supplier-cases/{case_id}/decisions:
+    parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [supplier cases]
+      operationId: decideSupplierCaseStep
+      summary: Record one human decision against the frozen review plan.
+      description: Actor and tenant come only from authenticated context; the server derives the required role from the frozen plan. The handler remains unmounted until identity and runtime gates pass.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DecideSupplierCaseStepRequest' }
+      responses:
+        '200':
+          description: Decision and case event committed atomically; identical retries are idempotent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierCase' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.4
   /v1/public/tenants/{tenant_id}/supplier-invitations/accept:
     parameters:
       - $ref: '#/components/parameters/TenantID'
@@ -813,6 +844,15 @@ components:
         upload_id: { type: string, format: uuid }
         slot: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
         kind: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+    DecideSupplierCaseStepRequest:
+      type: object
+      additionalProperties: false
+      required: [decision_id, step_key, outcome]
+      properties:
+        decision_id: { type: string, format: uuid }
+        step_key: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        outcome: { type: string, enum: [approve, reject] }
+        reason: { type: string, maxLength: 500 }
     SupplierCase:
       type: object
       additionalProperties: false
