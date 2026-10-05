@@ -3,16 +3,17 @@ package postgres
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
 
 // ClaimedDerivedIndexEraser performs one bounded cleanup pass for a currently
-// leased job. A pass that is not ready for a receipt must return an error so
-// ProcessOne retries the job without marking the action complete.
+// leased job. A pass that needs more work returns progress without a receipt;
+// ProcessOne yields the lease and continues from the durable database cursor.
 type ClaimedDerivedIndexEraser interface {
-	CleanupClaimed(context.Context, tenancy.TenantID, string, string, uuid.UUID, int64) error
+	CleanupClaimed(context.Context, tenancy.TenantID, string, string, uuid.UUID, int64) (bool, time.Duration, error)
 }
 
 // DerivedIndexCleanupExecutor adapts a fenced index eraser to the manifest
@@ -37,8 +38,12 @@ func (e *DerivedIndexCleanupExecutor) Execute(ctx context.Context, job ErasureJo
 	if err != nil {
 		return ErasureActionExecution{}, errors.New("derived-index action tenant is invalid")
 	}
-	if err := e.eraser.CleanupClaimed(ctx, tenantID, visibility, job.LeaseOwner.String, job.ID, job.LeaseEpoch); err != nil {
+	progress, delay, err := e.eraser.CleanupClaimed(ctx, tenantID, visibility, job.LeaseOwner.String, job.ID, job.LeaseEpoch)
+	if err != nil {
 		return ErasureActionExecution{}, err
+	}
+	if progress {
+		return ErasureActionExecution{Progress: true, ProgressDelay: delay}, nil
 	}
 	return ErasureActionExecution{}, nil
 }
