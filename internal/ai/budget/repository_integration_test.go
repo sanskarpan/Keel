@@ -3,6 +3,7 @@ package budget
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/url"
 	"os"
 	"sync"
@@ -92,6 +93,31 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The app role intentionally cannot take a row lock by reading the raw
+	// period-head table; it must use the tenant-checking definer function.
+	err = tenancy.WithTenantTx(ctx, app, tenant, nil, func(tx *sql.Tx) error {
+		var lockedPeriod string
+		return tx.QueryRowContext(ctx, `SELECT period_id::text FROM keel_meta.ai_budget_period_heads WHERE tenant_id=$1 AND scope='inference' FOR SHARE`, tenantID).Scan(&lockedPeriod)
+	})
+	if err == nil {
+		t.Fatal("application role directly row-locked the period head")
+	}
+	lockMismatchTenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	err = tenancy.WithTenantTx(ctx, app, tenant, nil, func(tx *sql.Tx) error {
+		var period string
+		return tx.QueryRowContext(ctx, `SELECT period_id::text FROM keel_meta.lock_ai_budget_period($1)`, string(lockMismatchTenant)).Scan(&period)
+	})
+	if err == nil {
+		t.Fatal("period-lock function accepted a tenant other than the transaction context")
+	}
+	missingTenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	err = tenancy.WithTenantTx(ctx, app, missingTenant, nil, func(tx *sql.Tx) error {
+		var period string
+		return tx.QueryRowContext(ctx, `SELECT period_id::text FROM keel_meta.lock_ai_budget_period($1)`, string(missingTenant)).Scan(&period)
+	})
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing period head should return no row, got %v", err)
+	}
 	requestDigest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	makeAdmission := func() Admission {
 		return Admission{Tenant: tenant, PeriodID: periodID, InferenceID: uuid.NewString(), AttemptID: uuid.NewString(), ReservationID: uuid.NewString(), PeriodStart: periodStart, PeriodEnd: periodEnd, PrincipalBinding: "principal:integration-test", RequestDigest: requestDigest, Quote: quote}
@@ -118,7 +144,7 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 				t.Fatal("concurrent budget admissions overspent the period")
 			}
 			admittedIndex = i
-		} else if admitErr != ErrBudgetDenied {
+		} else if !errors.Is(admitErr, ErrBudgetDenied) {
 			t.Fatalf("concurrent admission %d: %v", i, admitErr)
 		}
 	}
@@ -135,12 +161,12 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 		t.Fatalf("admission replay mismatch: %#v %#v", admitted, replayed)
 	}
 	second := makeAdmission()
-	if _, err = repo.Admit(ctx, second); err != ErrBudgetDenied {
+	if _, err = repo.Admit(ctx, second); !errors.Is(err, ErrBudgetDenied) {
 		t.Fatalf("over-limit admission error=%v, want ErrBudgetDenied", err)
 	}
 	overlap := makeAdmission()
 	overlap.PeriodID = overlappingPeriodID
-	if _, err = repo.Admit(ctx, overlap); err != ErrBudgetDenied {
+	if _, err = repo.Admit(ctx, overlap); !errors.Is(err, ErrBudgetDenied) {
 		t.Fatalf("unselected overlapping period bypassed the active cap: %v", err)
 	}
 	oldQuote, err := book.QuoteWorstCase(testPolicySnapshot(t), now.Add(-maxQuoteAge-time.Second))
@@ -149,7 +175,7 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 	}
 	staleQuote := makeAdmission()
 	staleQuote.Quote = oldQuote
-	if _, err = repo.Admit(ctx, staleQuote); err != ErrQuoteRejected {
+	if _, err = repo.Admit(ctx, staleQuote); !errors.Is(err, ErrQuoteRejected) {
 		t.Fatalf("stale quote admission error=%v, want ErrQuoteRejected", err)
 	}
 	stale := makeAdmission()
@@ -159,7 +185,7 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 	if _, err = admin.ExecContext(ctx, `UPDATE keel_meta.ai_budget_period_heads SET period_id=$2,updated_at=clock_timestamp() WHERE tenant_id=$1 AND scope='inference'`, tenantID, nextPeriodID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = repo.Admit(ctx, stale); err != ErrQuoteRejected {
+	if _, err = repo.Admit(ctx, stale); !errors.Is(err, ErrQuoteRejected) {
 		t.Fatalf("future period admission error=%v, want ErrQuoteRejected", err)
 	}
 	if _, err = admin.ExecContext(ctx, `UPDATE keel_meta.ai_budget_period_heads SET period_id=$2,updated_at=clock_timestamp() WHERE tenant_id=$1 AND scope='inference'`, tenantID, periodID); err != nil {
@@ -192,7 +218,7 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 	if err = repo.RecordEstimate(ctx, tenant, in.InferenceID, 6, "provider-usage-estimate:opaque-1"); err != nil {
 		t.Fatalf("same estimate should be idempotent: %v", err)
 	}
-	if err = repo.SettleConfirmed(ctx, tenant, in.InferenceID, 5, "late-provider-reply:opaque-1"); err != ErrBudgetConflict {
+	if err = repo.SettleConfirmed(ctx, tenant, in.InferenceID, 5, "late-provider-reply:opaque-1"); !errors.Is(err, ErrBudgetConflict) {
 		t.Fatalf("unknown attempt bypassed authorized reconciliation: %v", err)
 	}
 	if err = tenancy.WithTenantTx(ctx, app, tenant, nil, func(tx *sql.Tx) error {
@@ -222,7 +248,7 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 	if committed != actual || reserved != 0 || !isBlocked {
 		t.Fatalf("overrun was clamped or failed to block admission: committed=%d reserved=%d blocked=%v", committed, reserved, isBlocked)
 	}
-	if _, err = repo.Admit(ctx, second); err != ErrBudgetDenied {
+	if _, err = repo.Admit(ctx, second); !errors.Is(err, ErrBudgetDenied) {
 		t.Fatalf("overrun did not block new admission: %v", err)
 	}
 	if err = tenancy.WithTenantTx(ctx, app, tenant, nil, func(tx *sql.Tx) error {
@@ -269,7 +295,7 @@ func TestPostgreSQLBudgetAdmissionUnknownAndReconciliation(t *testing.T) {
 	if committed != actual+2 {
 		t.Fatalf("append-only adjustment not reflected in committed total: got %d want %d", committed, actual+2)
 	}
-	if err = repo.AdjustSettled(ctx, tenant, in.InferenceID, "principal:integration-test", "invalid_refund", -100, "refund:underflow"); err != ErrBudgetConflict {
+	if err = repo.AdjustSettled(ctx, tenant, in.InferenceID, "principal:integration-test", "invalid_refund", -100, "refund:underflow"); !errors.Is(err, ErrBudgetConflict) {
 		t.Fatalf("negative adjustment below zero was accepted: %v", err)
 	}
 	if err = repo.AdjustSettled(ctx, tenant, in.InferenceID, "principal:integration-test", "provider_credit_confirmed", -2, "credit-note:opaque-2"); err != nil {
