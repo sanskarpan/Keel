@@ -1,0 +1,469 @@
+{
+  "schema_version": "keel.retrieval-eval.v1",
+  "dataset_id": "keel.synthetic-retrieval-seed.v1",
+  "license": "CC0-1.0",
+  "synthetic_only": true,
+  "documents": [
+    {
+      "id": "doc-invoice-approval",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "finance",
+      "published": true,
+      "text": "# Supplier invoice approval policy\n\nInvoices above 50000 require approval by a second finance approver before payment."
+    },
+    {
+      "id": "negative-invoice-approval",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "finance",
+      "published": true,
+      "text": "# Unrelated synthetic note\n\nWarehouse access badges expire after thirty days."
+    },
+    {
+      "id": "doc-runbook-retry",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "operations",
+      "published": true,
+      "text": "# Fulfillment retry runbook\n\nThe fulfillment retry worker makes at most five delivery attempts, then places the job in review."
+    },
+    {
+      "id": "negative-runbook-retry",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "operations",
+      "published": true,
+      "text": "# Unrelated synthetic note\n\nThe support team rotates API credentials every quarter."
+    },
+    {
+      "id": "doc-security-nfkc",
+      "version": "v1",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "published": true,
+      "text": "# Identity migration note\n\nKeep the Unicode account key ＡＣＭＥ-42 stable during identity migration."
+    },
+    {
+      "id": "negative-security-nfkc",
+      "version": "v1",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "published": true,
+      "text": "# Unrelated synthetic note\n\nThe service window begins at 09:00 UTC on Monday."
+    },
+    {
+      "id": "doc-deployment-window",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "operations",
+      "published": true,
+      "text": "# Ledger maintenance schedule\n\nLedger maintenance is approved for Sunday 02:00–03:00 UTC."
+    },
+    {
+      "id": "negative-deployment-window",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "operations",
+      "published": true,
+      "text": "# Unrelated synthetic note\n\nRefund requests are reviewed within two business days."
+    },
+    {
+      "id": "doc-unicode-normalization",
+      "version": "v1",
+      "tenant": "tenant-south",
+      "visibility": "finance",
+      "published": true,
+      "text": "# Supplier matching design\n\nSupplier name matching uses Unicode NFKC followed by full case folding."
+    },
+    {
+      "id": "negative-unicode-normalization",
+      "version": "v1",
+      "tenant": "tenant-south",
+      "visibility": "finance",
+      "published": true,
+      "text": "# Unrelated synthetic note\n\nThe archive format is newline-delimited JSON."
+    },
+    {
+      "id": "doc-retention-period",
+      "version": "v1",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "published": true,
+      "text": "# Synthetic audit retention policy\n\nSynthetic audit events are retained for 400 days, then removed from the active store."
+    },
+    {
+      "id": "negative-retention-period",
+      "version": "v1",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "published": true,
+      "text": "# Unrelated synthetic note\n\nThe report export is available in CSV and JSON."
+    },
+    {
+      "id": "doc-no-answer-rotation",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "security",
+      "published": true,
+      "text": "# Key management overview\n\nKey rotation is triggered by a verified compromise or the configured 90-day interval."
+    },
+    {
+      "id": "negative-no-answer-rotation",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "security",
+      "published": true,
+      "text": "# Unrelated synthetic note\n\nKeys are stored in the managed secrets service."
+    },
+    {
+      "id": "doc-no-answer-language",
+      "version": "v1",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "published": true,
+      "text": "# Language support decision\n\nProduction language support requires a reviewed tokenizer and an evaluated embedding model."
+    },
+    {
+      "id": "negative-no-answer-language",
+      "version": "v1",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "published": true,
+      "text": "# Unrelated synthetic note\n\nThe document ingestion job accepts plain text and PDF."
+    },
+    {
+      "id": "doc-tenant-scope-check",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "finance",
+      "published": true,
+      "text": "# North tenant purchasing guide\n\nThe north tenant requires second approval for invoices above 50000 credits."
+    },
+    {
+      "id": "negative-tenant-scope-check",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "finance",
+      "published": true,
+      "text": "# Unrelated synthetic note\n\nThe south tenant uses a 25000-credit threshold for its synthetic purchasing example."
+    },
+    {
+      "id": "access-sentinel-north",
+      "version": "v1",
+      "tenant": "tenant-north",
+      "visibility": "finance",
+      "published": true,
+      "text": "Synthetic access-control sentinel for north tenant."
+    },
+    {
+      "id": "access-sentinel-south",
+      "version": "v1",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "published": true,
+      "text": "Synthetic access-control sentinel for south tenant."
+    }
+  ],
+  "queries": [
+    {
+      "id": "invoice-approval",
+      "partition": "train",
+      "text": "When does a supplier invoice require a second approver?",
+      "tenant": "tenant-north",
+      "visibility": "finance",
+      "rationale": "Synthetic query written for the named information need; independently labeled against the cited versions.",
+      "judgments": [
+        {
+          "document_id": "doc-invoice-approval",
+          "document_version": "v1",
+          "grade": 3,
+          "start_byte": 36,
+          "end_byte": 118,
+          "rationale": "Synthetic adjudication: the quoted passage directly supports the answer"
+        },
+        {
+          "document_id": "negative-invoice-approval",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic hard negative: related operational text does not answer this question."
+        }
+      ],
+      "no_answer": false
+    },
+    {
+      "id": "runbook-retry",
+      "partition": "train",
+      "text": "How many attempts are allowed for the fulfillment retry worker?",
+      "tenant": "tenant-north",
+      "visibility": "operations",
+      "rationale": "Synthetic query written for the named information need; independently labeled against the cited versions.",
+      "judgments": [
+        {
+          "document_id": "doc-runbook-retry",
+          "document_version": "v1",
+          "grade": 3,
+          "start_byte": 29,
+          "end_byte": 126,
+          "rationale": "Synthetic adjudication: the quoted passage directly supports the answer"
+        },
+        {
+          "document_id": "negative-runbook-retry",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic hard negative: related operational text does not answer this question."
+        }
+      ],
+      "no_answer": false
+    },
+    {
+      "id": "security-nfkc",
+      "partition": "train",
+      "text": "Which identifier does the security review say must remain stable?",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "rationale": "Synthetic query written for the named information need; independently labeled against the cited versions.",
+      "judgments": [
+        {
+          "document_id": "doc-security-nfkc",
+          "document_version": "v1",
+          "grade": 3,
+          "start_byte": 27,
+          "end_byte": 97,
+          "rationale": "Synthetic adjudication: the quoted passage directly supports the answer"
+        },
+        {
+          "document_id": "negative-security-nfkc",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic hard negative: related operational text does not answer this question."
+        }
+      ],
+      "no_answer": false
+    },
+    {
+      "id": "deployment-window",
+      "partition": "dev",
+      "text": "What is the approved maintenance window for the ledger service?",
+      "tenant": "tenant-north",
+      "visibility": "operations",
+      "rationale": "Synthetic query written for the named information need; independently labeled against the cited versions.",
+      "judgments": [
+        {
+          "document_id": "doc-deployment-window",
+          "document_version": "v1",
+          "grade": 3,
+          "start_byte": 31,
+          "end_byte": 89,
+          "rationale": "Synthetic adjudication: the quoted passage directly supports the answer"
+        },
+        {
+          "document_id": "negative-deployment-window",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic hard negative: related operational text does not answer this question."
+        }
+      ],
+      "no_answer": false
+    },
+    {
+      "id": "unicode-normalization",
+      "partition": "dev",
+      "text": "What normalization form is used for matching supplier names?",
+      "tenant": "tenant-south",
+      "visibility": "finance",
+      "rationale": "Synthetic query written for the named information need; independently labeled against the cited versions.",
+      "judgments": [
+        {
+          "document_id": "doc-unicode-normalization",
+          "document_version": "v1",
+          "grade": 3,
+          "start_byte": 28,
+          "end_byte": 99,
+          "rationale": "Synthetic adjudication: the quoted passage directly supports the answer"
+        },
+        {
+          "document_id": "negative-unicode-normalization",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic hard negative: related operational text does not answer this question."
+        }
+      ],
+      "no_answer": false
+    },
+    {
+      "id": "retention-period",
+      "partition": "dev",
+      "text": "How long are audit events retained in the example policy?",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "rationale": "Synthetic query written for the named information need; independently labeled against the cited versions.",
+      "judgments": [
+        {
+          "document_id": "doc-retention-period",
+          "document_version": "v1",
+          "grade": 3,
+          "start_byte": 36,
+          "end_byte": 121,
+          "rationale": "Synthetic adjudication: the quoted passage directly supports the answer"
+        },
+        {
+          "document_id": "negative-retention-period",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic hard negative: related operational text does not answer this question."
+        }
+      ],
+      "no_answer": false
+    },
+    {
+      "id": "no-answer-rotation",
+      "partition": "holdout",
+      "text": "What calendar date does the policy assign to the next key rotation?",
+      "tenant": "tenant-north",
+      "visibility": "security",
+      "rationale": "Synthetic query written for the named information need; independently labeled against the cited versions.",
+      "judgments": [
+        {
+          "document_id": "doc-no-answer-rotation",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic adjudication: the source does not state the requested fact"
+        },
+        {
+          "document_id": "negative-no-answer-rotation",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic hard negative: related operational text does not answer this question."
+        }
+      ],
+      "no_answer": true
+    },
+    {
+      "id": "no-answer-language",
+      "partition": "holdout",
+      "text": "Which embedding provider is approved for Japanese-language production queries?",
+      "tenant": "tenant-south",
+      "visibility": "restricted",
+      "rationale": "Synthetic query written for the named information need; independently labeled against the cited versions.",
+      "judgments": [
+        {
+          "document_id": "doc-no-answer-language",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic adjudication: the source does not state the requested fact"
+        },
+        {
+          "document_id": "negative-no-answer-language",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic hard negative: related operational text does not answer this question."
+        }
+      ],
+      "no_answer": true
+    },
+    {
+      "id": "tenant-scope-check",
+      "partition": "holdout",
+      "text": "Where is the north tenant’s invoice threshold recorded?",
+      "tenant": "tenant-north",
+      "visibility": "finance",
+      "rationale": "Synthetic query written for the named information need; independently labeled against the cited versions.",
+      "judgments": [
+        {
+          "document_id": "doc-tenant-scope-check",
+          "document_version": "v1",
+          "grade": 3,
+          "start_byte": 33,
+          "end_byte": 108,
+          "rationale": "Synthetic adjudication: the quoted passage directly supports the answer"
+        },
+        {
+          "document_id": "negative-tenant-scope-check",
+          "document_version": "v1",
+          "grade": 0,
+          "start_byte": 0,
+          "end_byte": 0,
+          "rationale": "Synthetic hard negative: related operational text does not answer this question."
+        }
+      ],
+      "no_answer": false
+    }
+  ],
+  "access_denials": [
+    {
+      "query_id": "invoice-approval",
+      "document_id": "access-sentinel-south",
+      "document_version": "v1",
+      "rationale": "Synthetic tenant-isolation negative: this independent sentinel belongs to a different tenant and must be removed before ranking."
+    },
+    {
+      "query_id": "runbook-retry",
+      "document_id": "access-sentinel-south",
+      "document_version": "v1",
+      "rationale": "Synthetic tenant-isolation negative: this independent sentinel belongs to a different tenant and must be removed before ranking."
+    },
+    {
+      "query_id": "security-nfkc",
+      "document_id": "access-sentinel-north",
+      "document_version": "v1",
+      "rationale": "Synthetic tenant-isolation negative: this independent sentinel belongs to a different tenant and must be removed before ranking."
+    },
+    {
+      "query_id": "deployment-window",
+      "document_id": "access-sentinel-south",
+      "document_version": "v1",
+      "rationale": "Synthetic tenant-isolation negative: this independent sentinel belongs to a different tenant and must be removed before ranking."
+    },
+    {
+      "query_id": "unicode-normalization",
+      "document_id": "access-sentinel-north",
+      "document_version": "v1",
+      "rationale": "Synthetic tenant-isolation negative: this independent sentinel belongs to a different tenant and must be removed before ranking."
+    },
+    {
+      "query_id": "retention-period",
+      "document_id": "access-sentinel-north",
+      "document_version": "v1",
+      "rationale": "Synthetic tenant-isolation negative: this independent sentinel belongs to a different tenant and must be removed before ranking."
+    },
+    {
+      "query_id": "no-answer-rotation",
+      "document_id": "access-sentinel-south",
+      "document_version": "v1",
+      "rationale": "Synthetic tenant-isolation negative: this independent sentinel belongs to a different tenant and must be removed before ranking."
+    },
+    {
+      "query_id": "no-answer-language",
+      "document_id": "access-sentinel-north",
+      "document_version": "v1",
+      "rationale": "Synthetic tenant-isolation negative: this independent sentinel belongs to a different tenant and must be removed before ranking."
+    },
+    {
+      "query_id": "tenant-scope-check",
+      "document_id": "access-sentinel-south",
+      "document_version": "v1",
+      "rationale": "Synthetic tenant-isolation negative: this independent sentinel belongs to a different tenant and must be removed before ranking."
+    }
+  ]
+}

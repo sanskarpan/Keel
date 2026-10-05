@@ -1,0 +1,26 @@
+{
+  "manifest_version": "keel.retrieval-build.v1",
+  "analyzer_id": "keel.unicode-words.v1",
+  "chunker": {
+    "id": "keel.paragraph-window.v1",
+    "max_tokens": 200,
+    "overlap_tokens": 30,
+    "max_source_bytes": 1048576,
+    "heading_context": true
+  },
+  "embedding_model": {
+    "id": "keel.hash-vectorizer.v1",
+    "provider": "local-keel-fixture",
+    "revision": "keel.hash-vectorizer.v1",
+    "artifact_sha256": "e20cd2551b7da6bf3f75dc1f773ce0e49d24899d8963a83aa069e86c1526c104",
+    "tokenizer_id": "keel.unicode-words.v1",
+    "dimensions": 16,
+    "max_input_tokens": 512,
+    "normalize": true
+  },
+  "corpus_build_id": "keel.synthetic-retrieval-seed.build-001",
+  "distance": "cosine",
+  "evaluation_dataset_id": "keel.synthetic-retrieval-seed.v1",
+  "evaluation_only": true,
+  "evaluation_corpus_sha256": "40fb4e77be8e6cc4b6173f2e65723ab62b88957e836899b7022652c4bb93fcd0"
+}

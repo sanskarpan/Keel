@@ -37,7 +37,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 
 ## K3 — Tenant-safe hybrid retrieval
 
-- [ ] K3.1 Define tokenization/chunk/model/corpus versioning and labeled evaluation corpus.
+- [x] K3.1 Define tokenization/chunk/model/corpus versioning and labeled evaluation corpus. Owner: Keel platform (named person unassigned); PR #124 (closes #24); evidence: `internal/retrieval/contracts`, `internal/retrieval/eval`, `research/retrieval/v1`, `docs/K3.1-EVIDENCE.md`; final implementation-head contract CI run #105 passed. Decision: synthetic CC0 seed/reference only; the positive source ranks first on all seven authored answerable queries, while both no-answer queries trigger a false positive; no relevance or serving qualification.
 - [ ] K3.2 Implement tenant/visibility-local BM25 postings/statistics and atomic publication.
 - [ ] K3.3 Implement embeddings/model identity, exact search and bounded filtered HNSW.
 - [ ] K3.4 Add rank fusion, optional capped reranker, immutable citations and degraded-results flags.

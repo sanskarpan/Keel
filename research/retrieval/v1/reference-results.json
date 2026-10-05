@@ -1,0 +1,340 @@
+{
+  "dataset_id": "keel.synthetic-retrieval-seed.v1",
+  "corpus_sha256": "40fb4e77be8e6cc4b6173f2e65723ab62b88957e836899b7022652c4bb93fcd0",
+  "build_manifest_sha256": "4eb15bc9e2362ea99f977fef7eedf5aaaaeac52e28bb33e096f41d6eba13d235",
+  "report": {
+    "evaluator_id": "keel.reference-bm25.v1",
+    "k": 5,
+    "results": [
+      {
+        "query_id": "invoice-approval",
+        "partition": "train",
+        "no_answer": false,
+        "top": [
+          {
+            "document_id": "doc-invoice-approval",
+            "document_version": "v1",
+            "score": 7.413395482223002,
+            "grade": 3
+          },
+          {
+            "document_id": "negative-tenant-scope-check",
+            "document_version": "v1",
+            "score": 1.5884793584977979,
+            "grade": 0
+          },
+          {
+            "document_id": "doc-tenant-scope-check",
+            "document_version": "v1",
+            "score": 0.8179561925642277,
+            "grade": 0
+          },
+          {
+            "document_id": "access-sentinel-north",
+            "document_version": "v1",
+            "score": 0,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-invoice-approval",
+            "document_version": "v1",
+            "score": 0,
+            "grade": 0
+          }
+        ],
+        "reciprocal_rank_at_5": 1,
+        "ndcg_at_5": 1,
+        "recall_at_5": 1,
+        "no_answer_correct": false
+      },
+      {
+        "query_id": "runbook-retry",
+        "partition": "train",
+        "no_answer": false,
+        "top": [
+          {
+            "document_id": "doc-runbook-retry",
+            "document_version": "v1",
+            "score": 5.933150878028529,
+            "grade": 3
+          },
+          {
+            "document_id": "negative-deployment-window",
+            "document_version": "v1",
+            "score": 1.3112575096619106,
+            "grade": 0
+          },
+          {
+            "document_id": "doc-deployment-window",
+            "document_version": "v1",
+            "score": 1.1950837516278776,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-runbook-retry",
+            "document_version": "v1",
+            "score": 0.7549127709068711,
+            "grade": 0
+          }
+        ],
+        "reciprocal_rank_at_5": 1,
+        "ndcg_at_5": 1,
+        "recall_at_5": 1,
+        "no_answer_correct": false
+      },
+      {
+        "query_id": "security-nfkc",
+        "partition": "train",
+        "no_answer": false,
+        "top": [
+          {
+            "document_id": "doc-security-nfkc",
+            "document_version": "v1",
+            "score": 1.9861680899720053,
+            "grade": 3
+          },
+          {
+            "document_id": "negative-no-answer-language",
+            "document_version": "v1",
+            "score": 0.3868676048384241,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-retention-period",
+            "document_version": "v1",
+            "score": 0.3868676048384241,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-security-nfkc",
+            "document_version": "v1",
+            "score": 0.3746934494414107,
+            "grade": 0
+          },
+          {
+            "document_id": "doc-retention-period",
+            "document_version": "v1",
+            "score": 0.3237532523874425,
+            "grade": 0
+          }
+        ],
+        "reciprocal_rank_at_5": 1,
+        "ndcg_at_5": 1,
+        "recall_at_5": 1,
+        "no_answer_correct": false
+      },
+      {
+        "query_id": "deployment-window",
+        "partition": "dev",
+        "no_answer": false,
+        "top": [
+          {
+            "document_id": "doc-deployment-window",
+            "document_version": "v1",
+            "score": 6.879331737041649,
+            "grade": 3
+          },
+          {
+            "document_id": "doc-runbook-retry",
+            "document_version": "v1",
+            "score": 1.721309571015975,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-runbook-retry",
+            "document_version": "v1",
+            "score": 1.5098255418137423,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-deployment-window",
+            "document_version": "v1",
+            "score": 0,
+            "grade": 0
+          }
+        ],
+        "reciprocal_rank_at_5": 1,
+        "ndcg_at_5": 1,
+        "recall_at_5": 1,
+        "no_answer_correct": false
+      },
+      {
+        "query_id": "unicode-normalization",
+        "partition": "dev",
+        "no_answer": false,
+        "top": [
+          {
+            "document_id": "doc-unicode-normalization",
+            "document_version": "v1",
+            "score": 1.8208045340082146,
+            "grade": 3
+          },
+          {
+            "document_id": "negative-unicode-normalization",
+            "document_version": "v1",
+            "score": 0.7438652669423804,
+            "grade": 0
+          }
+        ],
+        "reciprocal_rank_at_5": 1,
+        "ndcg_at_5": 1,
+        "recall_at_5": 1,
+        "no_answer_correct": false
+      },
+      {
+        "query_id": "retention-period",
+        "partition": "dev",
+        "no_answer": false,
+        "top": [
+          {
+            "document_id": "doc-retention-period",
+            "document_version": "v1",
+            "score": 8.186377480315397,
+            "grade": 3
+          },
+          {
+            "document_id": "negative-retention-period",
+            "document_version": "v1",
+            "score": 2.1152331644106193,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-no-answer-language",
+            "document_version": "v1",
+            "score": 0.3868676048384241,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-security-nfkc",
+            "document_version": "v1",
+            "score": 0.3746934494414107,
+            "grade": 0
+          },
+          {
+            "document_id": "doc-security-nfkc",
+            "document_version": "v1",
+            "score": 0.3632621238652321,
+            "grade": 0
+          }
+        ],
+        "reciprocal_rank_at_5": 1,
+        "ndcg_at_5": 1,
+        "recall_at_5": 1,
+        "no_answer_correct": false
+      },
+      {
+        "query_id": "no-answer-rotation",
+        "partition": "holdout",
+        "no_answer": true,
+        "top": [
+          {
+            "document_id": "doc-no-answer-rotation",
+            "document_version": "v1",
+            "score": 1.8714380029170872,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-no-answer-rotation",
+            "document_version": "v1",
+            "score": 0.399679996388171,
+            "grade": 0
+          }
+        ],
+        "reciprocal_rank_at_5": 0,
+        "ndcg_at_5": 0,
+        "recall_at_5": 0,
+        "no_answer_correct": false
+      },
+      {
+        "query_id": "no-answer-language",
+        "partition": "holdout",
+        "no_answer": true,
+        "top": [
+          {
+            "document_id": "doc-no-answer-language",
+            "document_version": "v1",
+            "score": 5.355973470184114,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-retention-period",
+            "document_version": "v1",
+            "score": 1.7283655595721954,
+            "grade": 0
+          },
+          {
+            "document_id": "access-sentinel-south",
+            "document_version": "v1",
+            "score": 1.4338841879501067,
+            "grade": 0
+          },
+          {
+            "document_id": "doc-retention-period",
+            "document_version": "v1",
+            "score": 1.005018524484667,
+            "grade": 0
+          },
+          {
+            "document_id": "doc-security-nfkc",
+            "document_version": "v1",
+            "score": 0,
+            "grade": 0
+          }
+        ],
+        "reciprocal_rank_at_5": 0,
+        "ndcg_at_5": 0,
+        "recall_at_5": 0,
+        "no_answer_correct": false
+      },
+      {
+        "query_id": "tenant-scope-check",
+        "partition": "holdout",
+        "no_answer": false,
+        "top": [
+          {
+            "document_id": "doc-tenant-scope-check",
+            "document_version": "v1",
+            "score": 2.6731653730261886,
+            "grade": 3
+          },
+          {
+            "document_id": "negative-tenant-scope-check",
+            "document_version": "v1",
+            "score": 2.5408953064965987,
+            "grade": 0
+          },
+          {
+            "document_id": "access-sentinel-north",
+            "document_version": "v1",
+            "score": 1.7363269879912075,
+            "grade": 0
+          },
+          {
+            "document_id": "doc-invoice-approval",
+            "document_version": "v1",
+            "score": 1.257669111119076,
+            "grade": 0
+          },
+          {
+            "document_id": "negative-invoice-approval",
+            "document_version": "v1",
+            "score": 0,
+            "grade": 0
+          }
+        ],
+        "reciprocal_rank_at_5": 1,
+        "ndcg_at_5": 1,
+        "recall_at_5": 1,
+        "no_answer_correct": false
+      }
+    ],
+    "query_count": 9,
+    "answerable_query_count": 7,
+    "mrr_at_5": 1,
+    "mean_ndcg_at_5": 1,
+    "mean_recall_at_5": 1,
+    "no_answer_count": 2,
+    "no_answer_true_negative_count": 0,
+    "no_answer_false_positive_count": 2
+  }
+}

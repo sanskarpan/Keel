@@ -29,7 +29,7 @@ PostgreSQL events, inbox deduplication keys and ledgers are initially unpartitio
 | `documents` | `(tenant,id)`, owner/classification/current_version/withdrawn_at | API/doc worker |
 | `document_versions` | `(tenant,doc,version)`, immutable object/version ID/hash, scan/publication state | Immutable after publish |
 | `document_chunks` | `(tenant,chunk)`, document_version FK, text reference/hash, tokenizer/corpus version, length | Retrieval; sensitive content encrypted where required |
-| `chunk_embeddings` | `(tenant,chunk,model_id)`, `vector(384)` for initial qualified embedding model family, checksum | Model identity/dimension checked |
+| `chunk_embeddings` | `(tenant,chunk,model_id)`, vector payload/dimension and checksum bound to immutable model manifest | Dimension, tokenizer, normalization and distance are checked against the immutable model/index identity; no fixed production dimension is assumed |
 | `document_terms` | `(tenant,visibility_class,corpus_version,term_id,chunk_id)`, term_frequency | Inverted lexical postings; RLS |
 | `corpus_statistics` | `(tenant,visibility_class,corpus_version)`, N, total_length, publication pointer | Atomic corpus switch |
 | `term_statistics` | `(tenant,visibility_class,corpus_version,term_id)`, document_frequency | Hidden corpus stats never public |
