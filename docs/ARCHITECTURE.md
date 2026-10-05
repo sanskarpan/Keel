@@ -86,6 +86,8 @@ The K4.5.1 cache core (issue #192 under #35) derives exact lookup keys from an H
 
 The K4.6.1 attempt policy (issue #194 under #36) pins each provider/model capability and attempt liability, derives distinct idempotency keys when supported, and permits one fallback only after a definite pre-acceptance, no-charge, pre-output failure with remaining reserved allowance and deadline. Unknown outcomes and any output/token stop retries. This is a deterministic policy library without a durable attempt ledger, provider adapter, streaming path or budget settlement; see `docs/K4.6-ATTEMPT-EVIDENCE.md`.
 
+The K4.7.1 limiter (issue #196 under #37) uses one atomic Redis-time token bucket in the tenant home region. HMAC-obscured bucket keys are shared across API instances; stable logical request IDs make decisions replay-safe after a lost response. Model, budgeted and sensitive routes fail closed when Redis is unavailable. There is no process-local quota expansion; a restart-safe safe-read degraded allowance and managed Redis deployment/failover qualification remain open. See `docs/K4.7-RATE-LIMIT-EVIDENCE.md`.
+
 Sensitive prompts are not blindly sent to the trace backend. A protected context vault can retain encrypted prompt/input/context versions under tenant policy. OTel/Langfuse observations reference that record and store safe metadata. Authorized replay uses a sandbox and suppresses business writes/webhooks.
 
 ## 6. Durable approvals
