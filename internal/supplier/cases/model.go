@@ -31,6 +31,7 @@ const (
 	MaxEvidence      = 100
 	MaxEvidenceBytes = 100 << 20
 	MaxPolicySteps   = 32
+	MaxCaseEvents    = 135 // create + 100 evidence revisions + submit + 32 decisions + expiry
 )
 
 type Status string
@@ -247,6 +248,29 @@ type CaseSubmittedData struct {
 	EvidenceDigest string `json:"evidence_digest"`
 }
 
+type StepDecision struct {
+	DecisionID string    `json:"decision_id"`
+	StepKey    string    `json:"step_key"`
+	Actor      string    `json:"actor"`
+	Outcome    string    `json:"outcome"`
+	Role       string    `json:"role"`
+	Reason     string    `json:"reason,omitempty"`
+	DecidedAt  time.Time `json:"decided_at"`
+}
+
+type CaseDecisionData struct {
+	DecisionID     string `json:"decision_id"`
+	StepKey        string `json:"step_key"`
+	Outcome        string `json:"outcome"`
+	ResultingState Status `json:"resulting_state"`
+	PolicyDigest   string `json:"policy_digest"`
+	EvidenceDigest string `json:"evidence_digest"`
+}
+
+type CaseExpiredData struct {
+	DeadlineAt string `json:"deadline_at"`
+}
+
 func NewCase(tenantID, caseID, supplierID, actor string, policy Policy, now time.Time) (Case, Event, error) {
 	tenantID = strings.ToLower(tenantID)
 	caseID = strings.ToLower(caseID)
@@ -357,6 +381,123 @@ func Submit(current Case, evidence []Evidence, policy Policy, actor string, now 
 	updated.UpdatedAt = now.UTC().Truncate(time.Microsecond)
 	data, _ := json.Marshal(CaseSubmittedData{PolicyVersion: current.PolicyVersion, PolicyDigest: current.PolicyDigest, EvidenceEpoch: current.EvidenceEpoch, EvidenceDigest: current.EvidenceDigest})
 	event, err := (Event{CaseID: current.CaseID, Version: updated.Version, Type: "supplier.case.submitted", Actor: actor, OccurredAt: updated.UpdatedAt, Data: data, PrevHash: previousHash}).Seal()
+	if err == nil {
+		updated.LastEventHash = event.Hash
+	}
+	return updated, event, err
+}
+
+// EligibleSteps returns the frozen policy steps whose dependencies have all been
+// approved. A rejection is terminal and therefore unlocks no dependent step.
+func EligibleSteps(policy Policy, decisions []StepDecision) []ReviewStep {
+	approved := make(map[string]bool, len(decisions))
+	decided := make(map[string]bool, len(decisions))
+	for _, decision := range decisions {
+		decided[decision.StepKey] = true
+		approved[decision.StepKey] = decision.Outcome == "approve"
+	}
+	steps := make([]ReviewStep, 0, len(policy.Steps))
+	for _, step := range policy.Steps {
+		if decided[step.Key] {
+			continue
+		}
+		ready := true
+		for _, dependency := range step.DependsOn {
+			if !approved[dependency] {
+				ready = false
+				break
+			}
+		}
+		if ready {
+			steps = append(steps, step)
+		}
+	}
+	return steps
+}
+
+// Decide records one authorized human step decision. Authorization is checked by
+// the persistence boundary in the same locked transaction; this pure transition
+// rechecks separation of duties, plan eligibility and the database timestamp.
+func Decide(current Case, policy Policy, decisions []StepDecision, decision StepDecision, submitter, creator string, now time.Time, previousHash string) (Case, Event, error) {
+	if current.Status != Submitted || now.IsZero() || !current.DeadlineAt.After(now) ||
+		!validPreviousHash(current, previousHash) || !uuidPattern.MatchString(strings.ToLower(decision.DecisionID)) ||
+		!validActor(decision.Actor) || !strings.HasPrefix(decision.Actor, "principal:") ||
+		decision.Actor == submitter || decision.Actor == creator ||
+		(decision.Outcome != "approve" && decision.Outcome != "reject") {
+		return Case{}, Event{}, ErrConflict
+	}
+	canonical, _, err := policy.Canonical()
+	if err != nil || canonical.Digest != current.PolicyDigest || canonical.Version != current.PolicyVersion || canonical.PolicyID != current.PolicyID {
+		return Case{}, Event{}, ErrInvalidPolicy
+	}
+	decision.DecisionID = strings.ToLower(decision.DecisionID)
+	decision.StepKey = strings.ToLower(strings.TrimSpace(decision.StepKey))
+	decision.DecidedAt = now.UTC().Truncate(time.Microsecond)
+	var step *ReviewStep
+	for i := range canonical.Steps {
+		if canonical.Steps[i].Key == decision.StepKey {
+			step = &canonical.Steps[i]
+			break
+		}
+	}
+	if step == nil || decision.Role != step.Role || len(decision.Reason) > 500 || !utf8.ValidString(decision.Reason) {
+		return Case{}, Event{}, ErrConflict
+	}
+	eligible := false
+	for _, ready := range EligibleSteps(canonical, decisions) {
+		if ready.Key == step.Key {
+			eligible = true
+			break
+		}
+	}
+	if !eligible || len(decisions) >= len(canonical.Steps) || current.Version >= MaxCaseEvents {
+		return Case{}, Event{}, ErrConflict
+	}
+	for _, previous := range decisions {
+		if previous.StepKey == decision.StepKey || previous.DecisionID == decision.DecisionID {
+			return Case{}, Event{}, ErrConflict
+		}
+	}
+	allApproved := decision.Outcome == "approve" && len(decisions)+1 == len(canonical.Steps)
+	if allApproved {
+		for _, old := range decisions {
+			if old.Outcome != "approve" {
+				allApproved = false
+				break
+			}
+		}
+	}
+	updated := current
+	if decision.Outcome == "reject" {
+		updated.Status = Rejected
+	} else if allApproved {
+		updated.Status = Approved
+	}
+	updated.Version++
+	updated.UpdatedAt = decision.DecidedAt
+	data, _ := json.Marshal(CaseDecisionData{DecisionID: decision.DecisionID, StepKey: decision.StepKey,
+		Outcome: decision.Outcome, ResultingState: updated.Status, PolicyDigest: current.PolicyDigest, EvidenceDigest: current.EvidenceDigest})
+	event, err := (Event{CaseID: current.CaseID, Version: updated.Version, Type: "supplier.case.approval-decided", Actor: decision.Actor,
+		OccurredAt: updated.UpdatedAt, Data: data, PrevHash: previousHash}).Seal()
+	if err == nil {
+		updated.LastEventHash = event.Hash
+	}
+	return updated, event, err
+}
+
+// Expire is the deterministic state transition for a deadline operation. The
+// repository supplies PostgreSQL time while holding the authoritative case lock.
+func Expire(current Case, now time.Time, previousHash string) (Case, Event, error) {
+	if (current.Status != Submitted && current.Status != Collecting) || now.IsZero() || current.DeadlineAt.After(now) || !validPreviousHash(current, previousHash) || current.Version >= MaxCaseEvents {
+		return Case{}, Event{}, ErrConflict
+	}
+	updated := current
+	updated.Status = Expired
+	updated.Version++
+	updated.UpdatedAt = now.UTC().Truncate(time.Microsecond)
+	data, _ := json.Marshal(CaseExpiredData{DeadlineAt: current.DeadlineAt.UTC().Format(time.RFC3339Nano)})
+	event, err := (Event{CaseID: current.CaseID, Version: updated.Version, Type: "supplier.case.expired", Actor: "service-principal:keel-supplier-case-expirer",
+		OccurredAt: updated.UpdatedAt, Data: data, PrevHash: previousHash}).Seal()
 	if err == nil {
 		updated.LastEventHash = event.Hash
 	}
