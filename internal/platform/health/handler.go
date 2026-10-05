@@ -20,6 +20,13 @@ import (
 
 type Probe func(context.Context) error
 
+// MetricsExtension provides additional low-cardinality Prometheus metrics for
+// a process role. Implementations must not include tenant, user, resource, or
+// request identifiers in labels.
+type MetricsExtension interface {
+	PrometheusMetrics() string
+}
+
 type requestKey struct {
 	route  string
 	method string
@@ -43,6 +50,12 @@ type Handler struct {
 // NewHandler creates the management HTTP surface. Liveness is intentionally independent of
 // dependencies; readiness runs bounded dependency checks and returns no failure details.
 func NewHandler(info buildinfo.Info, probes ...Probe) *Handler {
+	return NewHandlerWithMetrics(info, nil, probes...)
+}
+
+// NewHandlerWithMetrics creates the management HTTP surface and appends
+// role-specific metrics to the process metrics endpoint.
+func NewHandlerWithMetrics(info buildinfo.Info, extension MetricsExtension, probes ...Probe) *Handler {
 	probes = append([]Probe(nil), probes...)
 	m := &metrics{started: time.Now(), counts: make(map[requestKey]uint64), duration: make(map[requestKey]uint64)}
 	h := &Handler{}
@@ -88,6 +101,14 @@ func NewHandler(info buildinfo.Info, probes ...Probe) *Handler {
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		m.write(w, info)
+		if extension != nil {
+			if content := extension.PrometheusMetrics(); content != "" {
+				if !strings.HasSuffix(content, "\n") {
+					content += "\n"
+				}
+				_, _ = w.Write([]byte(content))
+			}
+		}
 	})
 	h.Handler = instrument(mux, m)
 	return h
@@ -105,6 +126,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Run serves the management endpoints with bounded HTTP timeouts and graceful shutdown.
 func Run(ctx context.Context, address string, info buildinfo.Info, probes ...Probe) error {
+	return RunWithMetrics(ctx, address, info, nil, probes...)
+}
+
+// RunWithMetrics serves the management HTTP surface with role-specific metrics
+// on the existing Prometheus endpoint.
+func RunWithMetrics(ctx context.Context, address string, info buildinfo.Info, extension MetricsExtension, probes ...Probe) error {
 	if ctx == nil {
 		return fmt.Errorf("health server context is required")
 	}
@@ -115,7 +142,7 @@ func Run(ctx context.Context, address string, info buildinfo.Info, probes ...Pro
 	if err != nil {
 		return fmt.Errorf("listen for health endpoints: %w", err)
 	}
-	handler := NewHandler(info, probes...)
+	handler := NewHandlerWithMetrics(info, extension, probes...)
 	handler.MarkStartupComplete()
 	server := &http.Server{
 		Handler:           handler,

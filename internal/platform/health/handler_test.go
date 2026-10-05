@@ -11,6 +11,10 @@ import (
 	"github.com/sanskarpan/keel/internal/platform/buildinfo"
 )
 
+type staticMetrics string
+
+func (m staticMetrics) PrometheusMetrics() string { return string(m) }
+
 func TestHealthVersionAndMetrics(t *testing.T) {
 	ready := false
 	handler := NewHandler(buildinfo.Info{Version: "1.2.3", Revision: "abc123", BuildDate: "2026-10-04T00:00:00Z"}, func(context.Context) error {
@@ -82,6 +86,15 @@ func TestReadinessFailsClosedWithoutProbes(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readiness without dependency probes returned %d, want 503", response.Code)
+	}
+}
+
+func TestHandlerAppendsRoleMetrics(t *testing.T) {
+	handler := NewHandlerWithMetrics(buildinfo.Info{}, staticMetrics("keel_erasure_worker_polls_total 7"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "keel_erasure_worker_polls_total 7\n") {
+		t.Fatalf("role metric not appended: status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 
