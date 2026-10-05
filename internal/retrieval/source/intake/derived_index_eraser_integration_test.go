@@ -84,7 +84,7 @@ func TestPostgreSQLDerivedIndexEraserRecordsReceiptUnderClearance(t *testing.T) 
 			}
 			disposition := retrievalpostgres.ErasureReceiptComplete
 			reason := ""
-			if action == retrievalpostgres.ErasureActionCacheRevocation || action == retrievalpostgres.ErasureActionQueuedWorkRevocation || action == retrievalpostgres.ErasureActionBackupExpiry {
+			if action == retrievalpostgres.ErasureActionCacheRevocation || action == retrievalpostgres.ErasureActionQueuedWorkRevocation {
 				disposition = retrievalpostgres.ErasureReceiptNotApplicable
 				reason = "integration fixture has no mounted provider"
 			}
