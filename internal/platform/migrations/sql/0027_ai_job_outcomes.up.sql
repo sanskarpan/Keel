@@ -374,9 +374,6 @@ REVOKE ALL ON FUNCTION keel_meta.record_ai_job_outcome(uuid,uuid,text,bigint,tex
 REVOKE ALL ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) FROM keel_app,keel_ai_worker,keel_budget_control;
 REVOKE ALL ON FUNCTION keel_meta.apply_ai_job_outcome(uuid,uuid,text,bigint,text,bigint,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION keel_meta.reconcile_ai_job_outcome(uuid,uuid,text,bigint,text,text,text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION keel_meta.guard_ai_job_transition() FROM PUBLIC;
-REVOKE ALL ON FUNCTION keel_meta.guard_queued_ai_budget_mutation() FROM PUBLIC;
-REVOKE ALL ON FUNCTION keel_meta.check_ai_budget_account_totals() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION keel_meta.apply_ai_job_outcome(uuid,uuid,text,bigint,text,bigint,text) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.expire_ai_job(uuid,uuid,text,bigint,text) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.list_expired_ai_jobs(uuid,integer) TO keel_ai_worker;
@@ -525,6 +522,9 @@ REVOKE UPDATE (liability_state) ON keel_meta.ai_budget_reservations FROM keel_ai
 REVOKE INSERT ON keel_meta.ai_usage_ledger FROM keel_ai_worker;
 REVOKE ALL ON FUNCTION keel_meta.record_ai_job_outcome(uuid,uuid,text,bigint,text,text) FROM keel_app,keel_ai_worker,keel_budget_control;
 REVOKE ALL ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) FROM keel_app,keel_ai_worker,keel_budget_control;
+REVOKE ALL ON FUNCTION keel_meta.guard_ai_job_transition() FROM PUBLIC;
+REVOKE ALL ON FUNCTION keel_meta.guard_queued_ai_budget_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION keel_meta.check_ai_budget_account_totals() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION keel_meta.apply_ai_job_outcome(uuid,uuid,text,bigint,text,bigint,text) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.expire_ai_job(uuid,uuid,text,bigint,text) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.list_expired_ai_jobs(uuid,integer) TO keel_ai_worker;
