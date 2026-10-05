@@ -183,7 +183,10 @@ func (p *ErasureActionProcessor) executeUnderLease(ctx context.Context, tenant t
 				done <- nil
 				return
 			case <-ticker.C:
-				if _, err := p.repository.RenewErasureJobLease(actionCtx, tenant, visibility, p.workerID, job.ID, job.LeaseEpoch, p.lease); err != nil {
+				renewCtx, renewCancel := context.WithTimeout(actionCtx, erasureLeaseRenewalTimeout(p.lease))
+				_, err := p.repository.RenewErasureJobLease(renewCtx, tenant, visibility, p.workerID, job.ID, job.LeaseEpoch, p.lease)
+				renewCancel()
+				if err != nil {
 					if actionCtx.Err() != nil {
 						done <- nil
 					} else {
@@ -202,6 +205,14 @@ func (p *ErasureActionProcessor) executeUnderLease(ctx context.Context, tenant t
 		return ErasureActionExecution{}, leaseErr
 	}
 	return result, actionErr
+}
+
+func erasureLeaseRenewalTimeout(lease time.Duration) time.Duration {
+	timeout := lease / 4
+	if timeout < 100*time.Millisecond {
+		return 100 * time.Millisecond
+	}
+	return timeout
 }
 
 func validateErasureExecution(action string, result ErasureActionExecution) error {
