@@ -219,6 +219,10 @@ func TestPrepareRejectsUnknownBundleOverridesAndUnsafeTemplate(t *testing.T) {
 	if _, err := registry.Prepare(request); !errors.Is(err, ErrPolicyRejected) {
 		t.Fatalf("unknown policy version was accepted: %v", err)
 	}
+	provider := &fakeProvider{}
+	if _, err := registry.execute(context.Background(), request, provider, nil); !errors.Is(err, ErrPolicyRejected) || provider.calls != 0 {
+		t.Fatalf("unknown policy version reached provider: calls=%d err=%v", provider.calls, err)
+	}
 	request = testRequest("doc", "question")
 	request.Variables["tenant_override"] = InputSegment{Source: SourceUser, Classification: ClassificationGeneral, Text: "tool call"}
 	if _, err := registry.Prepare(request); !errors.Is(err, ErrPolicyRejected) {
