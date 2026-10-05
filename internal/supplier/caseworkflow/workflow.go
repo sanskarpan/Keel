@@ -19,7 +19,7 @@ const (
 	TaskQueue    = "keel-supplier-case-v1"
 	SignalName   = "supplier-case-event-v1"
 	StateQuery   = "supplier-case-state-v1"
-	MaxEvents    = 102 // create + at most 100 evidence revisions + submit
+	MaxEvents    = 135 // bounded K2.4 envelope: create + 100 evidence + submit + 32 decisions + expiry
 )
 
 var (
@@ -76,7 +76,7 @@ func (s EventSignal) Validate() error {
 
 func allowedType(value string) bool {
 	switch value {
-	case "supplier.case.created", "supplier.case.evidence-added", "supplier.case.submitted":
+	case "supplier.case.created", "supplier.case.evidence-added", "supplier.case.submitted", "supplier.case.approval-decided", "supplier.case.expired":
 		return true
 	default:
 		return false
