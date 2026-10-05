@@ -190,6 +190,97 @@ func TestPostgreSQLErasureActionProcessorRenewsLeaseDuringProviderAction(t *test
 	}
 }
 
+func TestPostgreSQLErasureActionProcessorCancelsWhenLeaseRenewalStalls(t *testing.T) {
+	appDB, indexerDB := retrievalTestDBs(t)
+	app, err := New(appDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(indexerDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tenant := tenancy.TenantID(uuid.NewString())
+	visibility := "erasure-renew-stall:" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	hasher, err := index.NewHMACTermHasher(string(tenant), "erasure-renew-stall-v1", []byte(strings.Repeat("s", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := preparedChunk(t, hasher, uuid.New(), "source must stop processing when renewal cannot be confirmed")
+	createReadyBuild(t, worker, tenant, visibility, buildSpec(uuid.New(), hasher.KeyID(), 1), chunk)
+	request, err := app.WithdrawSource(ctx, tenant, visibility, uuid.New(), chunk.DocumentVersionID, uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entered, actionCanceled, finished := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	var order []string
+	executors := testErasureExecutors(&order)
+	executors[ErasureActionLegalHoldCheck] = testErasureExecutor(func(ctx context.Context, _ ErasureJob, _, _ string) (ErasureActionExecution, error) {
+		close(entered)
+		<-ctx.Done()
+		close(actionCanceled)
+		return ErasureActionExecution{}, ctx.Err()
+	})
+	processor, err := NewErasureActionProcessor(worker, "eraser-renew-stall", MinErasureLease, time.Second, executors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		job, claimed, err := processor.ProcessOne(ctx, tenant, visibility)
+		if err == nil && (!claimed || job.ID != request.ID || job.State != "cleanup_pending") {
+			err = errors.New("stalled renewal did not safely reschedule the job")
+		}
+		finished <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider action did not start")
+	}
+
+	// Hold the job row so lease renewal cannot complete. The handler must receive
+	// cancellation within its short renewal deadline, well before lease expiry.
+	tx, err := appDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('keel.tenant_id',$1,true)`, string(tenant)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('keel.visibility_key',$1,true)`, visibility); err != nil {
+		t.Fatal(err)
+	}
+	var lockedID uuid.UUID
+	if err := tx.QueryRowContext(ctx, `SELECT job_id FROM keel_meta.retrieval_erasure_jobs
+		WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3 FOR UPDATE`, string(tenant), visibility, request.ID).Scan(&lockedID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-actionCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stalled lease renewal did not cancel the provider action")
+	}
+	select {
+	case <-finished:
+		t.Fatal("processor returned before the stalled renewal row lock was released")
+	default:
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if !errors.Is(err, ErrErasureActionFailed) {
+			t.Fatalf("stalled lease renewal should consume a retry safely: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("processor did not finish after renewal lock was released")
+	}
+}
+
 func TestPostgreSQLErasureActionProcessorResumesAfterPartialSuccess(t *testing.T) {
 	appDB, indexerDB := retrievalTestDBs(t)
 	app, err := New(appDB)
