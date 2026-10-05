@@ -76,7 +76,7 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 	if err != nil || replayedPolicy.Digest != published.Digest {
 		t.Fatalf("identical policy retry did not return its immutable version: policy=%+v err=%v", replayedPolicy, err)
 	}
-	createKey := "supplier-case-create-20261004-01"
+	createKey := testUUID(t)
 	created, err := repo.Create(ctx, tenant, createKey, supplierID, policyID, 1, "principal:buyer-1")
 	if err != nil {
 		t.Fatal(err)
