@@ -64,7 +64,7 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 	tenant, _ := tenancy.ParseTenantID("11111111-1111-4111-8111-111111111111")
 	other, _ := tenancy.ParseTenantID("22222222-2222-4222-8222-222222222222")
 	policyID, supplierID := testUUID(t), testUUID(t)
-	policy := cases.Policy{TenantID: string(tenant), PolicyID: policyID, Version: 1, Name: "Standard review", Deadline: 48 * time.Hour, RequiredEvidence: []string{"tax"}, Steps: []cases.ReviewStep{{Key: "risk-review", Role: "risk:reviewer"}}}
+	policy := cases.Policy{TenantID: string(tenant), PolicyID: policyID, Version: 1, Name: "Standard review", Deadline: 48 * time.Hour, RequiredEvidence: []string{"tax"}, Steps: []cases.ReviewStep{{Key: "risk-review", Role: "risk:reviewer"}, {Key: "procurement-review", Role: "procurement:reviewer", DependsOn: []string{"risk-review"}}}}
 	published, err := repo.PublishPolicy(ctx, tenant, policy, "principal:buyer-1")
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +172,78 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 	if len(view.Events) != 3 || len(view.Evidence) != 1 || view.Case.Status != cases.Submitted {
 		t.Fatalf("submitted case did not verify: %+v", view.Case)
 	}
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if adminDSN == "" {
+		t.Fatal("set KEEL_TEST_ADMIN_DATABASE_URL for reviewer authorization integration")
+	}
+	adminDB := integrationRoleDB(t, adminDSN, "postgres", "keel-local-only")
+	if _, err := adminDB.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_reviewer_grants(tenant_id,principal_ref,role_key)
+		VALUES ($1,'principal:reviewer-1','risk:reviewer'),($1,'principal:approver-1','risk:reviewer'),
+		($1,'principal:approver-revoked','risk:reviewer'),($1,'principal:delegator-1','procurement:reviewer') ON CONFLICT (tenant_id,principal_ref,role_key)
+		DO UPDATE SET granted_at=clock_timestamp(),revoked_at=NULL`, string(tenant)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.supplier_case_reviewer_grants SET revoked_at=clock_timestamp()
+		WHERE tenant_id=$1 AND principal_ref='principal:approver-revoked'`, string(tenant)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_reviewer_grants(tenant_id,principal_ref,role_key) VALUES ($1,'principal:forged','risk:reviewer')`, string(tenant))
+		return err
+	}); err == nil {
+		t.Fatal("case app unexpectedly managed reviewer grants")
+	}
+	if _, err := adminDB.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_delegations
+		(tenant_id,delegation_id,delegator_ref,delegatee_ref,role_key,starts_at,expires_at)
+		VALUES ($1,$2,'principal:delegator-1','principal:approver-2','procurement:reviewer',clock_timestamp()-interval '1 minute',clock_timestamp()+interval '1 day')`,
+		string(tenant), testUUID(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Decide(ctx, tenant, caseID, cases.StepDecision{DecisionID: testUUID(t), StepKey: "risk-review", Actor: "principal:reviewer-1", Outcome: "approve"}); !errors.Is(err, cases.ErrConflict) {
+		t.Fatalf("submitter self-approval should be refused: %v", err)
+	}
+	if _, err := repo.Decide(ctx, tenant, caseID, cases.StepDecision{DecisionID: testUUID(t), StepKey: "risk-review", Actor: "principal:approver-revoked", Outcome: "approve"}); err == nil {
+		t.Fatal("revoked reviewer grant authorized a new decision")
+	}
+	decision := cases.StepDecision{DecisionID: testUUID(t), StepKey: "risk-review", Actor: "principal:approver-1", Outcome: "approve", Reason: "Verified against submitted policy."}
+	afterFirst, err := repo.Decide(ctx, tenant, caseID, decision)
+	if err != nil || afterFirst.Status != cases.Submitted || afterFirst.Version != 4 {
+		t.Fatalf("first step decision failed: case=%+v err=%v", afterFirst, err)
+	}
+	decisionRetry, err := repo.Decide(ctx, tenant, caseID, decision)
+	if err != nil || decisionRetry.Version != afterFirst.Version {
+		t.Fatalf("identical decision retry did not return original result: %+v err=%v", decisionRetry, err)
+	}
+	if err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE keel_meta.supplier_cases SET case_state='approved',aggregate_version=aggregate_version+1,updated_at=clock_timestamp() WHERE tenant_id=$1 AND case_id=$2`, string(tenant), caseID)
+		return err
+	}); err == nil {
+		t.Fatal("incomplete approval plan reached approved state by direct snapshot mutation")
+	}
+	if _, err := repo.Decide(ctx, other, caseID, decision); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant decision error=%v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_delegations
+		(tenant_id,delegation_id,delegator_ref,delegatee_ref,role_key,starts_at,expires_at)
+		VALUES ($1,$2,'principal:delegator-1','principal:approver-expired','procurement:reviewer',clock_timestamp()-interval '2 minutes',clock_timestamp()-interval '1 minute')`,
+		string(tenant), testUUID(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Decide(ctx, tenant, caseID, cases.StepDecision{DecisionID: testUUID(t), StepKey: "procurement-review", Actor: "principal:approver-expired", Outcome: "approve"}); err == nil {
+		t.Fatal("expired delegation authorized a decision")
+	}
+	secondDecision := cases.StepDecision{DecisionID: testUUID(t), StepKey: "procurement-review", Actor: "principal:approver-2", Outcome: "approve"}
+	approved, err := repo.Decide(ctx, tenant, caseID, secondDecision)
+	if err != nil || approved.Status != cases.Approved || approved.Version != 5 {
+		t.Fatalf("delegated final approval failed: %+v err=%v", approved, err)
+	}
+	if expiryRetry, err := repo.Expire(ctx, tenant, caseID); err != nil || expiryRetry.Status != cases.Approved || expiryRetry.Version != approved.Version {
+		t.Fatalf("late expiry attempt changed a completed approval: %+v err=%v", expiryRetry, err)
+	}
+	view, err = repo.Get(ctx, tenant, caseID)
+	if err != nil || view.Case.Status != cases.Approved || len(view.Events) != 5 {
+		t.Fatalf("approved history mismatch: case=%+v events=%d err=%v", view.Case, len(view.Events), err)
+	}
 
 	var eventCount, intentCount int
 	if err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
@@ -182,7 +254,7 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if eventCount != 3 || intentCount != eventCount {
+	if eventCount != 5 || intentCount != eventCount {
 		t.Fatalf("case events=%d durable intents=%d, expected one intent per committed event", eventCount, intentCount)
 	}
 	if err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
@@ -192,20 +264,20 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_events
 			(tenant_id,case_id,aggregate_version,event_type,actor_ref,occurred_at,event_data,previous_hash,event_hash)
-			VALUES ($1,$2,4,'supplier.case.submitted','principal:reviewer-1',clock_timestamp(),'{}'::bytea,$3,$4)`,
+			VALUES ($1,$2,6,'supplier.case.approval-decided','principal:reviewer-1','2026-10-04 12:00:00+00','{}'::bytea,$3,$4)`,
 			string(tenant), caseID, previous, make([]byte, 32))
 		return err
 	}); err == nil {
 		t.Fatal("event without its workflow intent and snapshot transition committed")
 	}
 	if err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE keel_meta.supplier_cases SET case_state='approved',aggregate_version=aggregate_version+1,updated_at=clock_timestamp() WHERE tenant_id=$1 AND case_id=$2`, string(tenant), caseID)
+		_, err := tx.ExecContext(ctx, `UPDATE keel_meta.supplier_cases SET case_state='rejected',aggregate_version=aggregate_version+1,updated_at=clock_timestamp() WHERE tenant_id=$1 AND case_id=$2`, string(tenant), caseID)
 		return err
 	}); err == nil {
 		t.Fatal("app role changed case state without an authorized event transition")
 	}
 	view, err = repo.Get(ctx, tenant, caseID)
-	if err != nil || view.Case.Status != cases.Submitted || view.Case.Version != 3 {
+	if err != nil || view.Case.Status != cases.Approved || view.Case.Version != 5 {
 		t.Fatalf("failed snapshot mutation persisted: case=%+v err=%v", view.Case, err)
 	}
 	if err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
@@ -213,6 +285,12 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 		return err
 	}); err == nil {
 		t.Fatal("app role unexpectedly mutated append-only workflow intents")
+	}
+	if err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE keel_meta.supplier_case_decisions SET reason=reason WHERE tenant_id=$1 AND case_id=$2`, string(tenant), caseID)
+		return err
+	}); err == nil {
+		t.Fatal("app role unexpectedly mutated append-only decisions")
 	}
 }
 
