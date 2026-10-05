@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
@@ -29,34 +30,34 @@ func NewDerivedIndexEraser(repository *retrievalpostgres.Repository, authority L
 	return &DerivedIndexEraser{repository: repository, holdAuthority: authority}, nil
 }
 
-func (e *DerivedIndexEraser) CleanupClaimed(ctx context.Context, tenant tenancy.TenantID, visibility, workerID string, jobID uuid.UUID, epoch int64) error {
+func (e *DerivedIndexEraser) CleanupClaimed(ctx context.Context, tenant tenancy.TenantID, visibility, workerID string, jobID uuid.UUID, epoch int64) (bool, time.Duration, error) {
 	if ctx == nil || e == nil || e.repository == nil || e.holdAuthority == nil || jobID == uuid.Nil || epoch < 1 {
-		return errors.New("derived-index cleanup arguments are invalid")
+		return false, 0, errors.New("derived-index cleanup arguments are invalid")
 	}
 	tenantID, err := tenancy.ParseTenantID(string(tenant))
 	if err != nil {
-		return errors.New("derived-index cleanup tenant is invalid")
+		return false, 0, errors.New("derived-index cleanup tenant is invalid")
 	}
 	visibility, err = index.ParseVisibilityKey(visibility)
 	if err != nil {
-		return errors.New("derived-index cleanup visibility is invalid")
+		return false, 0, errors.New("derived-index cleanup visibility is invalid")
 	}
 	job, err := e.repository.ErasureJob(ctx, tenantID, visibility, jobID)
 	if err != nil || job.State != "cleanup_pending" || !job.LeaseOwner.Valid || job.LeaseOwner.String != workerID ||
 		job.LeaseEpoch != epoch || job.DocumentVersionID == uuid.Nil || job.EligibilityGeneration < 1 {
-		return retrievalpostgres.ErrErasureLeaseLost
+		return false, 0, retrievalpostgres.ErrErasureLeaseLost
 	}
 	fence := ErasureFence{Tenant: tenantID, Visibility: visibility, WorkerID: workerID, JobID: jobID,
 		DocumentVersionID: job.DocumentVersionID, EligibilityGeneration: job.EligibilityGeneration, LeaseEpoch: epoch}
 	clearance, err := e.holdAuthority.AcquireClearance(ctx, fence)
 	if err != nil {
-		return ErrSourceErasureNotAuthorized
+		return false, 0, ErrSourceErasureNotAuthorized
 	}
 	if clearance.Release == nil || clearance.DecisionActorID == uuid.Nil || clearance.EvidenceSHA256 == ([32]byte{}) {
 		if clearance.Release != nil {
 			_ = clearance.Release()
 		}
-		return ErrSourceErasureNotAuthorized
+		return false, 0, ErrSourceErasureNotAuthorized
 	}
 	released := false
 	defer func() {
@@ -67,10 +68,14 @@ func (e *DerivedIndexEraser) CleanupClaimed(ctx context.Context, tenant tenancy.
 	result, err := e.repository.CleanupUnpublishedErasureIndexBatch(ctx, tenantID, visibility, workerID, jobID, epoch,
 		retrievalpostgres.MaxErasureIndexBatchRows)
 	if err != nil {
-		return err
+		return false, 0, err
 	}
 	if !result.ReadyForReceipt() {
-		return errors.New("derived-index cleanup remains pending retention or bounded progress")
+		delay := retrievalpostgres.MinErasureProgressDelay
+		if result.RetainedPublishedBuilds && !result.RemainingUnpublished {
+			delay = 5 * time.Minute
+		}
+		return true, delay, nil
 	}
 	// Bind the content-free receipt to this job/source generation, pass result,
 	// and serialized hold decision. The repository rechecks the live lease.
@@ -80,11 +85,11 @@ func (e *DerivedIndexEraser) CleanupClaimed(ctx context.Context, tenant tenancy.
 	if _, err := e.repository.RecordErasureActionReceipt(ctx, tenantID, visibility, workerID, jobID, epoch,
 		retrievalpostgres.ErasureActionDerivedIndex, retrievalpostgres.ErasureReceiptComplete,
 		clearance.DecisionActorID, "", digest); err != nil {
-		return fmt.Errorf("record derived-index erasure receipt: %w", err)
+		return false, 0, fmt.Errorf("record derived-index erasure receipt: %w", err)
 	}
 	if err := clearance.Release(); err != nil {
-		return errors.New("legal-hold clearance could not be released after derived-index cleanup")
+		return false, 0, errors.New("legal-hold clearance could not be released after derived-index cleanup")
 	}
 	released = true
-	return nil
+	return false, 0, nil
 }
