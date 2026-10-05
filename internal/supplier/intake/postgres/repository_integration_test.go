@@ -26,6 +26,43 @@ import (
 	"github.com/sanskarpan/keel/internal/supplier/intake"
 )
 
+type testLegalHoldAuthority struct {
+	clear    bool
+	released bool
+	actorID  uuid.UUID
+}
+
+type failOnceObjectDeleter struct {
+	store   *intake.LocalStore
+	failKey string
+	failed  bool
+}
+
+func (d *failOnceObjectDeleter) Delete(ctx context.Context, key string) error {
+	if key == d.failKey && !d.failed {
+		d.failed = true
+		return errors.New("synthetic object-store interruption")
+	}
+	return d.store.Delete(ctx, key)
+}
+
+func (a *testLegalHoldAuthority) AcquireClearance(_ context.Context, fence citationintake.ErasureFence) (citationintake.HoldClearance, error) {
+	if !a.clear || fence.JobID == uuid.Nil || fence.DocumentVersionID == uuid.Nil || fence.LeaseEpoch < 1 {
+		return citationintake.HoldClearance{}, errors.New("synthetic hold authority denied clearance")
+	}
+	if a.actorID == uuid.Nil {
+		a.actorID = uuid.New()
+	}
+	return citationintake.HoldClearance{
+		DecisionActorID: a.actorID,
+		EvidenceSHA256:  sha256.Sum256([]byte("synthetic serialized legal-hold clearance")),
+		Release: func() error {
+			a.released = true
+			return nil
+		},
+	}, nil
+}
+
 func openRoleDB(t *testing.T, dsn, role, password string) *sql.DB {
 	t.Helper()
 	parsed, err := url.Parse(dsn)
@@ -276,24 +313,99 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		eraser, err := citationintake.NewEraser(appDB, objects)
+		receiptWriter := citationintake.SourceErasureReceiptWriterFunc(func(ctx context.Context, fence citationintake.ErasureFence, actor uuid.UUID, digest [32]byte) error {
+			_, err := indexer.RecordErasureActionReceipt(ctx, fence.Tenant, fence.Visibility, fence.WorkerID,
+				fence.JobID, fence.LeaseEpoch, retrievalpg.ErasureActionSupplierSourceObject,
+				retrievalpg.ErasureReceiptComplete, actor, "", digest)
+			return err
+		})
+		eraser, err := citationintake.NewEraser(appDB, objects, &testLegalHoldAuthority{}, receiptWriter)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := eraser.Erase(ctx, tenant, visibility, documentID, withdrawal.EligibilityGeneration+1); !errors.Is(err, citationintake.ErrSourceErasureNotAuthorized) {
-			t.Fatalf("source erasure accepted a mismatched withdrawal generation: %v", err)
+		if err := eraser.EraseClaimed(ctx, tenant, visibility, "eraser-a", withdrawal.ID, 1); !errors.Is(err, citationintake.ErrSourceErasureNotAuthorized) {
+			t.Fatalf("source erasure ran before a worker claimed its durable job: %v", err)
 		}
 		for _, key := range []string{objectKey, outputKey} {
 			object, err := objects.Open(ctx, key)
 			if err != nil {
-				t.Fatalf("mismatched generation deleted source object %q: %v", key, err)
+				t.Fatalf("unclaimed erasure deleted source object %q: %v", key, err)
 			}
 			_ = object.Close()
 		}
-		if err := eraser.Erase(ctx, tenant, visibility, documentID, withdrawal.EligibilityGeneration); err != nil {
+		claim, claimed, err := indexer.ClaimErasureJob(ctx, tenant, visibility, "eraser-a", time.Minute)
+		if err != nil || !claimed || claim.ID != withdrawal.ID {
+			t.Fatalf("claim source erasure job: claim=%+v claimed=%t err=%v", claim, claimed, err)
+		}
+		if err := eraser.EraseClaimed(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch); !errors.Is(err, citationintake.ErrSourceErasureNotAuthorized) {
+			t.Fatalf("source erasure ran without a legal-hold clearance receipt: %v", err)
+		}
+		if _, err := indexer.RecordErasureActionReceipt(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch,
+			retrievalpg.ErasureActionLegalHoldCheck, retrievalpg.ErasureReceiptComplete, uuid.New(), "", sha256.Sum256([]byte("synthetic legal-hold clearance fixture"))); err != nil {
+			t.Fatalf("record synthetic legal-hold clearance fixture: %v", err)
+		}
+		if err := eraser.EraseClaimed(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch); !errors.Is(err, citationintake.ErrSourceErasureNotAuthorized) {
+			t.Fatalf("source erasure proceeded while legal-hold authority denied clearance: %v", err)
+		}
+		for _, key := range []string{objectKey, outputKey} {
+			object, err := objects.Open(ctx, key)
+			if err != nil {
+				t.Fatalf("hold denial deleted source object %q: %v", key, err)
+			}
+			_ = object.Close()
+		}
+		clearHold := &testLegalHoldAuthority{clear: true}
+		eraser, err = citationintake.NewEraser(appDB, objects, clearHold, receiptWriter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := eraser.EraseClaimed(ctx, tenant, visibility, "eraser-b", claim.ID, claim.LeaseEpoch); !errors.Is(err, citationintake.ErrSourceErasureNotAuthorized) {
+			t.Fatalf("source erasure accepted a different lease owner: %v", err)
+		}
+		if err := eraser.EraseClaimed(ctx, otherTenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch); !errors.Is(err, citationintake.ErrSourceErasureNotAuthorized) {
+			t.Fatalf("source erasure crossed tenant scope: %v", err)
+		}
+		if err := eraser.EraseClaimed(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch+1); !errors.Is(err, citationintake.ErrSourceErasureNotAuthorized) {
+			t.Fatalf("source erasure accepted a stale lease epoch: %v", err)
+		}
+		partial, err := citationintake.NewEraser(appDB, &failOnceObjectDeleter{store: objects, failKey: objectKey}, clearHold, receiptWriter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := partial.EraseClaimed(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch); err == nil {
+			t.Fatal("injected raw object deletion failure was hidden")
+		}
+		if object, err := objects.Open(ctx, outputKey); err == nil {
+			_ = object.Close()
+			t.Fatal("partial erasure left the already-deleted extracted object present")
+		}
+		if object, err := objects.Open(ctx, objectKey); err != nil {
+			t.Fatalf("partial erasure unexpectedly removed the raw object: %v", err)
+		} else {
+			_ = object.Close()
+		}
+		var sourceReceipts int
+		if err := tenancy.WithTenantTx(ctx, indexerDB, tenant, nil, func(tx *sql.Tx) error {
+			if _, err := tx.ExecContext(ctx, `SELECT set_config('keel.visibility_key',$1,true)`, visibility); err != nil {
+				return err
+			}
+			return tx.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.retrieval_erasure_action_receipts
+				WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3 AND action_key=$4`, string(tenant), visibility, claim.ID,
+				retrievalpg.ErasureActionSupplierSourceObject).Scan(&sourceReceipts)
+		}); err != nil || sourceReceipts != 0 {
+			t.Fatalf("partial deletion was acknowledged by a receipt: count=%d err=%v", sourceReceipts, err)
+		}
+		if err := eraser.EraseClaimed(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch); err != nil {
 			t.Fatalf("erase withdrawn supplier source objects: %v", err)
 		}
-		if err := eraser.Erase(ctx, tenant, visibility, documentID, withdrawal.EligibilityGeneration); err != nil {
+		if !clearHold.released {
+			t.Fatal("legal-hold clearance was not released after the destructive action")
+		}
+		retry, err := citationintake.NewEraser(appDB, objects, &testLegalHoldAuthority{}, receiptWriter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := retry.EraseClaimed(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch); err != nil {
 			t.Fatalf("retry idempotent source object erasure: %v", err)
 		}
 		for _, key := range []string{objectKey, outputKey} {
