@@ -79,6 +79,9 @@ func TestPostgreSQLErasureWorkerLeaseRetryAndPoisonState(t *testing.T) {
 	if _, claimed, err := worker.ClaimErasureJob(ctx, tenant, visibility, "eraser-b", 3*time.Second); err != nil || claimed {
 		t.Fatalf("job bypassed retry backoff: claimed=%t err=%v", claimed, err)
 	}
+	if _, err := worker.BlockErasureJob(ctx, tenant, visibility, "eraser-a", claim.ID, claim.LeaseEpoch, "legal_hold_active"); !errors.Is(err, ErrErasureLeaseLost) {
+		t.Fatalf("released stale worker blocked a retried job: %v", err)
+	}
 	if delay := time.Until(retry.AvailableAt); delay > 0 {
 		time.Sleep(delay + 20*time.Millisecond)
 	}
