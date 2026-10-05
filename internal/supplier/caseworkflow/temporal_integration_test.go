@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,23 @@ func TestTemporalServerSignalWithStartDeduplicatesAndReplaysAfterWorkerRestart(t
 	}
 	if got := waitWorkflowVersion(ctx, t, c, tenant, caseID, 2); got != 2 {
 		t.Fatalf("duplicate signal changed workflow version to %d", got)
+	}
+	// Existing V1 histories may grow into the K2.4 approval envelope. Replay must
+	// retain the original prefix and accept the first approval signal after 102.
+	for version := uint64(3); version <= 103; version++ {
+		kind := "supplier.case.evidence-added"
+		if version == 102 {
+			kind = "supplier.case.submitted"
+		} else if version == 103 {
+			kind = "supplier.case.approval-decided"
+		}
+		intentID := fmt.Sprintf("aaaaaaaa-aaaa-4aaa-8aaa-%012x", version)
+		if err := sender.Deliver(ctx, tenant, EventSignal{CaseID: caseID, IntentID: intentID, Version: version, EventType: kind, EventHash: strings.Repeat("c", 64)}); err != nil {
+			t.Fatalf("send version %d: %v", version, err)
+		}
+	}
+	if got := waitWorkflowVersion(ctx, t, c, tenant, caseID, 103); got != 103 {
+		t.Fatalf("approval signal after the original 102-event cap was not replayed: %d", got)
 	}
 }
 
