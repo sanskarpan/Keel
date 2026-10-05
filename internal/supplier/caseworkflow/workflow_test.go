@@ -2,6 +2,7 @@ package caseworkflow
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -72,5 +73,34 @@ func TestApplyRejectsMalformedOrCrossCaseSignals(t *testing.T) {
 	other := State{CaseID: "22222222-2222-4222-8222-222222222222"}
 	if _, err := Apply(other, valid); !errors.Is(err, ErrCaseMismatch) {
 		t.Fatalf("cross-case signal accepted: %v", err)
+	}
+}
+
+func TestWorkflowEventEnvelopeCoversBoundedApprovalLifecycleAndRejectsBeyondIt(t *testing.T) {
+	state := State{CaseID: testCaseID}
+	for version := uint64(1); version <= MaxEvents; version++ {
+		kind := "supplier.case.approval-decided"
+		if version == 1 {
+			kind = "supplier.case.created"
+		} else if version <= 101 {
+			kind = "supplier.case.evidence-added"
+		} else if version == 102 {
+			kind = "supplier.case.submitted"
+		} else if version == MaxEvents {
+			kind = "supplier.case.expired"
+		}
+		intent := fmt.Sprintf("aaaaaaaa-aaaa-4aaa-8aaa-%012x", version)
+		var err error
+		state, err = Apply(state, signal(version, kind, intent, strings.Repeat("a", 64)))
+		if err != nil {
+			t.Fatalf("version %d rejected within bounded lifecycle: %v", version, err)
+		}
+	}
+	if state.LastVersion != MaxEvents || len(state.Events) != MaxEvents {
+		t.Fatalf("bounded state mismatch: last=%d events=%d", state.LastVersion, len(state.Events))
+	}
+	tooLarge := signal(MaxEvents+1, "supplier.case.approval-decided", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", strings.Repeat("b", 64))
+	if _, err := Apply(state, tooLarge); !errors.Is(err, ErrInvalidSignal) {
+		t.Fatalf("event beyond explicit lifecycle bound accepted: %v", err)
 	}
 }
