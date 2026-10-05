@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"strings"
@@ -123,6 +124,80 @@ func TestPostgreSQLMigrationRejectsTransactionControlBeforeMutation(t *testing.T
 	}
 	if objectPresent {
 		t.Fatal("rejected transaction-control migration left schema changes behind")
+	}
+}
+
+func TestPostgreSQLMigration022RejectsLegacyOutOfScopeReceipt(t *testing.T) {
+	db, marker := migrationTestDB(t)
+	ctx := context.Background()
+	table := "retrieval_erasure_na_legacy_" + strings.TrimPrefix(marker, "keel_migration_")
+	ledger := "schema_migrations_" + strings.TrimPrefix(marker, "keel_migration_")
+	owner := asSchemaOwner(t, db)
+	_, err := owner.ExecContext(ctx, `CREATE TABLE keel_meta.`+quoteIdentifier(table)+` (
+		action_key text NOT NULL,
+		disposition text NOT NULL
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.ExecContext(ctx, `ALTER TABLE keel_meta.`+quoteIdentifier(table)+` ENABLE ROW LEVEL SECURITY`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.ExecContext(ctx, `ALTER TABLE keel_meta.`+quoteIdentifier(table)+` FORCE ROW LEVEL SECURITY`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.ExecContext(ctx, `CREATE POLICY seed_legacy_receipt ON keel_meta.`+quoteIdentifier(table)+`
+		TO keel_schema_owner USING (true) WITH CHECK (true)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.ExecContext(ctx, `INSERT INTO keel_meta.`+quoteIdentifier(table)+` (action_key,disposition)
+		VALUES ('supplier_source_objects','not_applicable')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.ExecContext(ctx, `DROP POLICY seed_legacy_receipt ON keel_meta.`+quoteIdentifier(table)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.ExecContext(ctx, `RESET ROLE`); err != nil {
+		t.Fatal(err)
+	}
+	_ = owner.Close()
+	t.Cleanup(func() {
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(context.Background(), `SET ROLE keel_schema_owner`); err == nil {
+			_, _ = conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS keel_meta.`+quoteIdentifier(table)+` CASCADE`)
+			_, _ = conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS keel_meta.`+quoteIdentifier(ledger)+` CASCADE`)
+		}
+	})
+
+	body, err := fs.ReadFile(Embedded(), "0022_retrieval_erasure_not_applicable_scope.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.ReplaceAll(string(body), "keel_meta.retrieval_erasure_action_receipts", "keel_meta."+quoteIdentifier(table)))
+	options := Options{LedgerTable: ledger, LockID: localMigrationLockID}
+	if err := Apply(ctx, db, migrationSource("0022_retrieval_erasure_not_applicable_scope.up.sql", string(body)), options); err == nil ||
+		!strings.Contains(err.Error(), "retrieval_erasure_receipt_not_applicable_scope") {
+		t.Fatalf("migration accepted a legacy required-action N/A receipt or failed unexpectedly: %v", err)
+	}
+
+	owner = asSchemaOwner(t, db)
+	if _, err := owner.ExecContext(ctx, `CREATE POLICY inspect_legacy_receipt ON keel_meta.`+quoteIdentifier(table)+`
+		TO keel_schema_owner USING (true)`); err != nil {
+		t.Fatal(err)
+	}
+	var legacyRows, ledgerRows int
+	if err := owner.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.`+quoteIdentifier(table)).Scan(&legacyRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.`+quoteIdentifier(ledger)).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if legacyRows != 1 || ledgerRows != 0 {
+		t.Fatalf("failed migration changed legacy row/ledger: legacy rows=%d ledger rows=%d", legacyRows, ledgerRows)
 	}
 }
 
