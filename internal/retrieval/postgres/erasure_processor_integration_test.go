@@ -180,7 +180,7 @@ func TestPostgreSQLErasureActionProcessorResumesAfterPartialSuccess(t *testing.T
 }
 
 func TestPostgreSQLErasureActionProcessorResumesDerivedIndexReceiptHandoff(t *testing.T) {
-	appDB, indexerDB, adminDB := retrievalTestDBsWithAdmin(t)
+	appDB, indexerDB := retrievalTestDBs(t)
 	app, err := New(appDB)
 	if err != nil {
 		t.Fatal(err)
@@ -227,12 +227,8 @@ func TestPostgreSQLErasureActionProcessorResumesDerivedIndexReceiptHandoff(t *te
 				t.Fatalf("stale worker yielded a released lease: %v", err)
 			}
 		}
-		if err := withScope(ctx, adminDB, scope{tenant: tenant, visibility: visibility}, nil, func(tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, `UPDATE keel_meta.retrieval_erasure_jobs SET available_at=clock_timestamp()
-				WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3`, string(tenant), visibility, job.ID)
-			return err
-		}); err != nil {
-			t.Fatalf("make yielded job due after pass %d: %v", pass, err)
+		if delay := time.Until(job.AvailableAt); delay > 0 {
+			time.Sleep(delay + 10*time.Millisecond)
 		}
 	}
 	completed, claimed, err := processor.ProcessOne(ctx, tenant, visibility)
