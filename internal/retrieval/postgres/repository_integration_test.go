@@ -39,7 +39,7 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunks := []index.Chunk{preparedChunk(t, hasher, uuid.New(), "invoice invoice total"), preparedChunk(t, hasher, uuid.New(), "payment schedule window")}
+	chunks := []index.Chunk{preparedChunk(t, hasher, uuid.New(), "invoice invoice total"), preparedChunk(t, hasher, uuid.New(), "invoice payment schedule window")}
 	buildID := uuid.New()
 	spec := buildSpec(buildID, hasher.KeyID(), len(chunks))
 	if err := indexer.BeginBuild(ctx, tenant, visibility, spec); err != nil {
@@ -73,7 +73,7 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active.ID != buildID || active.State != "published" || active.Generation != 1 || active.ChunkCount != 2 || active.TotalTokenCount != 6 {
+	if active.ID != buildID || active.State != "published" || active.Generation != 1 || active.ChunkCount != 2 || active.TotalTokenCount != 7 {
 		t.Fatalf("unexpected active corpus: %+v", active)
 	}
 	otherVisibility := "restricted-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
@@ -88,12 +88,13 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results.Candidates) != 1 || results.Candidates[0].DocumentVersionID != chunks[0].DocumentVersionID || results.Candidates[0].Score <= 0 {
+	if len(results.Candidates) != 2 || results.Candidates[0].DocumentVersionID != chunks[0].DocumentVersionID || results.Candidates[0].Score <= 0 {
 		t.Fatalf("unexpected lexical results: %+v", results)
 	}
 	// Independent BM25 calculation for the two-chunk finance corpus: invoice
-	// occurs twice in one three-token chunk, N=2, df=1, and avg length=3.
-	wantScore := math.Log(1+(2.0-1.0+.5)/(1.0+.5)) * (2.0 * 2.2 / (2.0 + 1.2))
+	// occurs twice in the first chunk and once in the second, N=2, df=2, and
+	// average chunk length=3.5 tokens.
+	wantScore := math.Log1p((2.0-2.0+.5)/(2.0+.5)) * (2.0 * 2.2 / (2.0 + 1.2*(1-.75+.75*3.0/3.5)))
 	if math.Abs(results.Candidates[0].Score-wantScore) > 1e-12 {
 		t.Fatalf("BM25 score=%0.15f, independently calculated score=%0.15f", results.Candidates[0].Score, wantScore)
 	}
@@ -115,8 +116,9 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	if _, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID()+"-wrong", []index.TermID{invoice}, 5, 20); !errors.Is(err, ErrTermKeyMismatch) {
 		t.Fatalf("wrong term key was accepted: %v", err)
 	}
-	if _, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID(), []index.TermID{invoice, hasher.ID("total")}, 5, 1); !errors.Is(err, ErrPostingBudgetExceeded) {
-		t.Fatalf("posting budget overflow did not fail closed: %v", err)
+	partial, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID(), []index.TermID{invoice}, 5, 1)
+	if !errors.Is(err, ErrPostingBudgetExceeded) || len(partial.Candidates) != 0 || partial.PostingRows != 0 {
+		t.Fatalf("posting budget overflow returned a partial result: result=%+v err=%v", partial, err)
 	}
 	if _, err := app.ActiveBuild(ctx, otherTenant, visibility); !errors.Is(err, ErrNoActiveBuild) {
 		t.Fatalf("another tenant read a corpus: %v", err)
@@ -139,8 +141,8 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 		t.Fatalf("durable erasure state mismatch: job=%+v err=%v", persistedJob, err)
 	}
 	withdrawnResults, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID(), []index.TermID{invoice}, 5, 20)
-	if err != nil || len(withdrawnResults.Candidates) != 0 {
-		t.Fatalf("query returned withdrawn source: results=%+v err=%v", withdrawnResults, err)
+	if err != nil || len(withdrawnResults.Candidates) != 1 || withdrawnResults.Candidates[0].DocumentVersionID != chunks[1].DocumentVersionID {
+		t.Fatalf("query failed to suppress only the withdrawn source: results=%+v err=%v", withdrawnResults, err)
 	}
 	if _, err := resolver.ResolveCitation(ctx, hybrid.Scope{TenantID: tenant, VisibilityKey: visibility}, citation); !errors.Is(err, hybrid.ErrCitationNotAuthorized) || reader.calls != 1 {
 		t.Fatalf("citation resolver returned content after withdrawal: calls=%d err=%v", reader.calls, err)

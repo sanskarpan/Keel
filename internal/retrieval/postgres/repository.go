@@ -350,7 +350,7 @@ func (r *Repository) SearchScores(ctx context.Context, tenant tenancy.TenantID, 
 		}
 		args = append(args, maxPostingRows+1)
 		limitArg := fmt.Sprintf("$%d", len(args))
-		query := `SELECT c.chunk_id,c.document_version_id,c.chunk_ordinal,c.source_start_byte,c.source_end_byte,c.content_sha256,c.token_count,p.term_id,p.term_frequency,st.document_frequency
+		query := `SELECT c.chunk_id,c.document_version_id,c.chunk_ordinal,c.source_start_byte,c.source_end_byte,c.content_sha256,c.token_count,p.term_frequency,st.document_frequency
 			FROM keel_meta.retrieval_chunks c JOIN keel_meta.retrieval_term_postings p ON p.tenant_id=c.tenant_id AND p.build_id=c.build_id AND p.chunk_id=c.chunk_id
 			JOIN keel_meta.retrieval_term_statistics st ON st.tenant_id=p.tenant_id AND st.build_id=p.build_id AND st.term_id=p.term_id
 			JOIN keel_meta.retrieval_source_eligibility e ON e.tenant_id=c.tenant_id AND e.visibility_key=c.visibility_key AND e.document_version_id=c.document_version_id AND e.state='active'
@@ -360,18 +360,15 @@ func (r *Repository) SearchScores(ctx context.Context, tenant tenancy.TenantID, 
 		if err != nil {
 			return fmt.Errorf("read bounded retrieval postings: %w", err)
 		}
-		type candidate struct {
-			result      Result
-			length      int
-			frequencies map[index.TermID]int
-			dfs         map[index.TermID]int
-		}
-		candidates := map[uuid.UUID]*candidate{}
+		averageLength := float64(result.Build.TotalTokenCount) / float64(result.Build.ChunkCount)
+		var current Result
+		var currentChunk uuid.UUID
+		hasCurrent := false
 		for rows.Next() {
 			var chunkID, docID uuid.UUID
 			var ordinal, start, end, length, tf, df int
-			var digest, termBytes []byte
-			if err := rows.Scan(&chunkID, &docID, &ordinal, &start, &end, &digest, &length, &termBytes, &tf, &df); err != nil {
+			var digest []byte
+			if err := rows.Scan(&chunkID, &docID, &ordinal, &start, &end, &digest, &length, &tf, &df); err != nil {
 				_ = rows.Close()
 				return err
 			}
@@ -380,21 +377,23 @@ func (r *Repository) SearchScores(ctx context.Context, tenant tenancy.TenantID, 
 				_ = rows.Close()
 				return ErrPostingBudgetExceeded
 			}
-			if len(digest) != 32 || len(termBytes) != 32 {
+			if len(digest) != 32 {
 				_ = rows.Close()
-				return errors.New("retrieval index contains malformed digest identity")
+				return errors.New("retrieval index contains malformed content digest")
 			}
-			c := candidates[chunkID]
-			if c == nil {
+			if !hasCurrent || chunkID != currentChunk {
+				if hasCurrent {
+					result.Candidates = append(result.Candidates, current)
+				}
 				var d [32]byte
 				copy(d[:], digest)
-				c = &candidate{result: Result{ChunkID: chunkID, DocumentVersionID: docID, Ordinal: ordinal, StartByte: start, EndByte: end, ContentDigest: d}, length: length, frequencies: map[index.TermID]int{}, dfs: map[index.TermID]int{}}
-				candidates[chunkID] = c
+				currentChunk = chunkID
+				current = Result{ChunkID: chunkID, DocumentVersionID: docID, Ordinal: ordinal, StartByte: start, EndByte: end, ContentDigest: d}
+				hasCurrent = true
 			}
-			var id index.TermID
-			copy(id[:], termBytes)
-			c.frequencies[id] = tf
-			c.dfs[id] = df
+			id := math.Log1p((float64(result.Build.ChunkCount-df) + .5) / (float64(df) + .5))
+			lengthNorm := float64(tf) + 1.2*(1-.75+.75*float64(length)/averageLength)
+			current.Score += id * float64(tf) * 2.2 / lengthNorm
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -403,19 +402,8 @@ func (r *Repository) SearchScores(ctx context.Context, tenant tenancy.TenantID, 
 		if err := rows.Close(); err != nil {
 			return err
 		}
-		averageLength := float64(result.Build.TotalTokenCount) / float64(result.Build.ChunkCount)
-		for _, candidate := range candidates {
-			score := 0.0
-			for term, tfInt := range candidate.frequencies {
-				n := float64(result.Build.ChunkCount)
-				df := float64(candidate.dfs[term])
-				tf := float64(tfInt)
-				idf := math.Log1p((n - df + .5) / (df + .5))
-				denom := tf + 1.2*(1-.75+.75*float64(candidate.length)/averageLength)
-				score += idf * tf * 2.2 / denom
-			}
-			candidate.result.Score = score
-			result.Candidates = append(result.Candidates, candidate.result)
+		if hasCurrent {
+			result.Candidates = append(result.Candidates, current)
 		}
 		sort.Slice(result.Candidates, func(i, j int) bool {
 			if result.Candidates[i].Score == result.Candidates[j].Score {
