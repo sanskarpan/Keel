@@ -159,6 +159,11 @@ jobs:
           KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_TEMPORAL_ADDRESS: 127.0.0.1:7233
         run: make check
+      - name: Measure lexical retrieval under tenant skew
+        env:
+          KEEL_TEST_DATABASE_URL: postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_RETRIEVAL_INDEXER_DATABASE_URL: postgres://keel_local_retrieval_indexer:keel-retrieval-indexer-local-only@127.0.0.1:5432/postgres?sslmode=disable
+        run: GOTOOLCHAIN=local go test -run '^$' -bench '^BenchmarkPostgreSQLSearchScoresTenantSkew$' -benchtime=100x -benchmem -v ./internal/retrieval/postgres
       - name: Validate immutable retrieval evaluation corpus
         run: GOTOOLCHAIN=local go run ./cmd/keel-corpus-lint research/retrieval/v1/corpus.json research/retrieval/v1/build-manifest.json research/retrieval/v1
       - name: Reproduce synthetic retrieval reference results
