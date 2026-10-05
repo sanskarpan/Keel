@@ -180,7 +180,7 @@ func TestPostgreSQLErasureActionProcessorResumesAfterPartialSuccess(t *testing.T
 }
 
 func TestPostgreSQLErasureActionProcessorResumesDerivedIndexReceiptHandoff(t *testing.T) {
-	appDB, indexerDB := retrievalTestDBs(t)
+	appDB, indexerDB, adminDB := retrievalTestDBsWithAdmin(t)
 	app, err := New(appDB)
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +204,7 @@ func TestPostgreSQLErasureActionProcessorResumesDerivedIndexReceiptHandoff(t *te
 	}
 	var order []string
 	executors := testErasureExecutors(&order)
-	indexEraser := &receiptWritingDerivedIndexEraser{repository: worker, order: &order, failFirst: true, actorID: uuid.New()}
+	indexEraser := &receiptWritingDerivedIndexEraser{repository: worker, order: &order, progressPasses: MaxErasureAttempts + 1, actorID: uuid.New()}
 	indexExecutor, err := NewDerivedIndexCleanupExecutor(indexEraser)
 	if err != nil {
 		t.Fatal(err)
@@ -214,19 +214,32 @@ func TestPostgreSQLErasureActionProcessorResumesDerivedIndexReceiptHandoff(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, claimed, err := processor.ProcessOne(ctx, tenant, visibility)
-	if !claimed || !errors.Is(err, ErrErasureActionFailed) || job.State != "cleanup_pending" || job.LeaseOwner.Valid {
-		t.Fatalf("failed action retry state=%+v claimed=%t err=%v", job, claimed, err)
-	}
-	if delay := time.Until(job.AvailableAt); delay > 0 {
-		time.Sleep(delay + 25*time.Millisecond)
+	var job ErasureJob
+	for pass := 0; pass < indexEraser.progressPasses; pass++ {
+		var claimed bool
+		job, claimed, err = processor.ProcessOne(ctx, tenant, visibility)
+		if err != nil || !claimed || job.State != "cleanup_pending" || job.LeaseOwner.Valid || job.AttemptCount != 0 {
+			t.Fatalf("progress pass %d did not yield without consuming failure budget: job=%+v claimed=%t err=%v", pass, job, claimed, err)
+		}
+		if pass == 0 {
+			if _, err := worker.YieldErasureJob(ctx, tenant, visibility, "eraser-index-retry", job.ID, job.LeaseEpoch, MinErasureProgressDelay); !errors.Is(err, ErrErasureLeaseLost) {
+				t.Fatalf("stale worker yielded a released lease: %v", err)
+			}
+		}
+		if err := withScope(ctx, adminDB, scope{tenant: tenant, visibility: visibility}, nil, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `UPDATE keel_meta.retrieval_erasure_jobs SET available_at=clock_timestamp()
+				WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3`, string(tenant), visibility, job.ID)
+			return err
+		}); err != nil {
+			t.Fatalf("make yielded job due after pass %d: %v", pass, err)
+		}
 	}
 	completed, claimed, err := processor.ProcessOne(ctx, tenant, visibility)
 	if err != nil || !claimed || completed.ID != request.ID || completed.State != "complete" {
 		t.Fatalf("resumed erasure job=%+v claimed=%t err=%v", completed, claimed, err)
 	}
-	if indexEraser.calls != 2 {
-		t.Fatalf("derived-index action attempts=%d want retry then receipt replay", indexEraser.calls)
+	if indexEraser.calls != indexEraser.progressPasses+1 || completed.LeaseEpoch <= MaxErasureAttempts || completed.AttemptCount != 1 {
+		t.Fatalf("progress pass lease/failure accounting mismatch: calls=%d job=%+v", indexEraser.calls, completed)
 	}
 	var receipts int
 	scope, err := newScope(tenant, visibility)
@@ -275,30 +288,30 @@ type receiptWritingSupplierEraser struct {
 }
 
 type receiptWritingDerivedIndexEraser struct {
-	repository *Repository
-	order      *[]string
-	failFirst  bool
-	calls      int
-	actorID    uuid.UUID
-	worker     string
-	epoch      int64
+	repository     *Repository
+	order          *[]string
+	progressPasses int
+	calls          int
+	actorID        uuid.UUID
+	worker         string
+	epoch          int64
 }
 
-func (e *receiptWritingDerivedIndexEraser) CleanupClaimed(ctx context.Context, tenant tenancy.TenantID, visibility, worker string, jobID uuid.UUID, epoch int64) error {
+func (e *receiptWritingDerivedIndexEraser) CleanupClaimed(ctx context.Context, tenant tenancy.TenantID, visibility, worker string, jobID uuid.UUID, epoch int64) (bool, time.Duration, error) {
 	e.calls++
 	e.worker, e.epoch = worker, epoch
 	if e.order != nil {
 		*e.order = append(*e.order, ErasureActionDerivedIndex)
 	}
-	if e.failFirst && e.calls == 1 {
-		return errors.New("synthetic bounded cleanup made progress without a final receipt")
+	if e.calls <= e.progressPasses {
+		return true, MinErasureProgressDelay, nil
 	}
 	if e.repository == nil {
-		return nil
+		return false, 0, nil
 	}
 	_, err := e.repository.RecordErasureActionReceipt(ctx, tenant, visibility, worker, jobID, epoch,
 		ErasureActionDerivedIndex, ErasureReceiptComplete, e.actorID, "", sha256.Sum256([]byte("synthetic derived-index cleanup evidence")))
-	return err
+	return false, 0, err
 }
 
 func (e *receiptWritingSupplierEraser) EraseClaimed(ctx context.Context, tenant tenancy.TenantID, visibility, worker string, jobID uuid.UUID, epoch int64) error {
