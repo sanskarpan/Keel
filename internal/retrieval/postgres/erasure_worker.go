@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -124,6 +125,10 @@ func (r *Repository) CompleteErasureJob(ctx context.Context, tenant tenancy.Tena
 			return ErrErasureLeaseLost
 		}
 		if err != nil {
+			if strings.Contains(err.Error(), "until every required action has a receipt") ||
+				strings.Contains(err.Error(), "without an action manifest") {
+				return ErrErasureActionManifestIncomplete
+			}
 			return fmt.Errorf("complete retrieval erasure job: %w", err)
 		}
 		return nil
