@@ -403,9 +403,7 @@ func (r *Repository) finishOnDatabaseWith(ctx context.Context, db *sql.DB, tenan
 			// their reservation without also terminalizing the job and releasing
 			// its execution-profile concurrency slot.
 			var queueBacked bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
-				SELECT 1 FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2
-			)`, string(tenant), inferenceID).Scan(&queueBacked); err != nil {
+			if err := tx.QueryRowContext(ctx, `SELECT keel_meta.is_queued_ai_inference($1,$2)`, string(tenant), inferenceID).Scan(&queueBacked); err != nil {
 				return err
 			}
 			if queueBacked {
