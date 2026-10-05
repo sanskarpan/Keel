@@ -199,6 +199,24 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 		string(tenant), testUUID(t)); err != nil {
 		t.Fatal(err)
 	}
+	review := cases.ManualReviewData{ReviewID: testUUID(t), EvidenceID: view.Evidence[0].EvidenceID, Reason: "ambiguous registration date"}
+	requestedReview, err := repo.RequestManualReview(ctx, tenant, caseID, review, "principal:approver-1")
+	if err != nil || requestedReview.Status != cases.Submitted || requestedReview.Version != 4 {
+		t.Fatalf("manual evidence review request failed or changed approval state: %+v err=%v", requestedReview, err)
+	}
+	requestedRetry, err := repo.RequestManualReview(ctx, tenant, caseID, review, "principal:approver-1")
+	if err != nil || requestedRetry.Version != requestedReview.Version {
+		t.Fatalf("manual evidence review request was not idempotent: %+v err=%v", requestedRetry, err)
+	}
+	review.Outcome, review.Reason = "confirmed", "document reviewed against original scan"
+	resolvedReview, err := repo.ResolveManualReview(ctx, tenant, caseID, review, "principal:approver-1")
+	if err != nil || resolvedReview.Status != cases.Submitted || resolvedReview.Version != 5 {
+		t.Fatalf("manual evidence review resolution changed approval state: %+v err=%v", resolvedReview, err)
+	}
+	resolvedRetry, err := repo.ResolveManualReview(ctx, tenant, caseID, review, "principal:approver-1")
+	if err != nil || resolvedRetry.Version != resolvedReview.Version {
+		t.Fatalf("manual evidence review resolution was not idempotent: %+v err=%v", resolvedRetry, err)
+	}
 	if _, err := repo.Decide(ctx, tenant, caseID, cases.StepDecision{DecisionID: testUUID(t), StepKey: "risk-review", Actor: "principal:reviewer-1", Outcome: "approve"}); !errors.Is(err, cases.ErrConflict) {
 		t.Fatalf("submitter self-approval should be refused: %v", err)
 	}
@@ -207,7 +225,7 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 	}
 	decision := cases.StepDecision{DecisionID: testUUID(t), StepKey: "risk-review", Actor: "principal:approver-1", Outcome: "approve", Reason: "Verified against submitted policy."}
 	afterFirst, err := repo.Decide(ctx, tenant, caseID, decision)
-	if err != nil || afterFirst.Status != cases.Submitted || afterFirst.Version != 4 {
+	if err != nil || afterFirst.Status != cases.Submitted || afterFirst.Version != 6 {
 		t.Fatalf("first step decision failed: case=%+v err=%v", afterFirst, err)
 	}
 	decisionRetry, err := repo.Decide(ctx, tenant, caseID, decision)
@@ -234,15 +252,43 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 	}
 	secondDecision := cases.StepDecision{DecisionID: testUUID(t), StepKey: "procurement-review", Actor: "principal:approver-2", Outcome: "approve"}
 	approved, err := repo.Decide(ctx, tenant, caseID, secondDecision)
-	if err != nil || approved.Status != cases.Approved || approved.Version != 5 {
+	if err != nil || approved.Status != cases.Approved || approved.Version != 7 {
 		t.Fatalf("delegated final approval failed: %+v err=%v", approved, err)
 	}
 	if expiryRetry, err := repo.Expire(ctx, tenant, caseID); err != nil || expiryRetry.Status != cases.Approved || expiryRetry.Version != approved.Version {
 		t.Fatalf("late expiry attempt changed a completed approval: %+v err=%v", expiryRetry, err)
 	}
 	view, err = repo.Get(ctx, tenant, caseID)
-	if err != nil || view.Case.Status != cases.Approved || len(view.Events) != 5 {
+	if err != nil || view.Case.Status != cases.Approved || len(view.Events) != 7 {
 		t.Fatalf("approved history mismatch: case=%+v events=%d err=%v", view.Case, len(view.Events), err)
+	}
+
+	cancelCase, err := repo.Create(ctx, tenant, testUUID(t), supplierID, policyID, 1, "principal:buyer-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelToken, err := intake.NewSecret(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelInviteID := testUUID(t)
+	if err := intakeApp.IssueInvitation(ctx, tenant, cancelInviteID, cancelCase.CaseID, supplierID, cancelToken, recipient, "principal:buyer-2", now, now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	cancelID, cancelReason := testUUID(t), "supplier withdrew the request"
+	canceled, err := repo.Cancel(ctx, tenant, cancelCase.CaseID, cancelID, cancelReason, "principal:buyer-2")
+	if err != nil || canceled.Status != cases.Canceled || canceled.Version != 2 {
+		t.Fatalf("case cancellation failed: %+v err=%v", canceled, err)
+	}
+	if replay, err := repo.Cancel(ctx, tenant, cancelCase.CaseID, cancelID, cancelReason, "principal:buyer-2"); err != nil || replay.Version != canceled.Version {
+		t.Fatalf("cancellation retry was not idempotent: %+v err=%v", replay, err)
+	}
+	if _, _, err := intakeApp.AcceptInvitation(ctx, tenant, cancelToken, testUUID(t), now, nil); !errors.Is(err, intake.ErrInvalidInvitation) {
+		t.Fatalf("canceled case accepted its invitation: %v", err)
+	}
+	var invitationState string
+	if err := adminDB.QueryRowContext(ctx, `SELECT invitation_state FROM keel_meta.supplier_invitations WHERE tenant_id=$1 AND invitation_id=$2`, string(tenant), cancelInviteID).Scan(&invitationState); err != nil || invitationState != "revoked" {
+		t.Fatalf("cancellation did not revoke pending invitation: state=%s err=%v", invitationState, err)
 	}
 
 	var eventCount, intentCount int
@@ -254,7 +300,7 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if eventCount != 5 || intentCount != eventCount {
+	if eventCount != 7 || intentCount != eventCount {
 		t.Fatalf("case events=%d durable intents=%d, expected one intent per committed event", eventCount, intentCount)
 	}
 	if err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
@@ -264,7 +310,7 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_events
 			(tenant_id,case_id,aggregate_version,event_type,actor_ref,occurred_at,event_data,previous_hash,event_hash)
-			VALUES ($1,$2,6,'supplier.case.approval-decided','principal:reviewer-1','2026-10-04 12:00:00+00','{}'::bytea,$3,$4)`,
+				VALUES ($1,$2,8,'supplier.case.approval-decided','principal:reviewer-1','2026-10-04 12:00:00+00','{}'::bytea,$3,$4)`,
 			string(tenant), caseID, previous, make([]byte, 32))
 		return err
 	}); err == nil {
@@ -277,7 +323,7 @@ func TestPostgreSQLSupplierCaseEvidenceAndWorkflowIntentLifecycle(t *testing.T) 
 		t.Fatal("app role changed case state without an authorized event transition")
 	}
 	view, err = repo.Get(ctx, tenant, caseID)
-	if err != nil || view.Case.Status != cases.Approved || view.Case.Version != 5 {
+	if err != nil || view.Case.Status != cases.Approved || view.Case.Version != 7 {
 		t.Fatalf("failed snapshot mutation persisted: case=%+v err=%v", view.Case, err)
 	}
 	if err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
