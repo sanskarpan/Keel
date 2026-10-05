@@ -174,10 +174,12 @@ func (l *Limiter) Allow(ctx context.Context, request Request) (Decision, error) 
 
 func (l *Limiter) keys(tenant, route, request string) (string, string) {
 	scope := strings.Join([]string{l.region, tenant, route}, "\x00")
-	bucket := l.mac("keel.ratelimit.bucket.v1\x00", scope)
+	// Redis Cluster requires every key touched by one Lua script to share a
+	// hash slot. The opaque HMAC scope is used as the hash tag for both keys.
+	scopeTag := l.mac("keel.ratelimit.scope.v1\x00", scope)
 	dedup := l.mac("keel.ratelimit.request.v1\x00", scope+"\x00"+request)
 	prefix := "keel:rl:v1:" + l.region + ":" + l.keyID + ":"
-	return prefix + "b:" + bucket, prefix + "r:" + dedup
+	return prefix + "{" + scopeTag + "}:b", prefix + "{" + scopeTag + "}:r:" + dedup
 }
 
 func (l *Limiter) fingerprint(request Request) (string, error) {
