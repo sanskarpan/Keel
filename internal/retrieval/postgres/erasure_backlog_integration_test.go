@@ -216,6 +216,31 @@ func TestPostgreSQLErasureBacklogClassifiesExpiredLease(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLErasureBacklogAgeExceedsTimeDurationRange(t *testing.T) {
+	appDB, indexerDB := retrievalTestDBs(t)
+	app, err := New(appDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(indexerDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant := tenancy.TenantID(uuid.NewString())
+	visibility := "erasure-ancient-age:" + uuid.NewString()
+	seedBacklogRows(t, app, worker, tenant, visibility, "ancient-age", 1, 400)
+
+	backlog, err := worker.ReadErasureBacklog(context.Background(), tenant, visibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fourHundredYears := float64(400 * 365 * 24 * 60 * 60)
+	if backlog.OldestOutstandingAgeSeconds < fourHundredYears-365*24*60*60 ||
+		backlog.OldestOutstandingAgeSeconds > fourHundredYears+365*24*60*60 {
+		t.Fatalf("400-year-old outstanding job age overflowed or was misreported: %+v", backlog)
+	}
+}
+
 // seedBacklogRows creates an indexed-equivalent source fence and durable job
 // rows in bulk under the same forced-RLS tenant/cohort roles used in runtime.
 func seedBacklogRows(t *testing.T, app, worker *Repository, tenant tenancy.TenantID, visibility, seed string, count, ageYears int) {
