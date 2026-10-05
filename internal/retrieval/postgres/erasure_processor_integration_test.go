@@ -242,7 +242,7 @@ func TestPostgreSQLErasureActionProcessorCancelsWhenLeaseRenewalStalls(t *testin
 
 	// Hold the job row so lease renewal cannot complete. The handler must receive
 	// cancellation within its short renewal deadline, well before lease expiry.
-	tx, err := appDB.BeginTx(ctx, nil)
+	tx, err := indexerDB.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
