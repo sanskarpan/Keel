@@ -121,6 +121,75 @@ func TestPostgreSQLErasureActionProcessorOrdersReceiptsAndCompletes(t *testing.T
 	}
 }
 
+func TestPostgreSQLErasureActionProcessorRenewsLeaseDuringProviderAction(t *testing.T) {
+	appDB, indexerDB := retrievalTestDBs(t)
+	app, err := New(appDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(indexerDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tenant := tenancy.TenantID(uuid.NewString())
+	visibility := "erasure-lease-heartbeat:" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	hasher, err := index.NewHMACTermHasher(string(tenant), "erasure-lease-heartbeat-v1", []byte(strings.Repeat("h", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := preparedChunk(t, hasher, uuid.New(), "source held while the external handler is running")
+	createReadyBuild(t, worker, tenant, visibility, buildSpec(uuid.New(), hasher.KeyID(), 1), chunk)
+	request, err := app.WithdrawSource(ctx, tenant, visibility, uuid.New(), chunk.DocumentVersionID, uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	var order []string
+	executors := testErasureExecutors(&order)
+	executors[ErasureActionLegalHoldCheck] = testErasureExecutor(func(ctx context.Context, _ ErasureJob, _, _ string) (ErasureActionExecution, error) {
+		close(entered)
+		select {
+		case <-release:
+			return completeTestErasureAction(ErasureActionLegalHoldCheck), nil
+		case <-ctx.Done():
+			return ErasureActionExecution{}, ctx.Err()
+		}
+	})
+	processor, err := NewErasureActionProcessor(worker, "eraser-heartbeat", MinErasureLease, time.Second, executors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		job, claimed, err := processor.ProcessOne(ctx, tenant, visibility)
+		if err == nil && (!claimed || job.ID != request.ID || job.State != "complete") {
+			err = errors.New("processor did not complete the leased job")
+		}
+		finished <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("provider action did not start")
+	}
+	// Cross the original one-second lease boundary. A competing worker must not
+	// reclaim the job while the first provider action is still active.
+	time.Sleep(1300 * time.Millisecond)
+	if _, claimed, err := worker.ClaimErasureJob(ctx, tenant, visibility, "eraser-competitor", MinErasureLease); err != nil || claimed {
+		t.Fatalf("competing worker reclaimed a live renewed lease: claimed=%t err=%v", claimed, err)
+	}
+	close(release)
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("processor failed after provider completion: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("processor did not finish after provider release")
+	}
+}
+
 func TestPostgreSQLErasureActionProcessorResumesAfterPartialSuccess(t *testing.T) {
 	appDB, indexerDB := retrievalTestDBs(t)
 	app, err := New(appDB)
