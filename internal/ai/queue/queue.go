@@ -34,20 +34,15 @@ var (
 const MaxLease = 30 * time.Second
 
 type Repository struct {
-	budget        *budget.Repository
-	outcomeBudget *budget.Repository
-	workerDB      *sql.DB
+	budget   *budget.Repository
+	workerDB *sql.DB
 }
 
 func NewRepository(budgets *budget.Repository, workerDB *sql.DB) (*Repository, error) {
 	if budgets == nil || workerDB == nil {
 		return nil, errors.New("AI queue requires budget admission and a separate worker database")
 	}
-	outcomeBudget, err := budgets.WithDatabase(workerDB)
-	if err != nil {
-		return nil, err
-	}
-	return &Repository{budget: budgets, outcomeBudget: outcomeBudget, workerDB: workerDB}, nil
+	return &Repository{budget: budgets, workerDB: workerDB}, nil
 }
 
 type JobSpec struct {
@@ -223,9 +218,9 @@ func (r *Repository) RecordUnknown(ctx context.Context, lease Lease, source stri
 	if !validLease(lease) || !queueOutcomeSource.MatchString(source) {
 		return ErrLeaseLost
 	}
-	return mapQueueError(r.outcomeBudget.MarkUnknownWith(ctx, lease.Tenant, lease.InferenceID, source, func(tx *sql.Tx) error {
+	return mapQueueError(tenancy.WithTenantTx(ctx, r.workerDB, lease.Tenant, nil, func(tx *sql.Tx) error {
 		var ok bool
-		return tx.QueryRowContext(ctx, `SELECT keel_meta.record_ai_job_outcome($1,$2,$3,$4,'unknown',$5)`,
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.apply_ai_job_outcome($1,$2,$3,$4,'unknown',0,$5)`,
 			string(lease.Tenant), lease.InferenceID, lease.WorkerID, lease.Epoch, source).Scan(&ok)
 	}))
 }
@@ -236,10 +231,10 @@ func (r *Repository) SettleConfirmed(ctx context.Context, lease Lease, actualMic
 	if !validLease(lease) || !queueOutcomeSource.MatchString(source) || actualMicroUSD <= 0 {
 		return ErrQueueConflict
 	}
-	return mapQueueError(r.outcomeBudget.SettleConfirmedWith(ctx, lease.Tenant, lease.InferenceID, actualMicroUSD, source, func(tx *sql.Tx) error {
+	return mapQueueError(tenancy.WithTenantTx(ctx, r.workerDB, lease.Tenant, nil, func(tx *sql.Tx) error {
 		var ok bool
-		return tx.QueryRowContext(ctx, `SELECT keel_meta.record_ai_job_outcome($1,$2,$3,$4,'confirmed',$5)`,
-			string(lease.Tenant), lease.InferenceID, lease.WorkerID, lease.Epoch, source).Scan(&ok)
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.apply_ai_job_outcome($1,$2,$3,$4,'confirmed',$5,$6)`,
+			string(lease.Tenant), lease.InferenceID, lease.WorkerID, lease.Epoch, actualMicroUSD, source).Scan(&ok)
 	}))
 }
 
@@ -248,9 +243,9 @@ func (r *Repository) SettleNoCharge(ctx context.Context, lease Lease, source str
 	if !validLease(lease) || !queueOutcomeSource.MatchString(source) {
 		return ErrQueueConflict
 	}
-	return mapQueueError(r.outcomeBudget.SettleNoChargeWith(ctx, lease.Tenant, lease.InferenceID, source, func(tx *sql.Tx) error {
+	return mapQueueError(tenancy.WithTenantTx(ctx, r.workerDB, lease.Tenant, nil, func(tx *sql.Tx) error {
 		var ok bool
-		return tx.QueryRowContext(ctx, `SELECT keel_meta.record_ai_job_outcome($1,$2,$3,$4,'no_charge',$5)`,
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.apply_ai_job_outcome($1,$2,$3,$4,'no_charge',0,$5)`,
 			string(lease.Tenant), lease.InferenceID, lease.WorkerID, lease.Epoch, source).Scan(&ok)
 	}))
 }
@@ -265,9 +260,9 @@ func (r *Repository) ReconcileUnknown(ctx context.Context, tenant tenancy.Tenant
 	if actual != nil && *actual > 0 {
 		kind = "confirmed"
 	}
-	return mapQueueError(r.outcomeBudget.ReconcileUnknownWith(ctx, tenant, inferenceID, actor, reason, actual, source, func(tx *sql.Tx) error {
+	return mapQueueError(r.budget.AuthorizeQueueReconciliation(ctx, tenant, inferenceID, actor, reason, actual, source, func(tx *sql.Tx, amount int64) error {
 		var ok bool
-		return tx.QueryRowContext(ctx, `SELECT keel_meta.resolve_ai_job_outcome($1,$2,$3,$4)`, string(tenant), inferenceID, kind, source).Scan(&ok)
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.reconcile_ai_job_outcome($1,$2,$3,$4,$5,$6,$7)`, string(tenant), inferenceID, kind, amount, source, actor, reason).Scan(&ok)
 	}))
 }
 
@@ -305,7 +300,7 @@ func (r *Repository) ReapExpired(ctx context.Context, tenant tenancy.TenantID, l
 	for _, item := range candidates {
 		source := fmt.Sprintf("lease-expired:%d", item.epoch)
 		newlyExpired := false
-		err := r.outcomeBudget.MarkUnknownWith(ctx, tenant, item.inference, source, func(tx *sql.Tx) error {
+		err := tenancy.WithTenantTx(ctx, r.workerDB, tenant, nil, func(tx *sql.Tx) error {
 			return tx.QueryRowContext(ctx, `SELECT keel_meta.expire_ai_job($1,$2,$3,$4,$5)`, string(tenant), item.inference, item.worker, item.epoch, source).Scan(&newlyExpired)
 		})
 		if errors.Is(err, ErrLeaseLost) || errors.Is(err, budget.ErrBudgetConflict) ||
