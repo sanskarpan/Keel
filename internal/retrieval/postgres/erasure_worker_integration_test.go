@@ -124,6 +124,27 @@ func TestPostgreSQLErasureWorkerLeaseRetryAndPoisonState(t *testing.T) {
 		"no hold adapter", sha256.Sum256([]byte("invalid legal hold decision"))); err == nil {
 		t.Fatal("legal hold check was accepted as not applicable")
 	}
+	for _, action := range []string{ErasureActionLegalHoldCheck, ErasureActionSupplierSourceObject, ErasureActionDerivedIndex, ErasureActionBackupExpiry} {
+		if _, err := worker.RecordErasureActionReceipt(ctx, tenant, visibility, "eraser-a", completionClaim.ID,
+			completionClaim.LeaseEpoch, action, ErasureReceiptNotApplicable, actorID,
+			"provider not configured", sha256.Sum256([]byte("invalid N/A:"+action))); err == nil {
+			t.Fatalf("required action %s was accepted as not applicable by repository", action)
+		}
+		// Bypass the Go method to prove PostgreSQL itself rejects a forged worker
+		// receipt that would otherwise satisfy the immutable manifest guard.
+		directDigest := sha256.Sum256([]byte("direct N/A:" + action))
+		err := withScope(ctx, indexerDB, scope, nil, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.retrieval_erasure_action_receipts
+				(tenant_id,visibility_key,job_id,action_key,lease_owner,lease_epoch,disposition,decision_actor_id,decision_reason,receipt_sha256)
+				VALUES ($1,$2,$3,$4,$5,$6,'not_applicable',$7,'provider not configured',$8)`,
+				string(tenant), visibility, completionClaim.ID, action, "eraser-a", completionClaim.LeaseEpoch,
+				actorID, directDigest[:])
+			return err
+		})
+		if err == nil {
+			t.Fatalf("PostgreSQL accepted direct not-applicable receipt for required action %s", action)
+		}
+	}
 	if _, err := worker.RecordErasureActionReceipt(ctx, tenant, visibility, "eraser-b", completionClaim.ID,
 		completionClaim.LeaseEpoch, ErasureActionLegalHoldCheck, ErasureReceiptComplete, actorID,
 		"", sha256.Sum256([]byte("stale worker"))); err == nil {
@@ -142,7 +163,7 @@ func TestPostgreSQLErasureWorkerLeaseRetryAndPoisonState(t *testing.T) {
 		{ErasureActionDerivedIndex, ErasureReceiptComplete, ""},
 		{ErasureActionCacheRevocation, ErasureReceiptNotApplicable, "synthetic fixture has no content cache"},
 		{ErasureActionQueuedWorkRevocation, ErasureReceiptNotApplicable, "synthetic fixture has no queued retrieval work"},
-		{ErasureActionBackupExpiry, ErasureReceiptNotApplicable, "synthetic fixture has no managed backup adapter"},
+		{ErasureActionBackupExpiry, ErasureReceiptComplete, ""},
 	}
 	for _, action := range actions {
 		digest := sha256.Sum256([]byte("test receipt:" + action.key))
