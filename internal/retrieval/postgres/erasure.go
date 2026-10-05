@@ -56,6 +56,7 @@ type ErasureJob struct {
 	State                 string
 	RequestedAt           string
 	AttemptCount          int
+	FailureCount          int
 	LastErrorCode         sql.NullString
 	AvailableAt           time.Time
 	LeaseOwner            sql.NullString
@@ -194,11 +195,12 @@ func (r *Repository) WithdrawSource(ctx context.Context, tenant tenancy.TenantID
 		if err != nil {
 			return fmt.Errorf("persist source erasure job: %w", err)
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT job_id,requested_by,document_version_id,eligibility_generation,state,requested_at::text,attempt_count,last_error_code,
+		if err := tx.QueryRowContext(ctx, `SELECT job_id,requested_by,document_version_id,eligibility_generation,state,requested_at::text,attempt_count,failure_count,last_error_code,
 			available_at,lease_owner,lease_epoch,lease_until,blocked_at,completed_at
 			FROM keel_meta.retrieval_erasure_jobs WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3`, string(s.tenant), s.visibility, jobID).
-			Scan(&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State, &job.RequestedAt, &job.AttemptCount, &job.LastErrorCode,
-				&job.AvailableAt, &job.LeaseOwner, &job.LeaseEpoch, &job.LeaseUntil, &job.BlockedAt, &job.CompletedAt); err != nil {
+			Scan(&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State, &job.RequestedAt,
+				&job.AttemptCount, &job.FailureCount, &job.LastErrorCode, &job.AvailableAt, &job.LeaseOwner, &job.LeaseEpoch,
+				&job.LeaseUntil, &job.BlockedAt, &job.CompletedAt); err != nil {
 			return fmt.Errorf("read durable source erasure job: %w", err)
 		}
 		if job.RequestedBy != requestedBy || job.DocumentVersionID != documentVersionID || job.EligibilityGeneration != generation {
@@ -220,11 +222,12 @@ func (r *Repository) ErasureJob(ctx context.Context, tenant tenancy.TenantID, vi
 	}
 	var job ErasureJob
 	err = withScope(ctx, r.db, s, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `SELECT job_id,requested_by,document_version_id,eligibility_generation,state,requested_at::text,attempt_count,last_error_code,
+		return tx.QueryRowContext(ctx, `SELECT job_id,requested_by,document_version_id,eligibility_generation,state,requested_at::text,attempt_count,failure_count,last_error_code,
 			available_at,lease_owner,lease_epoch,lease_until,blocked_at,completed_at
 			FROM keel_meta.retrieval_erasure_jobs WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3`, string(s.tenant), s.visibility, jobID).
-			Scan(&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State, &job.RequestedAt, &job.AttemptCount, &job.LastErrorCode,
-				&job.AvailableAt, &job.LeaseOwner, &job.LeaseEpoch, &job.LeaseUntil, &job.BlockedAt, &job.CompletedAt)
+			Scan(&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State, &job.RequestedAt,
+				&job.AttemptCount, &job.FailureCount, &job.LastErrorCode, &job.AvailableAt, &job.LeaseOwner, &job.LeaseEpoch,
+				&job.LeaseUntil, &job.BlockedAt, &job.CompletedAt)
 	})
 	return job, err
 }
