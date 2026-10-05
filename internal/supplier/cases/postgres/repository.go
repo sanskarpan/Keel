@@ -489,6 +489,8 @@ func insertEvent(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, event
 	}
 	var evidenceID any
 	var decisionID any
+	var cancellationID any
+	var manualReviewID any
 	if event.Type == "supplier.case.evidence-added" {
 		var data cases.EvidenceAddedData
 		if err := json.Unmarshal(event.Data, &data); err != nil {
@@ -503,13 +505,245 @@ func insertEvent(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, event
 		}
 		decisionID = data.DecisionID
 	}
+	if event.Type == "supplier.case.canceled" {
+		var data cases.CaseCanceledData
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return cases.ErrInvalidCase
+		}
+		cancellationID = data.CancellationID
+	}
+	if event.Type == "supplier.case.manual-review-requested" || event.Type == "supplier.case.manual-review-resolved" {
+		var data cases.ManualReviewData
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return cases.ErrInvalidCase
+		}
+		manualReviewID = data.ReviewID
+	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_events
-		(tenant_id,case_id,aggregate_version,event_type,actor_ref,occurred_at,event_data,evidence_id,previous_hash,event_hash,decision_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, string(tenant), event.CaseID, event.Version, event.Type, event.Actor, event.OccurredAt, []byte(event.Data), evidenceID, previous, mustDecode(event.Hash), decisionID)
+		(tenant_id,case_id,aggregate_version,event_type,actor_ref,occurred_at,event_data,evidence_id,previous_hash,event_hash,decision_id,cancellation_id,manual_review_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, string(tenant), event.CaseID, event.Version, event.Type, event.Actor, event.OccurredAt, []byte(event.Data), evidenceID, previous, mustDecode(event.Hash), decisionID, cancellationID, manualReviewID)
 	if err != nil {
 		return classify(err)
 	}
 	return nil
+}
+
+// Cancel is a terminal, request-idempotent transition. The database row lock and
+// timestamp arbitration are shared with approval decisions and deadline expiry.
+func (r *Repository) Cancel(ctx context.Context, tenant tenancy.TenantID, caseID, cancellationID, reason, actor string) (cases.Case, error) {
+	if r == nil || r.db == nil {
+		return cases.Case{}, cases.ErrInvalidCase
+	}
+	tenant = tenancy.TenantID(strings.ToLower(string(tenant)))
+	caseID, cancellationID = strings.ToLower(caseID), strings.ToLower(cancellationID)
+	reason, actor = strings.TrimSpace(reason), strings.TrimSpace(actor)
+	var result cases.Case
+	err := tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
+		current, err := lockCase(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		evidence, err := loadEvidence(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		events, err := loadEvents(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		if err := verifyHistory(CaseView{Case: current, Evidence: evidence, Events: events}); err != nil {
+			return err
+		}
+		if current.Status == cases.Canceled {
+			for _, old := range events {
+				if old.Type != "supplier.case.canceled" {
+					continue
+				}
+				var data cases.CaseCanceledData
+				if json.Unmarshal(old.Data, &data) != nil || data.CancellationID != cancellationID || data.Reason != reason || old.Actor != actor {
+					return ErrConflict
+				}
+				result = current
+				return nil
+			}
+			return ErrConflict
+		}
+		now, err := dbNow(ctx, tx)
+		if err != nil {
+			return err
+		}
+		updated, event, err := cases.Cancel(current, cancellationID, reason, actor, now, current.LastEventHash)
+		if err != nil {
+			return err
+		}
+		if err := insertEvent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		if err := updateCase(ctx, tx, tenant, current, updated); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE keel_meta.supplier_invitations SET invitation_state='revoked',
+			revoked_at=COALESCE(revoked_at,$3),updated_at=$3 WHERE tenant_id=$1 AND case_id=$2 AND invitation_state<>'revoked'`, string(tenant), caseID, now); err != nil {
+			return classify(err)
+		}
+		if err := insertIntent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		result = updated
+		return nil
+	})
+	return result, err
+}
+
+// RequestManualReview records an evidence-scoped human review task. It does not
+// change approval status and cannot override scanner/extractor safety controls.
+func (r *Repository) RequestManualReview(ctx context.Context, tenant tenancy.TenantID, caseID string, request cases.ManualReviewData, actor string) (cases.Case, error) {
+	if r == nil || r.db == nil {
+		return cases.Case{}, cases.ErrInvalidCase
+	}
+	tenant = tenancy.TenantID(strings.ToLower(string(tenant)))
+	caseID, request.ReviewID, request.EvidenceID = strings.ToLower(caseID), strings.ToLower(request.ReviewID), strings.ToLower(request.EvidenceID)
+	request.Reason, actor = strings.TrimSpace(request.Reason), strings.TrimSpace(actor)
+	var result cases.Case
+	err := tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
+		current, err := lockCase(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		var digest []byte
+		if err := tx.QueryRowContext(ctx, `SELECT content_sha256 FROM keel_meta.supplier_case_evidence
+			WHERE tenant_id=$1 AND case_id=$2 AND evidence_id=$3`, string(tenant), caseID, request.EvidenceID).Scan(&digest); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		var state, priorReason, priorActor string
+		var priorEvidence string
+		priorErr := tx.QueryRowContext(ctx, `SELECT state,request_reason,requested_by_ref,evidence_id::text
+			FROM keel_meta.supplier_case_manual_reviews WHERE tenant_id=$1 AND case_id=$2 AND review_id=$3`, string(tenant), caseID, request.ReviewID).
+			Scan(&state, &priorReason, &priorActor, &priorEvidence)
+		if priorErr == nil {
+			if priorReason != request.Reason || priorActor != actor || priorEvidence != request.EvidenceID {
+				return ErrConflict
+			}
+			result = current
+			return nil
+		}
+		if !errors.Is(priorErr, sql.ErrNoRows) {
+			return priorErr
+		}
+		evidence, err := loadEvidence(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		events, err := loadEvents(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		if err := verifyHistory(CaseView{Case: current, Evidence: evidence, Events: events}); err != nil {
+			return err
+		}
+		now, err := dbNow(ctx, tx)
+		if err != nil {
+			return err
+		}
+		updated, event, err := cases.RequestManualReview(current, request.ReviewID, request.EvidenceID, request.Reason, actor, now, current.LastEventHash)
+		if err != nil {
+			return err
+		}
+		if err := insertEvent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		if err := updateCase(ctx, tx, tenant, current, updated); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_manual_reviews
+			(tenant_id,case_id,review_id,evidence_id,evidence_digest,requested_by_ref,request_reason,state,requested_event_version)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8)`, string(tenant), caseID, request.ReviewID, request.EvidenceID, digest, actor, request.Reason, updated.Version); err != nil {
+			return classify(err)
+		}
+		if err := insertIntent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		result = updated
+		return nil
+	})
+	return result, err
+}
+
+// ResolveManualReview atomically appends the resolution event and binds the review
+// row to it. Replays of the same resolution return the committed case snapshot.
+func (r *Repository) ResolveManualReview(ctx context.Context, tenant tenancy.TenantID, caseID string, resolution cases.ManualReviewData, actor string) (cases.Case, error) {
+	if r == nil || r.db == nil {
+		return cases.Case{}, cases.ErrInvalidCase
+	}
+	tenant = tenancy.TenantID(strings.ToLower(string(tenant)))
+	caseID, resolution.ReviewID, resolution.EvidenceID = strings.ToLower(caseID), strings.ToLower(resolution.ReviewID), strings.ToLower(resolution.EvidenceID)
+	resolution.Outcome, resolution.Reason, actor = strings.ToLower(strings.TrimSpace(resolution.Outcome)), strings.TrimSpace(resolution.Reason), strings.TrimSpace(actor)
+	var result cases.Case
+	err := tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
+		current, err := lockCase(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		var state, evidenceID, priorOutcome, priorReason, priorActor string
+		lookupErr := tx.QueryRowContext(ctx, `SELECT state,evidence_id::text,COALESCE(state,''),COALESCE(resolution_reason,''),COALESCE(resolved_by_ref,'')
+			FROM keel_meta.supplier_case_manual_reviews WHERE tenant_id=$1 AND case_id=$2 AND review_id=$3 FOR UPDATE`, string(tenant), caseID, resolution.ReviewID).
+			Scan(&state, &evidenceID, &priorOutcome, &priorReason, &priorActor)
+		if errors.Is(lookupErr, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if lookupErr != nil {
+			return lookupErr
+		}
+		if evidenceID != resolution.EvidenceID {
+			return ErrConflict
+		}
+		if state != "open" {
+			if state == resolution.Outcome && priorReason == resolution.Reason && priorActor == actor {
+				result = current
+				return nil
+			}
+			return ErrConflict
+		}
+		evidence, err := loadEvidence(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		events, err := loadEvents(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		if err := verifyHistory(CaseView{Case: current, Evidence: evidence, Events: events}); err != nil {
+			return err
+		}
+		now, err := dbNow(ctx, tx)
+		if err != nil {
+			return err
+		}
+		updated, event, err := cases.ResolveManualReview(current, resolution.ReviewID, resolution.EvidenceID, resolution.Outcome, resolution.Reason, actor, now, current.LastEventHash)
+		if err != nil {
+			return err
+		}
+		if err := insertEvent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		if err := updateCase(ctx, tx, tenant, current, updated); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE keel_meta.supplier_case_manual_reviews SET state=$4,resolved_event_version=$5,
+			resolved_by_ref=$6,resolution_reason=$7,resolved_at=$8 WHERE tenant_id=$1 AND case_id=$2 AND review_id=$3 AND state='open'`,
+			string(tenant), caseID, resolution.ReviewID, resolution.Outcome, updated.Version, actor, resolution.Reason, now); err != nil {
+			return classify(err)
+		}
+		if err := insertIntent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		result = updated
+		return nil
+	})
+	return result, err
 }
 
 func insertApprovalPlan(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, current cases.Case, policy cases.Policy) error {
@@ -768,6 +1002,7 @@ func verifyHistory(view CaseView) error {
 	var previous string
 	orderedEvidence := []cases.Evidence{}
 	versions := make(map[string]uint32)
+	manualReviews := make(map[string]cases.ManualReviewData)
 	status := cases.Collecting
 	for i, event := range view.Events {
 		if event.Version != uint64(i+1) || event.PrevHash != previous || !event.Verify() {
@@ -846,6 +1081,40 @@ func verifyHistory(view CaseView) error {
 				return cases.ErrInvalidCase
 			}
 			status = cases.Expired
+		} else if event.Type == "supplier.case.canceled" {
+			if status != cases.Submitted && status != cases.Collecting {
+				return cases.ErrInvalidCase
+			}
+			var data cases.CaseCanceledData
+			if json.Unmarshal(event.Data, &data) != nil || data.CancellationID == "" || data.Reason == "" || !strings.HasPrefix(event.Actor, "principal:") {
+				return cases.ErrInvalidCase
+			}
+			status = cases.Canceled
+		} else if event.Type == "supplier.case.manual-review-requested" {
+			if status != cases.Submitted {
+				return cases.ErrInvalidCase
+			}
+			var data cases.ManualReviewData
+			if json.Unmarshal(event.Data, &data) != nil || data.ReviewID == "" || data.EvidenceID == "" || data.Reason == "" || !strings.HasPrefix(event.Actor, "principal:") {
+				return cases.ErrInvalidCase
+			}
+			if _, exists := manualReviews[data.ReviewID]; exists {
+				return cases.ErrInvalidCase
+			}
+			manualReviews[data.ReviewID] = data
+		} else if event.Type == "supplier.case.manual-review-resolved" {
+			if status != cases.Submitted {
+				return cases.ErrInvalidCase
+			}
+			var data cases.ManualReviewData
+			if json.Unmarshal(event.Data, &data) != nil || data.Outcome != "confirmed" && data.Outcome != "replacement-required" || data.Reason == "" || !strings.HasPrefix(event.Actor, "principal:") {
+				return cases.ErrInvalidCase
+			}
+			prior, exists := manualReviews[data.ReviewID]
+			if !exists || prior.EvidenceID != data.EvidenceID {
+				return cases.ErrInvalidCase
+			}
+			manualReviews[data.ReviewID] = data
 		} else {
 			return fmt.Errorf("%w: unsupported event type", cases.ErrInvalidCase)
 		}
@@ -885,6 +1154,14 @@ func verifyHistory(view CaseView) error {
 	case "supplier.case.expired":
 		if view.Case.Status != cases.Expired {
 			return cases.ErrInvalidCase
+		}
+	case "supplier.case.canceled":
+		if view.Case.Status != cases.Canceled {
+			return fmt.Errorf("%w: canceled event tail has a different snapshot state", cases.ErrInvalidCase)
+		}
+	case "supplier.case.manual-review-requested", "supplier.case.manual-review-resolved":
+		if view.Case.Status != cases.Submitted {
+			return fmt.Errorf("%w: manual review event requires a submitted case", cases.ErrInvalidCase)
 		}
 	default:
 		return fmt.Errorf("%w: unsupported snapshot state", cases.ErrInvalidCase)
