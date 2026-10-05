@@ -105,6 +105,37 @@ jobs:
         env:
           KEEL_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
         run: GOTOOLCHAIN=local go run ./cmd/keel migrate
+      - name: Start isolated pinned Temporal development server
+        run: |
+          docker run --rm --network host --env PGPASSWORD=keel-local-only --entrypoint psql \
+            pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 \
+            -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE temporal LOGIN PASSWORD 'temporal-local-only';" \
+            -c "CREATE DATABASE temporal OWNER temporal;" \
+            -c "CREATE DATABASE temporal_visibility OWNER temporal;"
+          postgres_container=$(docker ps --quiet --filter 'ancestor=pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11' | head -n 1)
+          test -n "$postgres_container"
+          service_network=$(docker inspect --format '{{range $name, $settings := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$postgres_container" | head -n 1)
+          test -n "$service_network"
+          docker run -d --name keel-contract-temporal --network "$service_network" --network-alias temporal \
+            --publish 127.0.0.1:7233:7233 \
+            -e DB=postgres12 -e DB_PORT=5432 -e DBNAME=temporal \
+            -e POSTGRES_USER=temporal -e POSTGRES_PWD=temporal-local-only \
+            -e POSTGRES_SEEDS=postgres -e VISIBILITY_DBNAME=temporal_visibility \
+            -e SKIP_DB_CREATE=true -e TEMPORAL_ADDRESS=temporal:7233 \
+            -e TEMPORAL_CLI_ADDRESS=temporal:7233 \
+            -e NO_PROXY=localhost,127.0.0.1,::1,postgres,temporal -e no_proxy=localhost,127.0.0.1,::1,postgres,temporal \
+            -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \
+            temporalio/auto-setup:1.29.7@sha256:f14912b699cf73015ad5c4fc18d522d4b014db90e794039214dfb7c022c2644f
+          for attempt in $(seq 1 120); do
+            if docker exec keel-contract-temporal temporal operator cluster health --address temporal:7233; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' keel-contract-temporal
+          docker logs --tail 100 keel-contract-temporal
+          exit 1
       - name: Validate contracts, tests, and static analysis
         env:
           KEEL_TEST_DATABASE_URL: postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable
@@ -117,6 +148,7 @@ jobs:
           KEEL_TEST_KAFKA_TOPIC: keel.test.orders.v1
           KEEL_TEST_AGENT_PASSWORD: keel-agent-local-only
           KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_TEMPORAL_ADDRESS: 127.0.0.1:7233
         run: make check
       - name: Race-check packages
         env:
@@ -130,6 +162,10 @@ jobs:
           KEEL_TEST_KAFKA_TOPIC: keel.test.orders.v1
           KEEL_TEST_AGENT_PASSWORD: keel-agent-local-only
           KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_TEMPORAL_ADDRESS: 127.0.0.1:7233
         run: GOTOOLCHAIN=local go test -race ./...
       - name: Build all packages
         run: GOTOOLCHAIN=local go build ./...
+      - name: Stop isolated Temporal test server
+        if: always()
+        run: docker rm --force keel-contract-temporal || true
