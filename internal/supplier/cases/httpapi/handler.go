@@ -46,6 +46,9 @@ type Repository interface {
 	AttachEvidence(context.Context, tenancy.TenantID, string, string, string, string, string, string) (cases.Case, error)
 	Submit(context.Context, tenancy.TenantID, string, string) (cases.Case, error)
 	Decide(context.Context, tenancy.TenantID, string, cases.StepDecision) (cases.Case, error)
+	Cancel(context.Context, tenancy.TenantID, string, string, string, string) (cases.Case, error)
+	RequestManualReview(context.Context, tenancy.TenantID, string, cases.ManualReviewData, string) (cases.Case, error)
+	ResolveManualReview(context.Context, tenancy.TenantID, string, cases.ManualReviewData, string) (cases.Case, error)
 	Expire(context.Context, tenancy.TenantID, string) (cases.Case, error)
 	Get(context.Context, tenancy.TenantID, string) (postgres.CaseView, error)
 }
@@ -72,6 +75,9 @@ func New(repo Repository, principals PrincipalResolver, authz Authorizer, clock 
 	h.mux.HandleFunc("POST /v1/supplier-cases/{case_id}/evidence", h.attachEvidence)
 	h.mux.HandleFunc("POST /v1/supplier-cases/{case_id}/submit", h.submitCase)
 	h.mux.HandleFunc("POST /v1/supplier-cases/{case_id}/decisions", h.decideCase)
+	h.mux.HandleFunc("POST /v1/supplier-cases/{case_id}/cancel", h.cancelCase)
+	h.mux.HandleFunc("POST /v1/supplier-cases/{case_id}/manual-reviews", h.requestManualReview)
+	h.mux.HandleFunc("POST /v1/supplier-cases/{case_id}/manual-reviews/{review_id}/resolution", h.resolveManualReview)
 	return h, nil
 }
 
@@ -234,6 +240,90 @@ func (h *Handler) decideCase(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, caseResponse{CaseID: result.CaseID, SupplierID: result.SupplierID, Status: result.Status,
 		Version: result.Version, EvidenceEpoch: result.EvidenceEpoch, EvidenceDigest: result.EvidenceDigest,
 		PolicyID: result.PolicyID, PolicyVersion: result.PolicyVersion, DeadlineAt: result.DeadlineAt, UpdatedAt: result.UpdatedAt})
+}
+
+type cancelRequest struct {
+	CancellationID string `json:"cancellation_id"`
+	Reason         string `json:"reason"`
+}
+
+func (h *Handler) cancelCase(w http.ResponseWriter, r *http.Request) {
+	principal, caseID, ok := h.casePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if !h.authz.CanManageSupplierCase(r.Context(), principal, caseID) {
+		writeProblem(w, 404, "resource_not_found")
+		return
+	}
+	var input cancelRequest
+	if decode(w, r, &input) != nil || !uuid.MatchString(input.CancellationID) || len(input.Reason) == 0 || len(input.Reason) > 500 {
+		writeProblem(w, 400, "invalid_request")
+		return
+	}
+	result, err := h.repo.Cancel(r.Context(), principal.TenantID, caseID, input.CancellationID, input.Reason, principal.ActorRef)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, 200, caseResponse{CaseID: result.CaseID, SupplierID: result.SupplierID, Status: result.Status, Version: result.Version, PolicyID: result.PolicyID, PolicyVersion: result.PolicyVersion, DeadlineAt: result.DeadlineAt, UpdatedAt: result.UpdatedAt})
+}
+
+type manualReviewRequest struct {
+	ReviewID   string `json:"review_id"`
+	EvidenceID string `json:"evidence_id"`
+	Reason     string `json:"reason"`
+}
+
+func (h *Handler) requestManualReview(w http.ResponseWriter, r *http.Request) {
+	principal, caseID, ok := h.casePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if !h.authz.CanDecideSupplierCase(r.Context(), principal, caseID) {
+		writeProblem(w, 404, "resource_not_found")
+		return
+	}
+	var input manualReviewRequest
+	if decode(w, r, &input) != nil || !uuid.MatchString(input.ReviewID) || !uuid.MatchString(input.EvidenceID) || len(input.Reason) == 0 || len(input.Reason) > 500 {
+		writeProblem(w, 400, "invalid_request")
+		return
+	}
+	result, err := h.repo.RequestManualReview(r.Context(), principal.TenantID, caseID, cases.ManualReviewData{ReviewID: input.ReviewID, EvidenceID: input.EvidenceID, Reason: input.Reason}, principal.ActorRef)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, 200, caseResponse{CaseID: result.CaseID, SupplierID: result.SupplierID, Status: result.Status, Version: result.Version, DeadlineAt: result.DeadlineAt, UpdatedAt: result.UpdatedAt})
+}
+
+type manualReviewResolutionRequest struct {
+	Outcome    string `json:"outcome"`
+	Reason     string `json:"reason"`
+	EvidenceID string `json:"evidence_id"`
+}
+
+func (h *Handler) resolveManualReview(w http.ResponseWriter, r *http.Request) {
+	principal, caseID, ok := h.casePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if !h.authz.CanDecideSupplierCase(r.Context(), principal, caseID) {
+		writeProblem(w, 404, "resource_not_found")
+		return
+	}
+	reviewID := r.PathValue("review_id")
+	var input manualReviewResolutionRequest
+	if !uuid.MatchString(reviewID) || decode(w, r, &input) != nil || !uuid.MatchString(input.EvidenceID) || len(input.Reason) == 0 || len(input.Reason) > 500 || (input.Outcome != "confirmed" && input.Outcome != "replacement-required") {
+		writeProblem(w, 400, "invalid_request")
+		return
+	}
+	result, err := h.repo.ResolveManualReview(r.Context(), principal.TenantID, caseID, cases.ManualReviewData{ReviewID: reviewID, EvidenceID: input.EvidenceID, Outcome: input.Outcome, Reason: input.Reason}, principal.ActorRef)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, 200, caseResponse{CaseID: result.CaseID, SupplierID: result.SupplierID, Status: result.Status, Version: result.Version, DeadlineAt: result.DeadlineAt, UpdatedAt: result.UpdatedAt})
 }
 
 func (h *Handler) getCase(w http.ResponseWriter, r *http.Request) {
