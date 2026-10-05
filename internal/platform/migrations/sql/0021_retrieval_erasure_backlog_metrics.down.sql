@@ -1,1 +1,0 @@
-DROP INDEX keel_meta.retrieval_erasure_jobs_backlog_idx;
