@@ -102,8 +102,8 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 			PeriodStart: periodStart, PeriodEnd: periodEnd, PrincipalBinding: "principal:" + principal, RequestDigest: hex.EncodeToString(make([]byte, 32)), Quote: quote},
 			ProviderID: provider, ModelID: model, MaxOutputTokens: 64}
 	}
-	firstSpec := createAdmission("principal:member-a")
-	secondSpec := createAdmission("principal:member-a")
+	firstSpec := createAdmission("member-a")
+	secondSpec := createAdmission("member-a")
 	if result, err := repo.Enqueue(ctx, firstSpec); err != nil || result.Replayed {
 		t.Fatalf("enqueue first job result=%+v err=%v", result, err)
 	}
@@ -142,7 +142,7 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if result, err := repo.Enqueue(ctx, secondSpec); err != nil || result.Replayed {
 		t.Fatalf("enqueue second job result=%+v err=%v", result, err)
 	}
-	other := createAdmission("principal:member-b")
+	other := createAdmission("member-b")
 	if _, err := repo.Enqueue(ctx, other); err != nil {
 		t.Fatal(err)
 	}
