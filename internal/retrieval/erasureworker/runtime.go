@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,9 +17,10 @@ import (
 )
 
 const (
-	MinPollInterval = 100 * time.Millisecond
-	MaxPollInterval = time.Minute
-	MaxScopes       = 1000
+	MinPollInterval     = time.Second
+	MaxPollInterval     = 30 * time.Second
+	MaxIdlePollInterval = time.Minute
+	MaxScopes           = 100
 )
 
 // Scope must be created from trusted server-side authorization state. Do not
@@ -39,6 +41,9 @@ type Processor interface {
 type Observation struct {
 	ScopeCount int
 	Claimed    int
+	Completed  int
+	Blocked    int
+	Pending    int
 	Errors     int
 }
 
@@ -62,8 +67,8 @@ type Runtime struct {
 // New validates and copies a bounded set of trusted scopes. The caller must
 // supply scopes already authorized for this worker identity.
 func New(processor Processor, scopes []Scope, pollInterval time.Duration, observer Observer, onError ErrorHandler) (*Runtime, error) {
-	if processor == nil {
-		return nil, errors.New("erasure action processor is required")
+	if processor == nil || observer == nil || onError == nil {
+		return nil, errors.New("erasure action processor, observer and error handler are required")
 	}
 	if len(scopes) == 0 || len(scopes) > MaxScopes {
 		return nil, fmt.Errorf("erasure worker requires between 1 and %d authorized scopes", MaxScopes)
@@ -108,9 +113,17 @@ func (r *Runtime) PollOnce(ctx context.Context) (Observation, error) {
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		_, claimed, err := r.processor.ProcessOne(ctx, scope.Tenant, scope.VisibilityKey)
+		job, claimed, err := r.processor.ProcessOne(ctx, scope.Tenant, scope.VisibilityKey)
 		if claimed {
 			observation.Claimed++
+			switch job.State {
+			case "complete":
+				observation.Completed++
+			case "blocked":
+				observation.Blocked++
+			case "cleanup_pending", "fenced":
+				observation.Pending++
+			}
 		}
 		if err != nil {
 			observation.Errors++
@@ -123,13 +136,14 @@ func (r *Runtime) PollOnce(ctx context.Context) (Observation, error) {
 	return observation, errors.Join(failures...)
 }
 
-// Run polls until cancellation. Each round is bounded and followed by the
-// configured interval, including after errors or active work, so one backlog
-// cannot create a hot loop that monopolizes CPU or the database.
+// Run polls until cancellation. Each round is bounded; empty/error-only rounds
+// use exponential idle backoff with jitter to limit database load and avoid
+// synchronized replicas. Active work returns to the configured poll interval.
 func (r *Runtime) Run(ctx context.Context) error {
 	if ctx == nil || r == nil || r.processor == nil {
 		return errors.New("erasure worker runtime and context are required")
 	}
+	idleInterval := r.interval
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -138,13 +152,25 @@ func (r *Runtime) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
-		if pollErr != nil && r.onError != nil {
+		if pollErr != nil {
 			r.onError(pollErr)
 		}
-		if r.observer != nil {
-			r.observer.ObserveErasurePoll(observation)
+		r.observer.ObserveErasurePoll(observation)
+		delay := r.interval
+		if observation.Claimed == 0 {
+			delay = idleInterval
+			idleInterval *= 2
+			if idleInterval > MaxIdlePollInterval {
+				idleInterval = MaxIdlePollInterval
+			}
+		} else {
+			idleInterval = r.interval
 		}
-		timer := time.NewTimer(r.interval)
+		jitter := delay / 5
+		if jitter > 0 {
+			delay += time.Duration(rand.Int64N(int64(jitter)))
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
