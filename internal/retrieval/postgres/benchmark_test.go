@@ -72,9 +72,9 @@ func BenchmarkPostgreSQLSearchScoresTenantSkew(b *testing.B) {
 				b.Fatalf("rare-term reference query failed: candidates=%+v err=%v", rares.Candidates, err)
 			}
 			b.Logf("server=%s tenant_chunks=%d cohort_count=1 common_postings=%d rare_recall@5=1/1 rare_query_terms=1 rare_top_k=5 common_query_terms=1 common_top_k=10 posting_budget=%d", retrievalServerVersion(b, appDB), size, size, size)
+			durations := make([]time.Duration, 0, b.N)
 			b.ReportAllocs()
 			b.ResetTimer()
-			durations := make([]time.Duration, 0, b.N)
 			for i := 0; i < b.N; i++ {
 				started := time.Now()
 				result, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID(), []index.TermID{common}, 10, size)
@@ -138,6 +138,16 @@ func TestPostgreSQLLexicalPlanUsesPostingTermIdentity(t *testing.T) {
 	term := hasher.ID("marker00000")
 	var plan []byte
 	err = withScope(context.Background(), appDB, scope{tenant: tenant, visibility: visibility}, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
+		var currentUser, tableOwner string
+		var appRole, superuser bool
+		if err := tx.QueryRowContext(context.Background(), `SELECT current_user, pg_has_role(current_user,'keel_app','member'), r.rolsuper,
+			(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='keel_meta.retrieval_term_postings'::regclass)
+			FROM pg_roles r WHERE r.rolname=current_user`).Scan(&currentUser, &appRole, &superuser, &tableOwner); err != nil {
+			return err
+		}
+		if !appRole || superuser || tableOwner == currentUser {
+			return fmt.Errorf("query plan must run under a non-owner app role: user=%q app_role=%t superuser=%t table_owner=%q", currentUser, appRole, superuser, tableOwner)
+		}
 		return tx.QueryRowContext(context.Background(), `EXPLAIN (FORMAT JSON)
 			SELECT c.chunk_id,c.document_version_id,c.chunk_ordinal,c.source_start_byte,c.source_end_byte,c.content_sha256,c.token_count,p.term_id,p.term_frequency,st.document_frequency
 			FROM keel_meta.retrieval_chunks c JOIN keel_meta.retrieval_term_postings p ON p.tenant_id=c.tenant_id AND p.build_id=c.build_id AND p.chunk_id=c.chunk_id
