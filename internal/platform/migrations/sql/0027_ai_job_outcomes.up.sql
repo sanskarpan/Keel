@@ -370,6 +370,19 @@ BEGIN
     RETURN true;
 END $$;
 
+-- The generic budget repository uses this narrow check to keep queue-backed
+-- liabilities on the queue's atomic transition without granting its control
+-- identity direct SELECT access to the job table.
+CREATE FUNCTION keel_meta.is_queued_ai_inference(p_tenant uuid,p_inference uuid)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,keel_meta,keel_private,pg_temp AS $$
+BEGIN
+    IF p_tenant IS DISTINCT FROM keel_private.current_tenant_id() THEN
+        RAISE EXCEPTION 'AI job tenant context mismatch' USING ERRCODE='42501';
+    END IF;
+    RETURN EXISTS (SELECT 1 FROM keel_meta.ai_jobs WHERE tenant_id=p_tenant AND inference_id=p_inference);
+END $$;
+
 REVOKE ALL ON FUNCTION keel_meta.record_ai_job_outcome(uuid,uuid,text,bigint,text,text) FROM keel_app,keel_ai_worker,keel_budget_control;
 REVOKE ALL ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) FROM keel_app,keel_ai_worker,keel_budget_control;
 REVOKE ALL ON FUNCTION keel_meta.apply_ai_job_outcome(uuid,uuid,text,bigint,text,bigint,text) FROM PUBLIC;
@@ -525,7 +538,9 @@ REVOKE ALL ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) FRO
 REVOKE ALL ON FUNCTION keel_meta.guard_ai_job_transition() FROM PUBLIC;
 REVOKE ALL ON FUNCTION keel_meta.guard_queued_ai_budget_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION keel_meta.check_ai_budget_account_totals() FROM PUBLIC;
+REVOKE ALL ON FUNCTION keel_meta.is_queued_ai_inference(uuid,uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION keel_meta.apply_ai_job_outcome(uuid,uuid,text,bigint,text,bigint,text) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.expire_ai_job(uuid,uuid,text,bigint,text) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.list_expired_ai_jobs(uuid,integer) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.reconcile_ai_job_outcome(uuid,uuid,text,bigint,text,text,text) TO keel_budget_control;
+GRANT EXECUTE ON FUNCTION keel_meta.is_queued_ai_inference(uuid,uuid) TO keel_budget_control;
