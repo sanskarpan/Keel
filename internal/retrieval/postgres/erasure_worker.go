@@ -14,10 +14,12 @@ import (
 )
 
 const (
-	MaxErasureAttempts = 12
-	MinErasureLease    = time.Second
-	MaxErasureLease    = 15 * time.Minute
-	MaxErasureBackoff  = 24 * time.Hour
+	MaxErasureAttempts      = 12
+	MinErasureLease         = time.Second
+	MaxErasureLease         = 15 * time.Minute
+	MaxErasureBackoff       = 24 * time.Hour
+	MinErasureProgressDelay = time.Second
+	MaxErasureProgressDelay = 15 * time.Minute
 )
 
 var (
@@ -43,14 +45,24 @@ func (r *Repository) ClaimErasureJob(ctx context.Context, tenant tenancy.TenantI
 	var job ErasureJob
 	claimed := false
 	err = withScope(ctx, r.db, s, nil, func(tx *sql.Tx) error {
-		// A worker crash on the final permitted attempt must become an observable
-		// terminal poison state after its lease expires rather than stay pending.
+		// A worker crash consumes a failure, then releases or terminalizes the
+		// job before another worker can claim it.
 		_, err := tx.ExecContext(ctx, `UPDATE keel_meta.retrieval_erasure_jobs
-			SET state='blocked',last_error_code='attempts_exhausted',blocked_at=clock_timestamp(),
+			SET failure_count=CASE WHEN failure_count < $3 THEN failure_count+1 ELSE failure_count END,
+				state=CASE WHEN failure_count+1 >= $3 THEN 'blocked' ELSE 'cleanup_pending' END,
+				available_at=CASE WHEN failure_count+1 >= $3 THEN available_at ELSE clock_timestamp() END,
+				last_error_code=CASE WHEN failure_count+1 >= $3 THEN 'attempts_exhausted' ELSE 'worker_lease_expired' END,
+				blocked_at=CASE WHEN failure_count+1 >= $3 THEN clock_timestamp() ELSE NULL END,
 				lease_owner=NULL,lease_until=NULL,updated_at=clock_timestamp()
 			WHERE tenant_id=$1 AND visibility_key=$2 AND state='cleanup_pending'
-			  AND attempt_count >= $3 AND available_at <= clock_timestamp()
-			  AND (lease_until IS NULL OR lease_until <= clock_timestamp())`, string(s.tenant), s.visibility, MaxErasureAttempts)
+			  AND lease_owner IS NOT NULL AND lease_until <= clock_timestamp()`, string(s.tenant), s.visibility, MaxErasureAttempts)
+		if err != nil {
+			return fmt.Errorf("record expired retrieval erasure leases: %w", err)
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE keel_meta.retrieval_erasure_jobs
+			SET state='blocked',last_error_code='attempts_exhausted',blocked_at=clock_timestamp(),updated_at=clock_timestamp()
+			WHERE tenant_id=$1 AND visibility_key=$2 AND state='cleanup_pending' AND failure_count >= $3
+			  AND available_at <= clock_timestamp() AND lease_owner IS NULL AND lease_until IS NULL`, string(s.tenant), s.visibility, MaxErasureAttempts)
 		if err != nil {
 			return fmt.Errorf("block exhausted retrieval erasure jobs: %w", err)
 		}
@@ -58,7 +70,7 @@ func (r *Repository) ClaimErasureJob(ctx context.Context, tenant tenancy.TenantI
 			SELECT tenant_id,visibility_key,job_id
 			FROM keel_meta.retrieval_erasure_jobs
 		 WHERE tenant_id=$1 AND visibility_key=$2 AND state IN ('fenced','cleanup_pending')
-			  AND available_at <= clock_timestamp() AND attempt_count < $3
+			  AND available_at <= clock_timestamp() AND failure_count < $3
 			  AND (lease_until IS NULL OR lease_until <= clock_timestamp())
 			ORDER BY available_at,requested_at,job_id
 			LIMIT 1 FOR UPDATE SKIP LOCKED
@@ -70,10 +82,10 @@ func (r *Repository) ClaimErasureJob(ctx context.Context, tenant tenancy.TenantI
 		FROM candidate
 		WHERE job.tenant_id=candidate.tenant_id AND job.visibility_key=candidate.visibility_key AND job.job_id=candidate.job_id
 		RETURNING job.job_id,job.requested_by,job.document_version_id,job.eligibility_generation,job.state,job.requested_at::text,
-			job.attempt_count,job.last_error_code,job.available_at,job.lease_owner,job.lease_epoch,job.lease_until,job.blocked_at,job.completed_at`,
+			job.attempt_count,job.failure_count,job.last_error_code,job.available_at,job.lease_owner,job.lease_epoch,job.lease_until,job.blocked_at,job.completed_at`,
 			string(s.tenant), s.visibility, MaxErasureAttempts, workerID, lease.Microseconds()).
 			Scan(&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State, &job.RequestedAt,
-				&job.AttemptCount, &job.LastErrorCode, &job.AvailableAt, &job.LeaseOwner, &job.LeaseEpoch,
+				&job.AttemptCount, &job.FailureCount, &job.LastErrorCode, &job.AvailableAt, &job.LeaseOwner, &job.LeaseEpoch,
 				&job.LeaseUntil, &job.BlockedAt, &job.CompletedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -88,6 +100,42 @@ func (r *Repository) ClaimErasureJob(ctx context.Context, tenant tenancy.TenantI
 		return ErasureJob{}, false, err
 	}
 	return job, claimed, nil
+}
+
+// YieldErasureJob releases a live claim after a successful bounded action pass
+// that needs another lease to continue. Claim and failure counters remain
+// monotonic; a successful yield does not consume the separate failure budget.
+func (r *Repository) YieldErasureJob(ctx context.Context, tenant tenancy.TenantID, visibility, workerID string,
+	jobID uuid.UUID, epoch int64, delay time.Duration) (ErasureJob, error) {
+	if err := validateErasureWorkerRepository(r, ctx); err != nil {
+		return ErasureJob{}, err
+	}
+	s, err := newScope(tenant, visibility)
+	if err != nil {
+		return ErasureJob{}, err
+	}
+	if !erasureWorkerIDPattern.MatchString(workerID) || jobID == uuid.Nil || epoch < 1 ||
+		delay < MinErasureProgressDelay || delay > MaxErasureProgressDelay {
+		return ErasureJob{}, errors.New("erasure progress yield identity or delay is invalid")
+	}
+	var job ErasureJob
+	err = withScope(ctx, r.db, s, nil, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `UPDATE keel_meta.retrieval_erasure_jobs
+			SET state='cleanup_pending',available_at=clock_timestamp()+($6::bigint * interval '1 microsecond'),last_error_code=NULL,
+				lease_owner=NULL,lease_until=NULL,updated_at=clock_timestamp()
+			WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3 AND state='cleanup_pending'
+			  AND lease_owner=$4 AND lease_epoch=$5 AND lease_until>clock_timestamp()
+			RETURNING `+erasureJobColumns, string(s.tenant), s.visibility, jobID, workerID, epoch, delay.Microseconds()).
+			Scan(erasureJobDestinations(&job)...)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrErasureLeaseLost
+		}
+		if err != nil {
+			return fmt.Errorf("yield retrieval erasure job after progress: %w", err)
+		}
+		return nil
+	})
+	return job, err
 }
 
 // RenewErasureJobLease extends a live claim without changing its fencing epoch.
@@ -153,10 +201,11 @@ func (r *Repository) RetryErasureJob(ctx context.Context, tenant tenancy.TenantI
 	var job ErasureJob
 	err = withScope(ctx, r.db, s, nil, func(tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx, `UPDATE keel_meta.retrieval_erasure_jobs
-			SET state=CASE WHEN attempt_count >= $6 THEN 'blocked' ELSE 'cleanup_pending' END,
-				available_at=CASE WHEN attempt_count >= $6 THEN available_at ELSE clock_timestamp()+($7::bigint * interval '1 microsecond') END,
-				last_error_code=CASE WHEN attempt_count >= $6 THEN 'attempts_exhausted' ELSE $8 END,
-				blocked_at=CASE WHEN attempt_count >= $6 THEN clock_timestamp() ELSE NULL END,
+			SET failure_count=failure_count+1,
+				state=CASE WHEN failure_count+1 >= $6 THEN 'blocked' ELSE 'cleanup_pending' END,
+				available_at=CASE WHEN failure_count+1 >= $6 THEN available_at ELSE clock_timestamp()+($7::bigint * interval '1 microsecond') END,
+				last_error_code=CASE WHEN failure_count+1 >= $6 THEN 'attempts_exhausted' ELSE $8 END,
+				blocked_at=CASE WHEN failure_count+1 >= $6 THEN clock_timestamp() ELSE NULL END,
 				lease_owner=NULL,lease_until=NULL,updated_at=clock_timestamp()
 			WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3 AND state='cleanup_pending'
 			  AND lease_owner=$4 AND lease_epoch=$5 AND lease_until>clock_timestamp()
@@ -206,11 +255,11 @@ func (r *Repository) BlockErasureJob(ctx context.Context, tenant tenancy.TenantI
 }
 
 const erasureJobColumns = `job_id,requested_by,document_version_id,eligibility_generation,state,requested_at::text,
-	attempt_count,last_error_code,available_at,lease_owner,lease_epoch,lease_until,blocked_at,completed_at`
+	attempt_count,failure_count,last_error_code,available_at,lease_owner,lease_epoch,lease_until,blocked_at,completed_at`
 
 func erasureJobDestinations(job *ErasureJob) []any {
 	return []any{&job.ID, &job.RequestedBy, &job.DocumentVersionID, &job.EligibilityGeneration, &job.State,
-		&job.RequestedAt, &job.AttemptCount, &job.LastErrorCode, &job.AvailableAt, &job.LeaseOwner,
+		&job.RequestedAt, &job.AttemptCount, &job.FailureCount, &job.LastErrorCode, &job.AvailableAt, &job.LeaseOwner,
 		&job.LeaseEpoch, &job.LeaseUntil, &job.BlockedAt, &job.CompletedAt}
 }
 
