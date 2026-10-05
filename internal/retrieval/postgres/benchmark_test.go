@@ -71,7 +71,7 @@ func BenchmarkPostgreSQLSearchScoresTenantSkew(b *testing.B) {
 			if err != nil || len(rares.Candidates) != 1 || rares.Candidates[0].Score <= 0 {
 				b.Fatalf("rare-term reference query failed: candidates=%+v err=%v", rares.Candidates, err)
 			}
-			b.Logf("server=%s tenant_chunks=%d common_postings=%d rare_recall@5=1/1", retrievalServerVersion(b, appDB), size, size)
+			b.Logf("server=%s tenant_chunks=%d cohort_count=1 common_postings=%d rare_recall@5=1/1 rare_query_terms=1 rare_top_k=5 common_query_terms=1 common_top_k=10 posting_budget=%d", retrievalServerVersion(b, appDB), size, size, size)
 			b.ReportAllocs()
 			b.ResetTimer()
 			durations := make([]time.Duration, 0, b.N)
@@ -152,6 +152,7 @@ func TestPostgreSQLLexicalPlanUsesPostingTermIdentity(t *testing.T) {
 	if !strings.Contains(string(plan), "retrieval_term_postings_pkey") {
 		t.Fatalf("selective term query plan did not use the tenant/build/term posting index: %s", plan)
 	}
+	t.Logf("selective retrieval EXPLAIN JSON (non-owner app role): %s", plan)
 }
 
 func TestPostgreSQLBM25MatchesIndependentReferenceAcrossLengthsAndFrequencies(t *testing.T) {
@@ -172,6 +173,8 @@ func TestPostgreSQLBM25MatchesIndependentReferenceAcrossLengthsAndFrequencies(t 
 		{text: "common beta", tf: 1},
 		{text: "common common common gamma", tf: 3},
 		{text: "delta epsilon", tf: 0},
+		{text: "common tie", tf: 1},
+		{text: "common tie", tf: 1},
 	}
 	buildID := uuid.New()
 	if err := indexer.BeginBuild(context.Background(), tenant, visibility, buildSpec(buildID, hasher.KeyID(), len(sources))); err != nil {
@@ -179,6 +182,7 @@ func TestPostgreSQLBM25MatchesIndependentReferenceAcrossLengthsAndFrequencies(t 
 	}
 	chunks := make([]index.Chunk, 0, len(sources))
 	versions := make([]uuid.UUID, len(sources))
+	chunkIDs := make([]uuid.UUID, len(sources))
 	lengths := make([]int, len(sources))
 	for i, source := range sources {
 		version := uuid.New()
@@ -192,6 +196,10 @@ func TestPostgreSQLBM25MatchesIndependentReferenceAcrossLengthsAndFrequencies(t 
 		if err != nil {
 			t.Fatal(err)
 		}
+		if source.text == "common tie" {
+			chunk.ID = uuid.MustParse(fmt.Sprintf("00000000-0000-0000-0000-%012d", i))
+		}
+		chunkIDs[i] = chunk.ID
 		chunks = append(chunks, chunk)
 	}
 	if err := indexer.StageBatch(context.Background(), tenant, visibility, buildID, chunks); err != nil {
@@ -207,31 +215,47 @@ func TestPostgreSQLBM25MatchesIndependentReferenceAcrossLengthsAndFrequencies(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Candidates) != 3 {
-		t.Fatalf("got %d common-term candidates, want 3", len(result.Candidates))
+	if len(result.Candidates) != 5 {
+		t.Fatalf("got %d common-term candidates, want 5", len(result.Candidates))
 	}
-	const corpusCount = 4
-	const documentFrequency = 3
-	const averageLength = float64(11) / corpusCount
+	const corpusCount = 6
+	const documentFrequency = 5
+	const averageLength = float64(15) / corpusCount
 	want := make(map[uuid.UUID]float64, len(sources))
+	reference := make([]Result, 0, documentFrequency)
 	for i, source := range sources {
 		if source.tf == 0 {
 			continue
 		}
 		idf := math.Log1p((float64(corpusCount-documentFrequency) + 0.5) / (float64(documentFrequency) + 0.5))
 		lengthNorm := float64(source.tf) + 1.2*(1-0.75+0.75*float64(lengths[i])/averageLength)
-		want[versions[i]] = idf * float64(source.tf) * 2.2 / lengthNorm
+		score := idf * float64(source.tf) * 2.2 / lengthNorm
+		want[versions[i]] = score
+		reference = append(reference, Result{DocumentVersionID: versions[i], ChunkID: chunkIDs[i], Score: score})
 	}
-	previous := math.Inf(1)
+	sort.Slice(reference, func(i, j int) bool {
+		if reference[i].Score == reference[j].Score {
+			return reference[i].ChunkID.String() < reference[j].ChunkID.String()
+		}
+		return reference[i].Score > reference[j].Score
+	})
 	for i, candidate := range result.Candidates {
 		expected, ok := want[candidate.DocumentVersionID]
 		if !ok || math.Abs(candidate.Score-expected) > 1e-12 {
 			t.Fatalf("candidate %d score mismatch: candidate=%+v want=%0.15f", i, candidate, expected)
 		}
-		if candidate.Score > previous {
-			t.Fatalf("BM25 results are not ordered by reference score: %+v", result.Candidates)
+		if candidate.ChunkID != reference[i].ChunkID || candidate.DocumentVersionID != reference[i].DocumentVersionID {
+			t.Fatalf("candidate %d differs from independently ranked BM25 reference: got=%+v want=%+v", i, candidate, reference[i])
 		}
-		previous = candidate.Score
+	}
+	repeated, err := app.SearchScores(context.Background(), tenant, visibility, hasher.KeyID(), []index.TermID{hasher.ID("common")}, 10, 100)
+	if err != nil || len(repeated.Candidates) != len(result.Candidates) {
+		t.Fatalf("repeated reference query failed: candidates=%d err=%v", len(repeated.Candidates), err)
+	}
+	for i := range result.Candidates {
+		if repeated.Candidates[i].ChunkID != result.Candidates[i].ChunkID {
+			t.Fatalf("BM25 ordering changed across identical queries at rank %d: first=%+v repeated=%+v", i, result.Candidates[i], repeated.Candidates[i])
+		}
 	}
 }
 
