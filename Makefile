@@ -1,4 +1,4 @@
-.PHONY: test vet fmt check contract local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-temporal-test
+.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-temporal-test
 
 COMPOSE_FILE := deploy/compose/compose.yaml
 
@@ -13,6 +13,12 @@ fmt:
 
 contract:
 	GOTOOLCHAIN=local go test ./internal/contracts/...
+
+retrieval-lint:
+	GOTOOLCHAIN=local go run ./cmd/keel-corpus-lint research/retrieval/v1/corpus.json research/retrieval/v1/build-manifest.json research/retrieval/v1
+
+retrieval-eval:
+	GOTOOLCHAIN=local go run ./cmd/keel-corpus-eval research/retrieval/v1/corpus.json research/retrieval/v1/build-manifest.json research/retrieval/v1/reference-results.json
 
 check: test vet
 
