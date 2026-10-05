@@ -37,6 +37,34 @@ func TestLimiterValidationAndRegionFence(t *testing.T) {
 	}
 }
 
+func TestRedisScriptKeysShareOpaqueClusterHashTag(t *testing.T) {
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = client.Close() })
+	limiter, err := New(client, Config{
+		Region: "us-east-1", HomeRegion: "us-east-1", KeyID: "hmac-v1",
+		Secret: []byte(strings.Repeat("s", 32)), ReplayTTL: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket, request := limiter.keys("00000000-0000-4000-8000-000000000001", "ai.generate", "00000000-0000-4000-8000-000000000002")
+	if left, right := redisHashTag(bucket), redisHashTag(request); left == "" || left != right {
+		t.Fatalf("Lua keys do not share one nonempty Redis Cluster hash tag: %q %q", left, right)
+	}
+}
+
+func redisHashTag(key string) string {
+	start := strings.IndexByte(key, '{')
+	if start < 0 {
+		return ""
+	}
+	end := strings.IndexByte(key[start+1:], '}')
+	if end <= 0 {
+		return ""
+	}
+	return key[start+1 : start+1+end]
+}
+
 func TestRedisUnavailableFailsClosed(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 50 * time.Millisecond,
 		ReadTimeout: 50 * time.Millisecond, WriteTimeout: 50 * time.Millisecond, MaxRetries: -1})
