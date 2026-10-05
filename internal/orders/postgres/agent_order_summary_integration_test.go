@@ -52,11 +52,15 @@ func TestPostgreSQLAgentOrderSummaryTenantBoundProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	alpha, beta := mustTenant(t, tenantAlpha), mustTenant(t, tenantBeta)
-	alphaOrder, err := repo.Create(ctx, alpha, testCreate("agent-alpha-"+nextUUID()), testMetadata(string(alpha), nextUUID()), "agent-alpha-"+nextUUID(), "principal:fixture")
+	alphaMetadata := testMetadata(string(alpha), nextUUID())
+	alphaMetadata.ActorRef = "principal:fixture"
+	alphaOrder, err := repo.Create(ctx, alpha, testCreate("agent-alpha-"+nextUUID()), alphaMetadata, "agent-alpha-"+nextUUID(), "principal:fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
-	betaOrder, err := repo.Create(ctx, beta, testCreate("agent-beta-"+nextUUID()), testMetadata(string(beta), nextUUID()), "agent-beta-"+nextUUID(), "principal:fixture")
+	betaMetadata := testMetadata(string(beta), nextUUID())
+	betaMetadata.ActorRef = "principal:fixture"
+	betaOrder, err := repo.Create(ctx, beta, testCreate("agent-beta-"+nextUUID()), betaMetadata, "agent-beta-"+nextUUID(), "principal:fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
