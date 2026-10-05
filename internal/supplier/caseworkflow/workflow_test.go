@@ -33,6 +33,18 @@ func TestWorkflowIDIsDeterministicAndValidatesCaseID(t *testing.T) {
 	}
 }
 
+func TestPersistedTemporalV1NamesRemainStable(t *testing.T) {
+	if WorkflowName != "SupplierCaseWorkflowV1" || TaskQueue != "keel-supplier-case-v1" ||
+		SignalName != "supplier-case-event-v1" || StateQuery != "supplier-case-state-v1" {
+		t.Fatalf("persisted Temporal contract changed without a rollout: workflow=%q queue=%q signal=%q query=%q", WorkflowName, TaskQueue, SignalName, StateQuery)
+	}
+	tenant, _ := tenancy.ParseTenantID(testTenantID)
+	id, err := WorkflowID(tenant, testCaseID)
+	if err != nil || !strings.HasPrefix(id, "keel.supplier-case.v1.") {
+		t.Fatalf("persisted workflow ID version changed: id=%q err=%v", id, err)
+	}
+}
+
 func TestApplyAcceptsExactRetriesAndRejectsConflictsAndGaps(t *testing.T) {
 	created := signal(1, "supplier.case.created", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", strings.Repeat("a", 64))
 	state, err := Apply(State{CaseID: testCaseID}, created)

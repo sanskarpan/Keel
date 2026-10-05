@@ -11,8 +11,14 @@ import (
 	"time"
 
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
+	workpg "github.com/sanskarpan/keel/internal/supplier/workflowdispatch/postgres"
+	enumspb "go.temporal.io/api/enums/v1"
+	historypb "go.temporal.io/api/history/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func newTestCaseID(t *testing.T) string {
@@ -102,6 +108,145 @@ func TestTemporalServerSignalWithStartDeduplicatesAndReplaysAfterWorkerRestart(t
 	if got := waitWorkflowVersion(ctx, t, c, tenant, caseID, 103); got != 103 {
 		t.Fatalf("approval signal after the original 102-event cap was not replayed: %d", got)
 	}
+}
+
+func TestTemporalHistoryBudgetReplayAndSimulated72HourRecovery(t *testing.T) {
+	if os.Getenv("KEEL_TEST_TEMPORAL_HISTORY_BUDGET") != "1" {
+		t.Skip("set KEEL_TEST_TEMPORAL_HISTORY_BUDGET=1 to run the pinned Temporal history stress qualification")
+	}
+	address := os.Getenv("KEEL_TEST_TEMPORAL_ADDRESS")
+	if address == "" {
+		t.Skip("set KEEL_TEST_TEMPORAL_ADDRESS to a pinned local Temporal server")
+	}
+	if workpg.MaxAttempts != MaxSignalDeliveryAttempts {
+		t.Fatalf("workflow history budget assumes %d dispatch attempts, repository allows %d", MaxSignalDeliveryAttempts, workpg.MaxAttempts)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	namespace := os.Getenv("KEEL_TEST_TEMPORAL_NAMESPACE")
+	if namespace == "" {
+		namespace = "default"
+	}
+	c, err := Dial(ctx, address, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	sender, err := NewSender(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caseID := newTestCaseID(t)
+	tenant, _ := tenancy.ParseTenantID("11111111-1111-4111-8111-111111111111")
+	workflowID, err := WorkflowID(tenant, caseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newWorker := func() worker.Worker {
+		w := worker.New(c, TaskQueue, worker.Options{})
+		if err := Register(w); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return w
+	}
+	w := newWorker()
+	defer func() {
+		if w != nil {
+			w.Stop()
+		}
+	}()
+
+	checkpoints := map[uint64]bool{102: true, 135: true, MaxEvents: true}
+	var finalHistory *historypb.History
+	var finalBytes int
+	// This is an upper-bound transport history, not a valid supplier-case state
+	// sequence. PostgreSQL validates legal transitions; Temporal validates ordered
+	// event identities and must remain bounded even under the declared envelope.
+	for version := uint64(1); version <= MaxEvents; version++ {
+		kind := "supplier.case.evidence-added"
+		switch {
+		case version == 1:
+			kind = "supplier.case.created"
+		case version == 102:
+			kind = "supplier.case.submitted"
+		case version > 102 && version <= 134:
+			kind = "supplier.case.approval-decided"
+		case version == 135:
+			kind = "supplier.case.canceled"
+		case version == 136:
+			kind = "supplier.case.manual-review-requested"
+		case version == 137:
+			kind = "supplier.case.manual-review-resolved"
+		case version == MaxEvents:
+			kind = "supplier.case.expired"
+		}
+		intentID := fmt.Sprintf("aaaaaaaa-aaaa-4aaa-8aaa-%012x", version)
+		signal := EventSignal{CaseID: caseID, IntentID: intentID, Version: version, EventType: kind, EventHash: strings.Repeat("c", 64)}
+		// Model the maximum accepted-at-Temporal retry envelope: an acknowledgement
+		// can be lost after each of the bounded database dispatch attempts.
+		for attempt := 0; attempt < MaxSignalDeliveryAttempts; attempt++ {
+			if err := sender.Deliver(ctx, tenant, signal); err != nil {
+				t.Fatalf("deliver event %d attempt %d: %v", version, attempt+1, err)
+			}
+		}
+		if !checkpoints[version] {
+			continue
+		}
+		if got := waitWorkflowVersion(ctx, t, c, tenant, caseID, version); got != version {
+			t.Fatalf("checkpoint %d has workflow version %d", version, got)
+		}
+		history, historyBytes := captureWorkflowHistory(ctx, t, c, workflowID)
+		if len(history.Events) >= MaxTemporalHistoryEvents || historyBytes >= MaxTemporalHistoryBytes {
+			t.Fatalf("history checkpoint %d exceeded Keel budget: events=%d bytes=%d limits=(%d,%d)", version, len(history.Events), historyBytes, MaxTemporalHistoryEvents, MaxTemporalHistoryBytes)
+		}
+		replay := worker.NewWorkflowReplayer()
+		replay.RegisterWorkflowWithOptions(SupplierCaseWorkflow, workflow.RegisterOptions{Name: WorkflowName})
+		if err := replay.ReplayWorkflowHistory(nil, history); err != nil {
+			t.Fatalf("replay checkpoint %d failed: %v", version, err)
+		}
+		if version == MaxEvents {
+			finalHistory, finalBytes = history, historyBytes
+		}
+	}
+
+	// There is no Temporal timer in the V1 projection workflow. Moving an archived
+	// history fixture forward by the full case lifetime verifies replay has no
+	// wall-clock dependency; a real worker restart below verifies persisted state.
+	aged := proto.Clone(finalHistory).(*historypb.History)
+	for _, event := range aged.Events {
+		if event.EventTime != nil {
+			event.EventTime = timestamppb.New(event.EventTime.AsTime().Add(72 * time.Hour))
+		}
+	}
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflowWithOptions(SupplierCaseWorkflow, workflow.RegisterOptions{Name: WorkflowName})
+	if err := replayer.ReplayWorkflowHistory(nil, aged); err != nil {
+		t.Fatalf("72-hour-shifted history replay failed (events=%d bytes=%d): %v", len(aged.Events), finalBytes, err)
+	}
+	w.Stop()
+	w = nil
+	w = newWorker()
+	if got := waitWorkflowVersion(ctx, t, c, tenant, caseID, MaxEvents); got != MaxEvents {
+		t.Fatalf("workflow did not recover after worker restart: version=%d", got)
+	}
+	t.Logf("maximum bounded dispatch envelope: %d signal attempts, %d history events, %d event bytes; 72-hour-shifted replay and worker recovery passed", MaxEvents*MaxSignalDeliveryAttempts, len(finalHistory.Events), finalBytes)
+}
+
+func captureWorkflowHistory(ctx context.Context, t *testing.T, c client.Client, workflowID string) (*historypb.History, int) {
+	t.Helper()
+	iterator := c.GetWorkflowHistory(ctx, workflowID, "", false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
+	history := &historypb.History{}
+	for iterator.HasNext() {
+		event, err := iterator.Next()
+		if err != nil {
+			t.Fatalf("read Temporal history: %v", err)
+		}
+		history.Events = append(history.Events, event)
+	}
+	return history, proto.Size(history)
 }
 
 func waitWorkflowVersion(ctx context.Context, t *testing.T, c client.Client, tenant tenancy.TenantID, caseID string, want uint64) uint64 {

@@ -15,11 +15,16 @@ import (
 )
 
 const (
-	WorkflowName = "SupplierCaseWorkflowV1"
-	TaskQueue    = "keel-supplier-case-v1"
-	SignalName   = "supplier-case-event-v1"
-	StateQuery   = "supplier-case-state-v1"
-	MaxEvents    = 138 // bounded case history: create + 100 evidence + submit + 32 decisions + expiry + cancel + 2 review events
+	WorkflowName              = "SupplierCaseWorkflowV1"
+	TaskQueue                 = "keel-supplier-case-v1"
+	SignalName                = "supplier-case-event-v1"
+	StateQuery                = "supplier-case-state-v1"
+	MaxEvents                 = 138 // bounded case history: create + 100 evidence + submit + 32 decisions + expiry + cancel + 2 review events
+	MaxSignalDeliveryAttempts = 12
+	// Keel's conservative rollout guardrails. The maximum bounded dispatch envelope
+	// (MaxEvents * MaxSignalDeliveryAttempts) must remain below both measured budgets.
+	MaxTemporalHistoryEvents = 9_000
+	MaxTemporalHistoryBytes  = 8 << 20
 )
 
 var (
