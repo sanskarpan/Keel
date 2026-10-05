@@ -108,7 +108,7 @@ BEGIN
         IF NEW.state IN ('cleanup_pending','blocked') AND NEW.lease_owner IS NULL AND OLD.lease_owner IS NOT NULL AND
            OLD.lease_until<=clock_timestamp() AND NEW.lease_epoch=OLD.lease_epoch AND
            NEW.attempt_count=OLD.attempt_count AND
-           NEW.failure_count=OLD.failure_count+CASE WHEN OLD.failure_count<12 THEN 1 ELSE 0 END AND
+           NEW.failure_count=LEAST(OLD.failure_count+1,12) AND
            NEW.available_at>=OLD.available_at AND NEW.completed_at IS NULL AND NEW.last_error_code IS NOT NULL AND
            ((NEW.state='cleanup_pending' AND NEW.failure_count<12 AND NEW.available_at<=clock_timestamp() AND NEW.blocked_at IS NULL AND
              NEW.last_error_code='worker_lease_expired') OR
