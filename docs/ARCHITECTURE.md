@@ -78,6 +78,8 @@ K3.4's pure Go hybrid core accepts only scoped, bounded, best-first source lists
 
 Inference admission reserves a bounded worst-case spend in PostgreSQL before queueing. The request references a versioned prompt, provider policy, context/document versions and validated tools. Executors retrieve and redact context, check exact/semantic cache eligibility, and invoke a provider within concurrency/time/budget limits. Streaming chunks are transient; accepted complete responses and final usage are persisted. Provider fallback occurs only before any user-visible content, with a separately charged attempt under the same inference ID.
 
+The K4.3 accounting foundation (issue #186, partial) quotes from an immutable installed policy snapshot and exact code-owned rate card, uses integer micro-USD with ceiling rounding, and reserves against a locked tenant/period/scope account before any future dispatch boundary. Reservations pin their original period. Confirmed overruns are recorded in full and block later admission; ambiguous outcomes retain their reserve until an injected fail-closed reconciliation authority approves an append-only resolution. This code is not mounted on a provider or queue, the rate card is synthetic, and account provisioning, verified reconciliation authority, alerting/on-call, retries/fallback and production price qualification remain separate gates. See `docs/K4.3-BUDGET-EVIDENCE.md`.
+
 Sensitive prompts are not blindly sent to the trace backend. A protected context vault can retain encrypted prompt/input/context versions under tenant policy. OTel/Langfuse observations reference that record and store safe metadata. Authorized replay uses a sandbox and suppresses business writes/webhooks.
 
 ## 6. Durable approvals
