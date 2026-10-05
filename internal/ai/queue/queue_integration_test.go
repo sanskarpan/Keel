@@ -24,12 +24,19 @@ func (allowQueueReconciliation) AuthorizeBudgetReconciliation(context.Context, t
 	return nil
 }
 
+type allowQueueBudgetControl struct{}
+
+func (allowQueueBudgetControl) AuthorizeBudgetLimitChange(context.Context, tenancy.TenantID, string, string, string, int64) error {
+	return nil
+}
+
 func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	appDSN := os.Getenv("KEEL_TEST_DATABASE_URL")
 	workerDSN := os.Getenv("KEEL_TEST_AI_WORKER_DATABASE_URL")
+	controlDSN := os.Getenv("KEEL_TEST_BUDGET_CONTROL_DATABASE_URL")
 	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
-	if appDSN == "" || workerDSN == "" || adminDSN == "" {
-		t.Skip("set app, AI worker and admin PostgreSQL URLs for durable queue integration coverage")
+	if appDSN == "" || workerDSN == "" || controlDSN == "" || adminDSN == "" {
+		t.Skip("set app, AI worker, budget-control and admin PostgreSQL URLs for durable queue integration coverage")
 	}
 	open := func(dsn string) *sql.DB {
 		t.Helper()
@@ -49,8 +56,8 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		t.Cleanup(func() { _ = db.Close() })
 		return db
 	}
-	appDB, workerDB, admin := open(appDSN), open(workerDSN), open(adminDSN)
-	budgetRepo, err := budget.NewRepository(appDB, allowQueueReconciliation{}, nil, nil)
+	appDB, workerDB, controlDB, admin := open(appDSN), open(workerDSN), open(controlDSN), open(adminDSN)
+	budgetRepo, err := budget.NewRepository(appDB, allowQueueReconciliation{}, controlDB, allowQueueBudgetControl{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +287,27 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		}
 	}
 	if _, err := appDB.ExecContext(ctx, `SELECT keel_meta.resolve_ai_job_outcome($1,$2,'no_charge','forged:no-charge')`, tenantID, expiredLease.InferenceID); err == nil {
-		t.Fatal("application role called the worker-only outcome transition")
+		t.Fatal("application role called the revoked outcome transition")
+	}
+	if _, err := workerDB.ExecContext(ctx, `UPDATE keel_meta.ai_budget_reservations SET liability_state='settled' WHERE tenant_id=$1 AND inference_id=$2`, tenantID, expiredLease.InferenceID); err == nil {
+		t.Fatal("AI worker role directly changed budget liability")
+	}
+	if _, err := workerDB.ExecContext(ctx, `UPDATE keel_meta.ai_budget_accounts SET reserved_micro_usd=0 WHERE tenant_id=$1 AND period_id=$2`, tenantID, periodID); err == nil {
+		t.Fatal("AI worker role directly changed budget account counters")
+	}
+	if _, err := workerDB.ExecContext(ctx, `INSERT INTO keel_meta.ai_usage_ledger(tenant_id,entry_id,inference_id,attempt_id,entry_kind,amount_micro_usd,confidence,currency,source_ref)
+		SELECT tenant_id,$3,inference_id,attempt_id,'confirmed',1,'exact','USD','forged:worker' FROM keel_meta.ai_inference_admissions WHERE tenant_id=$1 AND inference_id=$2`, tenantID, expiredLease.InferenceID, uuid.NewString()); err == nil {
+		t.Fatal("AI worker role directly inserted forged budget evidence")
+	}
+	if _, err := workerDB.ExecContext(ctx, `SELECT keel_meta.resolve_ai_job_outcome($1,$2,'no_charge','forged:no-charge')`, tenantID, expiredLease.InferenceID); err == nil {
+		t.Fatal("AI worker role called the revoked reconciliation transition")
+	}
+	err = tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE keel_meta.ai_budget_accounts SET reserved_micro_usd=0 WHERE tenant_id=$1 AND period_id=$2`, tenantID, periodID)
+		return err
+	})
+	if err == nil {
+		t.Fatal("application role committed an account counter that understates durable queued reservations")
 	}
 	if _, err := repo.Renew(ctx, expiredLease, time.Second); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("unknown attempt renewed its stale lease: %v", err)
@@ -348,11 +375,22 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("claim confirmed attempt: claimed=%t err=%v", claimed, err)
 	}
-	rollbackErr := errors.New("injected queue callback failure")
-	err = repo.outcomeBudget.SettleConfirmedWith(ctx, tenant, confirmedLease.InferenceID,
-		confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:rollback", func(*sql.Tx) error { return rollbackErr })
-	if !errors.Is(err, rollbackErr) {
-		t.Fatalf("injected settlement callback failure: %v", err)
+	if _, err := admin.ExecContext(ctx, `CREATE FUNCTION keel_meta.test_fail_ai_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.state='succeeded' THEN RAISE EXCEPTION 'injected queue outcome failure'; END IF; RETURN NEW; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, `CREATE TRIGGER test_fail_ai_outcome BEFORE UPDATE OF state ON keel_meta.ai_jobs FOR EACH ROW EXECUTE FUNCTION keel_meta.test_fail_ai_outcome()`); err != nil {
+		t.Fatal(err)
+	}
+	err = repo.SettleConfirmed(ctx, confirmedLease, confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:rollback")
+	if err == nil {
+		t.Fatal("injected queue terminalization failure was accepted")
+	}
+	if _, err := admin.ExecContext(ctx, `DROP TRIGGER test_fail_ai_outcome ON keel_meta.ai_jobs`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ExecContext(ctx, `DROP FUNCTION keel_meta.test_fail_ai_outcome()`); err != nil {
+		t.Fatal(err)
 	}
 	var rollbackJob, rollbackLiability string
 	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, confirmedLease.InferenceID).Scan(&rollbackJob); err != nil {
@@ -366,7 +404,7 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rollbackJob != "leased" || rollbackLiability != "reserved" || rollbackRows != 0 {
-		t.Fatalf("callback error failed to roll back full outcome: job=%s liability=%s ledger=%d", rollbackJob, rollbackLiability, rollbackRows)
+		t.Fatalf("queue transition error failed to roll back full outcome: job=%s liability=%s ledger=%d", rollbackJob, rollbackLiability, rollbackRows)
 	}
 	if err := repo.SettleConfirmed(ctx, confirmedLease, confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:confirmed"); err != nil {
 		t.Fatal(err)
