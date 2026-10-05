@@ -328,7 +328,9 @@ func (r *Repository) SearchScores(ctx context.Context, tenant tenancy.TenantID, 
 		return SearchResult{}, fmt.Errorf("query must contain [1,%d] unique terms", MaxQueryTerms)
 	}
 	result := SearchResult{}
-	err = withScope(ctx, r.db, s, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
+	// Source row locks require a read-write PostgreSQL transaction. The app
+	// database role still has only SELECT plus its guarded withdrawal columns.
+	err = withScope(ctx, r.db, s, &sql.TxOptions{Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
 		if err := scanBuild(tx.QueryRowContext(ctx, `SELECT b.build_id,b.visibility_key,b.analyzer_id,b.chunker_id,b.term_key_id,b.manifest_sha256,b.expected_chunk_count,b.chunk_count,b.total_token_count,b.term_count,b.state,h.generation
 			FROM keel_meta.retrieval_corpus_heads h JOIN keel_meta.retrieval_corpus_builds b ON b.tenant_id=h.tenant_id AND b.build_id=h.active_build_id
 			WHERE h.tenant_id=$1 AND h.visibility_key=$2 AND b.state='published'`, string(s.tenant), s.visibility), &result.Build); err != nil {
