@@ -33,11 +33,17 @@ func TestLimiterValidationAndRegionFence(t *testing.T) {
 		ReadTimeout: time.Second, WriteTimeout: time.Second, PoolSize: 4}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("TLS certificate verification bypass was accepted: %v", err)
 	}
-	if _, err := NewRedisClient(ClientConfig{Addr: "127.0.0.1:6379", Region: "local", HomeRegion: "local",
+	client, err := NewRedisClient(ClientConfig{Addr: "127.0.0.1:6379", Region: "local", HomeRegion: "local",
 		AllowSyntheticLoopback: true, DialTimeout: time.Second, ReadTimeout: time.Second,
-		WriteTimeout: time.Second, PoolSize: 4}); err != nil {
+		WriteTimeout: time.Second, PoolSize: 4})
+	if err != nil {
 		t.Fatalf("explicit local loopback profile was rejected: %v", err)
 	}
+	// go-redis normalizes its documented -1 (disable) setting to zero retries.
+	if client.Options().MaxRetries != 0 {
+		t.Fatalf("Redis client did not disable internal retries: %d", client.Options().MaxRetries)
+	}
+	_ = client.Close()
 }
 
 func TestRedisScriptKeysShareOpaqueClusterHashTag(t *testing.T) {
@@ -99,7 +105,7 @@ func TestRedisGlobalBucketIdempotencyAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	options.MaxRetries = 0
+	options.MaxRetries = -1
 	clientA, clientB := redis.NewClient(options), redis.NewClient(options)
 	t.Cleanup(func() { _ = clientA.Close(); _ = clientB.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
