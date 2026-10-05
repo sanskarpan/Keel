@@ -17,7 +17,8 @@ Problem response: `{type,title,status,code,detail,request_id,retry_after_seconds
 | `POST /v1/supplier-cases` | coordinator; 202 with case/workflow operation IDs |
 | `GET /v1/supplier-cases/{id}` | case reader; state/deadline/evidence/approval summary |
 | `POST /v1/supplier-cases/{id}/invitations` | coordinator; expiring purpose-scoped invitation |
-| `POST /v1/supplier-cases/{id}/submit` | coordinator/invited supplier according to policy; freeze evidence digest, enter verifying, signal durable workflow |
+| `POST /v1/supplier-cases/{id}/submit` | coordinator/invited supplier according to policy; freeze evidence digest and approval plan, enter submitted, create durable workflow intent |
+| `POST /v1/supplier-cases/{id}/decisions` | currently unmounted K2.4 boundary; body contains stable `decision_id`, `step_key`, `outcome`, and optional bounded `reason`; actor/tenant are trusted context and role comes from the frozen plan |
 | `POST /v1/supplier-cases/{id}/cancel` | coordinator/admin; durable cancellation intent |
 | `POST /v1/documents/uploads` | authorized case/document writer; metadata and scoped presigned URL |
 | `POST /v1/documents/uploads/{id}/complete` | owner of upload; verify size/hash/type/object version, enqueue scan; 202 |
@@ -48,6 +49,8 @@ Problem response: `{type,title,status,code,detail,request_id,retry_after_seconds
 | `POST /v1/erasures` | authorized privacy-admin; legal-hold checks, deletion manifest operation |
 
 Admin/operator APIs are separately routed, strongly authenticated and never accessed by ordinary model tools. Bulk replay/erasure have explicit maximum batch sizes and progress IDs.
+
+K2.4 decision acceptance is a case-app boundary only: PostgreSQL rechecks the frozen step role, active reviewer grant/delegation, separation of duties, dependency completion and database deadline while holding the case lock. Identical decision IDs with identical content replay safely; conflicting reuse returns a conflict. The endpoint must remain unmounted until K0 identity and runtime authorization wiring plus reviewer-grant provisioning are qualified.
 
 ## 3. Order and inference examples
 
