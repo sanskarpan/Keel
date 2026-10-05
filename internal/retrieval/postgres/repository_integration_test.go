@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -74,6 +75,13 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	if active.ID != buildID || active.State != "published" || active.Generation != 1 || active.ChunkCount != 2 || active.TotalTokenCount != 6 {
 		t.Fatalf("unexpected active corpus: %+v", active)
 	}
+	otherVisibility := "restricted-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	otherBuildID := uuid.New()
+	otherChunk := preparedChunk(t, hasher, uuid.New(), "invoice invoice invoice invoice")
+	createReadyBuild(t, indexer, tenant, otherVisibility, buildSpec(otherBuildID, hasher.KeyID(), 1), otherChunk)
+	if generation, err := indexer.Publish(ctx, tenant, otherVisibility, otherBuildID, 0); err != nil || generation != 1 {
+		t.Fatalf("publish independent visibility corpus generation=%d err=%v", generation, err)
+	}
 	invoice := hasher.ID("invoice")
 	results, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID(), []index.TermID{invoice}, 5, 20)
 	if err != nil {
@@ -81,6 +89,16 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	}
 	if len(results.Candidates) != 1 || results.Candidates[0].DocumentVersionID != chunks[0].DocumentVersionID || results.Candidates[0].Score <= 0 {
 		t.Fatalf("unexpected lexical results: %+v", results)
+	}
+	// Independent BM25 calculation for the two-chunk finance corpus: invoice
+	// occurs twice in one three-token chunk, N=2, df=1, and avg length=3.
+	wantScore := math.Log(1+(2.0-1.0+.5)/(1.0+.5)) * (2.0 * 2.2 / (2.0 + 1.2))
+	if math.Abs(results.Candidates[0].Score-wantScore) > 1e-12 {
+		t.Fatalf("BM25 score=%0.15f, independently calculated score=%0.15f", results.Candidates[0].Score, wantScore)
+	}
+	cohortResults, err := app.SearchScores(ctx, tenant, otherVisibility, hasher.KeyID(), []index.TermID{invoice}, 5, 20)
+	if err != nil || len(cohortResults.Candidates) != 1 || cohortResults.Candidates[0].DocumentVersionID != otherChunk.DocumentVersionID || cohortResults.Candidates[0].ChunkID == results.Candidates[0].ChunkID {
+		t.Fatalf("visibility cohort received another corpus's candidates: results=%+v err=%v", cohortResults, err)
 	}
 	if _, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID()+"-wrong", []index.TermID{invoice}, 5, 20); !errors.Is(err, ErrTermKeyMismatch) {
 		t.Fatalf("wrong term key was accepted: %v", err)
@@ -91,9 +109,8 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	if _, err := app.ActiveBuild(ctx, otherTenant, visibility); !errors.Is(err, ErrNoActiveBuild) {
 		t.Fatalf("another tenant read a corpus: %v", err)
 	}
-	otherVisibility := "restricted-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
-	if _, err := app.ActiveBuild(ctx, tenant, otherVisibility); !errors.Is(err, ErrNoActiveBuild) {
-		t.Fatalf("another visibility cohort read a corpus: %v", err)
+	if active, err := app.ActiveBuild(ctx, tenant, otherVisibility); err != nil || active.ID != otherBuildID {
+		t.Fatalf("visibility cohort read wrong corpus: active=%+v err=%v", active, err)
 	}
 	if err := withScope(ctx, indexerDB, scope{tenant: tenant, visibility: visibility}, nil, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM keel_meta.retrieval_chunks WHERE tenant_id=$1 AND build_id=$2`, string(tenant), buildID)
