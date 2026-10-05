@@ -164,6 +164,15 @@ func (p *ErasureActionProcessor) ProcessOne(ctx context.Context, tenant tenancy.
 	return job, true, nil
 }
 
+// ReadErasureBacklog exposes only bounded scope-local counts for the runtime's
+// low-cardinality backlog gauges.
+func (p *ErasureActionProcessor) ReadErasureBacklog(ctx context.Context, tenant tenancy.TenantID, visibility string) (ErasureBacklog, error) {
+	if p == nil || p.repository == nil {
+		return ErasureBacklog{}, errors.New("erasure processor repository is required")
+	}
+	return p.repository.ReadErasureBacklog(ctx, tenant, visibility)
+}
+
 // executeUnderLease renews the current fencing epoch while an injected handler
 // runs and bounds a single action so a wedged provider cannot hold the job
 // forever. Losing the database lease cancels the handler immediately.

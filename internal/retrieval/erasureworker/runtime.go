@@ -17,9 +17,11 @@ import (
 )
 
 const (
-	MinPollInterval     = time.Second
-	MaxPollInterval     = 30 * time.Second
-	MaxIdlePollInterval = time.Minute
+	MinPollInterval        = time.Second
+	MaxPollInterval        = 30 * time.Second
+	MaxIdlePollInterval    = time.Minute
+	BacklogRefreshInterval = 30 * time.Second
+	BacklogRefreshTimeout  = 500 * time.Millisecond
 )
 
 // Scope must be created from trusted server-side authorization state. Do not
@@ -33,6 +35,18 @@ type Scope struct {
 // than one due job, keeping the runtime's per-scope work bounded.
 type Processor interface {
 	ProcessOne(context.Context, tenancy.TenantID, string) (postgres.ErasureJob, bool, error)
+}
+
+// BacklogReader exposes a bounded summary for the same explicitly authorized
+// scope used by Processor.
+type BacklogReader interface {
+	ReadErasureBacklog(context.Context, tenancy.TenantID, string) (postgres.ErasureBacklog, error)
+}
+
+// BacklogObserver accepts a sampled scope-local backlog without requiring
+// tenant/cohort labels in exported metrics.
+type BacklogObserver interface {
+	ObserveErasureBacklog(postgres.ErasureBacklog)
 }
 
 // Observation omits scope IDs so an observer can export low-cardinality worker
@@ -115,6 +129,29 @@ func (r *Runtime) PollOnce(ctx context.Context) (Observation, error) {
 	return observation, err
 }
 
+// RefreshBacklog samples the configured worker's one authorized scope. The
+// caller should use a short database deadline and sample no more often than
+// BacklogRefreshInterval.
+func (r *Runtime) RefreshBacklog(ctx context.Context) error {
+	if ctx == nil || r == nil || r.processor == nil || r.observer == nil {
+		return errors.New("erasure worker runtime and context are required")
+	}
+	reader, ok := r.processor.(BacklogReader)
+	if !ok {
+		return errors.New("erasure worker processor does not expose backlog summaries")
+	}
+	observer, ok := r.observer.(BacklogObserver)
+	if !ok {
+		return errors.New("erasure worker observer does not accept backlog summaries")
+	}
+	backlog, err := reader.ReadErasureBacklog(ctx, r.scope.Tenant, r.scope.VisibilityKey)
+	if err != nil {
+		return err
+	}
+	observer.ObserveErasureBacklog(backlog)
+	return nil
+}
+
 // Run polls until cancellation. Rounds with no claimed job use exponential
 // idle backoff with jitter to limit database load and avoid synchronized
 // replicas. Active work returns to the configured poll interval.
@@ -123,9 +160,21 @@ func (r *Runtime) Run(ctx context.Context) error {
 		return errors.New("erasure worker runtime and context are required")
 	}
 	idleInterval := r.interval
+	lastBacklogRefresh := time.Time{}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
+		}
+		if time.Since(lastBacklogRefresh) >= BacklogRefreshInterval && r.hasBacklogExtensions() {
+			backlogCtx, cancel := context.WithTimeout(ctx, BacklogRefreshTimeout)
+			if err := r.RefreshBacklog(backlogCtx); err != nil {
+				r.onError(err)
+			}
+			cancel()
+			lastBacklogRefresh = time.Now()
+			if err := ctx.Err(); err != nil {
+				return nil
+			}
 		}
 		observation, pollErr := r.PollOnce(ctx)
 		if err := ctx.Err(); err != nil {
@@ -157,4 +206,10 @@ func (r *Runtime) Run(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
+}
+
+func (r *Runtime) hasBacklogExtensions() bool {
+	_, canRead := r.processor.(BacklogReader)
+	_, canObserve := r.observer.(BacklogObserver)
+	return canRead && canObserve
 }

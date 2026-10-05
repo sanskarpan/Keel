@@ -132,7 +132,7 @@ func TestPostgreSQLLexicalPlanUsesPostingTermIdentity(t *testing.T) {
 	if _, err := indexer.Publish(context.Background(), tenant, visibility, buildID, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adminDB.ExecContext(context.Background(), `ANALYZE keel_meta.retrieval_term_postings,keel_meta.retrieval_term_statistics,keel_meta.retrieval_chunks`); err != nil {
+	if _, err := adminDB.ExecContext(context.Background(), `ANALYZE keel_meta.retrieval_term_postings,keel_meta.retrieval_term_statistics,keel_meta.retrieval_chunks,keel_meta.retrieval_source_eligibility`); err != nil {
 		t.Fatal(err)
 	}
 	term := hasher.ID("marker00000")

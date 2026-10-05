@@ -16,6 +16,29 @@ func (f processorFunc) ProcessOne(ctx context.Context, tenant tenancy.TenantID, 
 	return f(ctx, tenant, visibility)
 }
 
+type backlogProcessor struct {
+	process    processorFunc
+	backlog    postgres.ErasureBacklog
+	reads      int
+	tenant     tenancy.TenantID
+	visibility string
+}
+
+func (p *backlogProcessor) ProcessOne(ctx context.Context, tenant tenancy.TenantID, visibility string) (postgres.ErasureJob, bool, error) {
+	return p.process(ctx, tenant, visibility)
+}
+
+func (p *backlogProcessor) ReadErasureBacklog(ctx context.Context, tenant tenancy.TenantID, visibility string) (postgres.ErasureBacklog, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > BacklogRefreshTimeout {
+		return postgres.ErasureBacklog{}, errors.New("backlog read has no deadline")
+	}
+	p.reads++
+	p.tenant = tenant
+	p.visibility = visibility
+	return p.backlog, nil
+}
+
 type observerFunc func(Observation)
 
 func (f observerFunc) ObserveErasurePoll(observation Observation) {
@@ -25,6 +48,20 @@ func (f observerFunc) ObserveErasurePoll(observation Observation) {
 type noopObserver struct{}
 
 func (noopObserver) ObserveErasurePoll(Observation) {}
+
+type backlogObserver struct {
+	cancel  context.CancelFunc
+	backlog postgres.ErasureBacklog
+	seen    int
+}
+
+func (o *backlogObserver) ObserveErasurePoll(Observation) {}
+
+func (o *backlogObserver) ObserveErasureBacklog(backlog postgres.ErasureBacklog) {
+	o.backlog = backlog
+	o.seen++
+	o.cancel()
+}
 
 func noopErrorHandler(error) {}
 
@@ -169,5 +206,32 @@ func TestRunReportsPollErrorsBeforeObserving(t *testing.T) {
 	}
 	if observed != (Observation{ScopeCount: 1, Claimed: 1, Blocked: 1, Errors: 1}) {
 		t.Fatalf("unexpected error observation: %#v", observed)
+	}
+}
+
+func TestRunSamplesBacklogWithOneAuthorizedScopeAndDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	want := postgres.ErasureBacklog{Fenced: 3, Due: 3}
+	processor := &backlogProcessor{
+		process: func(context.Context, tenancy.TenantID, string) (postgres.ErasureJob, bool, error) {
+			return postgres.ErasureJob{}, false, nil
+		},
+		backlog: want,
+	}
+	observer := &backlogObserver{cancel: cancel}
+	runtime, err := New(processor, validScope(), MaxPollInterval, observer, noopErrorHandler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Run(ctx); err != nil {
+		t.Fatalf("run should shut down cleanly after backlog observation: %v", err)
+	}
+	if processor.reads != 1 || processor.tenant != validScope().Tenant || processor.visibility != validScope().VisibilityKey {
+		t.Fatalf("backlog read escaped or skipped the configured scope: reads=%d tenant=%s visibility=%s",
+			processor.reads, processor.tenant, processor.visibility)
+	}
+	if observer.seen != 1 || observer.backlog != want {
+		t.Fatalf("backlog observation=%+v seen=%d, want=%+v once", observer.backlog, observer.seen, want)
 	}
 }

@@ -4,6 +4,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/sanskarpan/keel/internal/retrieval/postgres"
 )
 
 func TestMetricsAggregatePollOutcomesWithoutLabels(t *testing.T) {
@@ -52,6 +55,43 @@ func TestMetricsConcurrentObservation(t *testing.T) {
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("concurrent metric update missing %q: %s", expected, output)
+		}
+	}
+}
+
+func TestMetricsExportLatestBacklogSnapshot(t *testing.T) {
+	var metrics Metrics
+	before := metrics.PrometheusMetrics()
+	if strings.Contains(before, "keel_erasure_worker_backlog_") {
+		t.Fatalf("backlog gauges were exported before a snapshot: %s", before)
+	}
+	metrics.ObserveErasureBacklog(postgres.ErasureBacklog{
+		SampledAt:                   time.Unix(1_800_000_000, 0),
+		Fenced:                      2,
+		CleanupPending:              4,
+		Blocked:                     3,
+		Due:                         1,
+		Deferred:                    2,
+		Leased:                      1,
+		ExpiredLease:                0,
+		OldestOutstandingAgeSeconds: 17,
+		Truncated:                   true,
+	})
+	output := metrics.PrometheusMetrics()
+	for _, expected := range []string{
+		"keel_erasure_worker_backlog_fenced_jobs 2",
+		"keel_erasure_worker_backlog_cleanup_pending_jobs 4",
+		"keel_erasure_worker_backlog_blocked_jobs 3",
+		"keel_erasure_worker_backlog_due_jobs 1",
+		"keel_erasure_worker_backlog_deferred_jobs 2",
+		"keel_erasure_worker_backlog_leased_jobs 1",
+		"keel_erasure_worker_backlog_expired_lease_jobs 0",
+		"keel_erasure_worker_backlog_oldest_age_seconds 17",
+		"keel_erasure_worker_backlog_sample_truncated 1",
+		"keel_erasure_worker_backlog_sample_timestamp_seconds 1800000000",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("backlog metrics output missing %q: %s", expected, output)
 		}
 	}
 }
