@@ -35,6 +35,9 @@ const (
 	maxRefillUnitsPS = int64(100_000_000)
 	maxBucketTTL     = 30 * 24 * time.Hour
 	maxReplayTTL     = 10 * time.Minute
+	maxRegionLength  = 64
+	maxKeyIDLength   = 64
+	maxRouteLength   = 128
 )
 
 // ClientConfig makes remote TLS mandatory. Plaintext is available only for
@@ -55,7 +58,7 @@ type ClientConfig struct {
 
 func NewRedisClient(cfg ClientConfig) (*redis.Client, error) {
 	host, _, err := net.SplitHostPort(cfg.Addr)
-	if err != nil || !idPattern.MatchString(cfg.Region) || cfg.Region != cfg.HomeRegion ||
+	if err != nil || !validIdentifier(cfg.Region, maxRegionLength) || cfg.Region != cfg.HomeRegion ||
 		cfg.DialTimeout < 50*time.Millisecond || cfg.DialTimeout > 5*time.Second ||
 		cfg.ReadTimeout < 50*time.Millisecond || cfg.ReadTimeout > 5*time.Second ||
 		cfg.WriteTimeout < 50*time.Millisecond || cfg.WriteTimeout > 5*time.Second ||
@@ -123,8 +126,8 @@ type Limiter struct {
 }
 
 func New(client redis.UniversalClient, cfg Config) (*Limiter, error) {
-	if client == nil || !idPattern.MatchString(cfg.Region) || cfg.Region != cfg.HomeRegion ||
-		!idPattern.MatchString(cfg.KeyID) || len(cfg.Secret) < 32 ||
+	if client == nil || !validIdentifier(cfg.Region, maxRegionLength) || cfg.Region != cfg.HomeRegion ||
+		!validIdentifier(cfg.KeyID, maxKeyIDLength) || len(cfg.Secret) < 32 ||
 		cfg.ReplayTTL < time.Second || cfg.ReplayTTL > maxReplayTTL {
 		return nil, ErrInvalidConfig
 	}
@@ -134,7 +137,7 @@ func New(client redis.UniversalClient, cfg Config) (*Limiter, error) {
 
 func (l *Limiter) Allow(ctx context.Context, request Request) (Decision, error) {
 	if l == nil || l.client == nil || !uuidPattern.MatchString(request.TenantID) ||
-		!uuidPattern.MatchString(request.RequestID) || !idPattern.MatchString(request.RouteID) ||
+		!uuidPattern.MatchString(request.RequestID) || !validIdentifier(request.RouteID, maxRouteLength) ||
 		!digestPattern.MatchString(request.Policy.Digest) || request.Policy.CapacityUnits <= 0 ||
 		request.Policy.CapacityUnits > maxCapacityUnits || request.Policy.RefillUnitsPerSecond <= 0 ||
 		request.Policy.RefillUnitsPerSecond > maxRefillUnitsPS || request.Policy.CostUnits <= 0 ||
@@ -170,6 +173,10 @@ func (l *Limiter) Allow(ctx context.Context, request Request) (Decision, error) 
 		return Decision{}, ErrIdempotencyConflict
 	}
 	return Decision{Allowed: code == 1, Remaining: remaining, RetryAfter: time.Duration(retryMS) * time.Millisecond, Replayed: replayed == 1}, nil
+}
+
+func validIdentifier(value string, maxLength int) bool {
+	return len(value) > 0 && len(value) <= maxLength && idPattern.MatchString(value)
 }
 
 func (l *Limiter) keys(tenant, route, request string) (string, string) {
