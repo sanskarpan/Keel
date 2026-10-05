@@ -200,7 +200,7 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 	}
 	if indexerDSN := os.Getenv("KEEL_TEST_RETRIEVAL_INDEXER_DATABASE_URL"); indexerDSN != "" {
 		indexerDB := openRoleDB(t, indexerDSN, "keel_local_retrieval_indexer", "keel-retrieval-indexer-local-only")
-		visibility := "supplier-intake-reader"
+		visibility := "supplier-intake-reader:" + uuid.NewString()
 		if err := tenancy.WithTenantTx(ctx, indexerDB, tenant, nil, func(tx *sql.Tx) error {
 			if _, err := tx.ExecContext(ctx, `SELECT set_config('keel.visibility_key',$1,true)`, visibility); err != nil {
 				return err
@@ -262,7 +262,7 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 		if _, err := reader.ReadCitationRange(ctx, tenant, visibility, forged); !errors.Is(err, hybrid.ErrCitationNotAuthorized) {
 			t.Fatalf("citation accepted an unindexed byte range: %v", err)
 		}
-		if _, err := reader.ReadCitationRange(ctx, tenant, visibility+"-other", ref); !errors.Is(err, hybrid.ErrCitationNotAuthorized) {
+		if _, err := reader.ReadCitationRange(ctx, tenant, "other:"+uuid.NewString(), ref); !errors.Is(err, hybrid.ErrCitationNotAuthorized) {
 			t.Fatalf("citation was readable from a different cohort: %v", err)
 		}
 		appRetrieval, err := retrievalpg.New(appDB)
