@@ -41,7 +41,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 
 ## K4 — AI gateway, budget and policy
 
-- [ ] K4.1 Build typed read-only agent query broker with protected session-role mapping.
+- [ ] K4.1 Build typed read-only agent query broker with protected session-role mapping. Partial internal slice: PR #185 (issue #184 under #31) adds one fixed `get_order_summary` tool, strict bounded/canonical input parsing, verified-identity claim boundary, fail-closed authorization before reads, and a tenant-bound PostgreSQL security-invoker projection that excludes private snapshots. Evidence: `docs/K4.1-ORDER-SUMMARY-EVIDENCE.md`; focused unit tests, vet and full compile passed locally; PostgreSQL/RLS integration is running in PR CI. This does not provide production identity/authorization adapters or a live model mount; keep K4.1 and K4 gate open.
 - [ ] K4.2 Implement versioned prompt/provider/tool policy and PII scrubbing before provider/logging. Partial offline foundation: PR #183 (issue #182) adds immutable code-owned bundle versions, fake-only provider/model registration, no-tools policy, canonical digest, typed provenance/classification, high-confidence scrubbing before provider exposure, and content-free policy logs. Evidence: `docs/K4.2-EVIDENCE.md`; local race tests, vet and full compile passed. This does not complete K4.2: no live adapter/deployment bundle, authenticated input-classification wiring, K4.1 broker, K4.3 spend admission, K4.4 leased runtime, or K5.4 retention/tracing; keep K4.2 open.
 - [ ] K4.3 Implement durable reserve/settle/unknown-liability ledger and safe price quoting.
 - [ ] K4.4 Add fair DB job claims, lease epochs, provider concurrency/token/time caps.
