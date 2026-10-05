@@ -62,9 +62,9 @@ func (f SourceErasureReceiptWriterFunc) RecordSourceObjects(ctx context.Context,
 }
 
 // Eraser removes the raw and extracted supplier upload objects for one
-// withdrawn source. It is an idempotent source-store action, not an erasure
-// processor: callers must obtain current legal-hold clearance and record an
-// action receipt, and must not complete the durable job based on this action.
+// withdrawn source and records that action's receipt. It is not the complete
+// erasure processor; callers must not complete the durable job based on this
+// action alone because every other manifest action remains required.
 type Eraser struct {
 	db            *sql.DB
 	objects       ObjectDeleter
@@ -99,9 +99,12 @@ func (e *Eraser) EraseClaimed(ctx context.Context, tenant tenancy.TenantID, visi
 	if err != nil {
 		return errors.New("source erasure visibility is invalid")
 	}
-	rawKey, extractedKey, documentVersionID, generation, err := e.authorizedObjectKeys(ctx, tenantID, visibility, workerID, jobID, epoch)
+	rawKey, extractedKey, documentVersionID, generation, alreadyRecorded, err := e.authorizedObjectKeys(ctx, tenantID, visibility, workerID, jobID, epoch)
 	if err != nil {
 		return err
+	}
+	if alreadyRecorded {
+		return nil
 	}
 	if _, err := uuid.Parse(rawKey); err != nil {
 		return errors.New("supplier raw object identity is invalid")
@@ -129,19 +132,19 @@ func (e *Eraser) EraseClaimed(ctx context.Context, tenant tenancy.TenantID, visi
 			_ = clearance.Release()
 		}
 	}()
-	if _, _, _, _, err := e.authorizedObjectKeys(ctx, tenantID, visibility, workerID, jobID, epoch); err != nil {
+	if _, _, _, _, _, err := e.authorizedObjectKeys(ctx, tenantID, visibility, workerID, jobID, epoch); err != nil {
 		return err
 	}
 	if err := e.objects.Delete(ctx, extractedKey); err != nil {
 		return errors.New("supplier extracted source object could not be erased")
 	}
-	if _, _, _, _, err := e.authorizedObjectKeys(ctx, tenantID, visibility, workerID, jobID, epoch); err != nil {
+	if _, _, _, _, _, err := e.authorizedObjectKeys(ctx, tenantID, visibility, workerID, jobID, epoch); err != nil {
 		return err
 	}
 	if err := e.objects.Delete(ctx, rawKey); err != nil {
 		return errors.New("supplier raw source object could not be erased")
 	}
-	if _, _, _, _, err := e.authorizedObjectKeys(ctx, tenantID, visibility, workerID, jobID, epoch); err != nil {
+	if _, _, _, _, _, err := e.authorizedObjectKeys(ctx, tenantID, visibility, workerID, jobID, epoch); err != nil {
 		return err
 	}
 	// The receipt digest binds the immutable job/source identity, object IDs,
@@ -158,15 +161,21 @@ func (e *Eraser) EraseClaimed(ctx context.Context, tenant tenancy.TenantID, visi
 	return nil
 }
 
-func (e *Eraser) authorizedObjectKeys(ctx context.Context, tenant tenancy.TenantID, visibility, workerID string, jobID uuid.UUID, epoch int64) (string, string, uuid.UUID, int64, error) {
+func (e *Eraser) authorizedObjectKeys(ctx context.Context, tenant tenancy.TenantID, visibility, workerID string, jobID uuid.UUID, epoch int64) (string, string, uuid.UUID, int64, bool, error) {
 	var rawKey, extractedKey string
 	var documentVersionID uuid.UUID
 	var generation int64
+	var alreadyRecorded bool
 	err := tenancy.WithTenantTx(ctx, e.db, tenant, &sql.TxOptions{Isolation: sql.LevelReadCommitted}, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `SELECT set_config('keel.visibility_key',$1,true)`, visibility); err != nil {
 			return fmt.Errorf("set source erasure visibility scope: %w", err)
 		}
-		err := tx.QueryRowContext(ctx, `SELECT j.document_version_id,j.eligibility_generation
+		err := tx.QueryRowContext(ctx, `SELECT j.document_version_id,j.eligibility_generation,EXISTS (
+				SELECT 1 FROM keel_meta.retrieval_erasure_action_receipts source_receipt
+				WHERE source_receipt.tenant_id=j.tenant_id AND source_receipt.visibility_key=j.visibility_key
+				  AND source_receipt.job_id=j.job_id AND source_receipt.action_key='supplier_source_objects'
+				  AND source_receipt.disposition='complete'
+			)
 			FROM keel_meta.retrieval_erasure_jobs j
 			JOIN keel_meta.retrieval_source_eligibility e
 			  ON e.tenant_id=j.tenant_id AND e.visibility_key=j.visibility_key AND e.document_version_id=j.document_version_id
@@ -177,7 +186,7 @@ func (e *Eraser) authorizedObjectKeys(ctx context.Context, tenant tenancy.Tenant
 			    SELECT 1 FROM keel_meta.retrieval_erasure_action_receipts r
 			    WHERE r.tenant_id=j.tenant_id AND r.visibility_key=j.visibility_key AND r.job_id=j.job_id
 			      AND r.action_key='legal_hold_check' AND r.disposition='complete' AND r.lease_epoch<=$5
-			  )`, string(tenant), visibility, jobID, workerID, epoch).Scan(&documentVersionID, &generation)
+			  )`, string(tenant), visibility, jobID, workerID, epoch).Scan(&documentVersionID, &generation, &alreadyRecorded)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrSourceErasureNotAuthorized
 		}
@@ -197,7 +206,7 @@ func (e *Eraser) authorizedObjectKeys(ctx context.Context, tenant tenancy.Tenant
 		return nil
 	})
 	if err != nil {
-		return "", "", uuid.Nil, 0, err
+		return "", "", uuid.Nil, 0, false, err
 	}
-	return rawKey, extractedKey, documentVersionID, generation, nil
+	return rawKey, extractedKey, documentVersionID, generation, alreadyRecorded, nil
 }
