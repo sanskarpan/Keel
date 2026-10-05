@@ -124,3 +124,16 @@ The common SaaS table families and lifecycle constraints in shared SAAS-FOUNDATI
 Every child uses composite tenant FKs; finer entity/thread/supplier visibility applies in API/views in addition to RLS. Agent tools expose only allowlisted authorized views, not new billing/contact/raw invoice tables by default. Add indexes for active approval steps by assignee/deadline, procurement reservations by account/state, supplier tasks, renewal due dates, PO line receipt sums and connector pending intents. Financial/billing/dedup ledgers remain unpartitioned initially or use a separately proven permanent dedup registry. No invoice/receipt index bypasses current entity permissions.
 
 Business-unit visibility enters document/cache/context scope revisions; permission changes invalidate eligible search/cache reads. Expanded events include typed IDs/digests rather than raw contact, banking or invoice text. Retention profiles distinguish business documents, comment edit history, subscription accounting records, risk/legal holds and exports; object version purge and restore erasure journal cover every new storage family.
+
+## 9. Supplier approval arbitration (K2.4)
+
+Migrations `0011_supplier_case_approval_arbitration` and `0012_supplier_case_expiry_deadline_guard` add:
+
+| Table | Key and purpose | Mutation boundary |
+|---|---|---|
+| `supplier_case_approval_plans` | `(tenant,case,step)`; immutable role/dependencies plus policy/evidence/plan digests | Insert only during submission; trigger matches immutable policy; deferred snapshot guard requires every policy step |
+| `supplier_case_reviewer_grants` | `(tenant,principal,role)`; current assignment and revocation time | App SELECT only; trusted identity synchronization/provisioning is not implemented |
+| `supplier_case_delegations` | tenant/delegation ID; one-level delegator/delegatee/role window and revocation | App SELECT only; no chained delegation |
+| `supplier_case_decisions` | `(tenant,case,decision)` with unique step, outcome, reason, request digest and accepted aggregate version | App SELECT/INSERT only; database stamps acceptance after taking the case row lock |
+
+Decision triggers enforce the frozen plan step, active grant or one direct delegation, requester separation, completed prerequisites and strict `accepted_at < deadline_at`. Deferred checks bind each immutable decision to an event with the same actor and acceptance timestamp, plus its versioned case snapshot and workflow intent. The case row serializes decisions and expiry; the expiry trigger independently requires a submitted case and a matching deadline timestamp between persisted deadline and database current time. No role/member management endpoint or Temporal expiry activity is mounted; those remain identity/runtime gates.
