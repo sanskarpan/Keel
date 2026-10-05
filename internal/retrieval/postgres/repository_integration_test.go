@@ -17,6 +17,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 	"github.com/sanskarpan/keel/internal/retrieval/contracts"
+	"github.com/sanskarpan/keel/internal/retrieval/hybrid"
 	"github.com/sanskarpan/keel/internal/retrieval/index"
 )
 
@@ -96,6 +97,17 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	if math.Abs(results.Candidates[0].Score-wantScore) > 1e-12 {
 		t.Fatalf("BM25 score=%0.15f, independently calculated score=%0.15f", results.Candidates[0].Score, wantScore)
 	}
+	reader := &staticCitationRangeReader{content: map[uuid.UUID][]byte{chunks[0].DocumentVersionID: []byte("invoice invoice total")}}
+	resolver, err := app.NewCitationResolver(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	citation := hybrid.CitationRef{ChunkID: results.Candidates[0].ChunkID, DocumentVersionID: results.Candidates[0].DocumentVersionID,
+		Ordinal: results.Candidates[0].Ordinal, StartByte: results.Candidates[0].StartByte, EndByte: results.Candidates[0].EndByte, ContentDigest: results.Candidates[0].ContentDigest}
+	resolved, err := resolver.ResolveCitation(ctx, hybrid.Scope{TenantID: tenant, VisibilityKey: visibility}, citation)
+	if err != nil || resolved.Excerpt != "invoice invoice total" || reader.calls != 1 {
+		t.Fatalf("current citation resolver returned invalid content: resolved=%+v calls=%d err=%v", resolved, reader.calls, err)
+	}
 	cohortResults, err := app.SearchScores(ctx, tenant, otherVisibility, hasher.KeyID(), []index.TermID{invoice}, 5, 20)
 	if err != nil || len(cohortResults.Candidates) != 1 || cohortResults.Candidates[0].DocumentVersionID != otherChunk.DocumentVersionID || cohortResults.Candidates[0].ChunkID == results.Candidates[0].ChunkID {
 		t.Fatalf("visibility cohort received another corpus's candidates: results=%+v err=%v", cohortResults, err)
@@ -129,6 +141,9 @@ func TestPostgreSQLTenantVisibilityScopedLexicalPublication(t *testing.T) {
 	withdrawnResults, err := app.SearchScores(ctx, tenant, visibility, hasher.KeyID(), []index.TermID{invoice}, 5, 20)
 	if err != nil || len(withdrawnResults.Candidates) != 0 {
 		t.Fatalf("query returned withdrawn source: results=%+v err=%v", withdrawnResults, err)
+	}
+	if _, err := resolver.ResolveCitation(ctx, hybrid.Scope{TenantID: tenant, VisibilityKey: visibility}, citation); !errors.Is(err, hybrid.ErrCitationNotAuthorized) || reader.calls != 1 {
+		t.Fatalf("citation resolver returned content after withdrawal: calls=%d err=%v", reader.calls, err)
 	}
 	staleBuildID := uuid.New()
 	if err := indexer.BeginBuild(ctx, tenant, visibility, buildSpec(staleBuildID, hasher.KeyID(), 1)); err != nil {
