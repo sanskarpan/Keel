@@ -167,7 +167,7 @@ func deleteErasureVectorRows(ctx context.Context, tx *sql.Tx, s scope, buildID, 
 		SELECT v.ctid FROM keel_meta.retrieval_vector_chunks v
 		JOIN keel_meta.retrieval_chunks c ON c.tenant_id=v.tenant_id AND c.build_id=v.corpus_build_id AND c.chunk_id=v.chunk_id
 		WHERE v.tenant_id=$1 AND v.visibility_key=$2 AND v.vector_build_id=$3 AND c.document_version_id=$4
-		ORDER BY c.chunk_id LIMIT $5 FOR UPDATE OF v SKIP LOCKED
+		ORDER BY c.chunk_id LIMIT $5
 	)
 	DELETE FROM keel_meta.retrieval_vector_chunks v USING candidates x WHERE v.ctid=x.ctid`,
 		string(s.tenant), s.visibility, buildID, documentVersionID, limit)
@@ -188,13 +188,13 @@ func deleteErasureCorpusRows(ctx context.Context, tx *sql.Tx, s scope, buildID, 
 			SELECT p.ctid FROM keel_meta.retrieval_term_postings p
 			JOIN keel_meta.retrieval_chunks c ON c.tenant_id=p.tenant_id AND c.build_id=p.build_id AND c.chunk_id=p.chunk_id
 			WHERE p.tenant_id=$1 AND p.visibility_key=$2 AND p.build_id=$3 AND c.document_version_id=$4
-			ORDER BY p.term_id,p.chunk_id LIMIT $5 FOR UPDATE OF p SKIP LOCKED
+			ORDER BY p.term_id,p.chunk_id LIMIT $5
 		)
 		DELETE FROM keel_meta.retrieval_term_postings p USING candidates x WHERE p.ctid=x.ctid`},
 		{"failed-build term statistics", `WITH candidates AS (
 			SELECT s.ctid FROM keel_meta.retrieval_term_statistics s
 			WHERE s.tenant_id=$1 AND s.visibility_key=$2 AND s.build_id=$3
-			ORDER BY s.term_id LIMIT $4 FOR UPDATE OF s SKIP LOCKED
+			ORDER BY s.term_id LIMIT $4
 		)
 		DELETE FROM keel_meta.retrieval_term_statistics s USING candidates x WHERE s.ctid=x.ctid`},
 		{"unreferenced source chunks", `WITH candidates AS (
@@ -204,7 +204,7 @@ func deleteErasureCorpusRows(ctx context.Context, tx *sql.Tx, s scope, buildID, 
 			    WHERE p.tenant_id=c.tenant_id AND p.build_id=c.build_id AND p.chunk_id=c.chunk_id)
 			  AND NOT EXISTS (SELECT 1 FROM keel_meta.retrieval_vector_chunks v
 			    WHERE v.tenant_id=c.tenant_id AND v.corpus_build_id=c.build_id AND v.chunk_id=c.chunk_id)
-			ORDER BY c.chunk_id LIMIT $5 FOR UPDATE OF c SKIP LOCKED
+			ORDER BY c.chunk_id LIMIT $5
 		)
 		DELETE FROM keel_meta.retrieval_chunks c USING candidates x WHERE c.ctid=x.ctid`},
 	}
