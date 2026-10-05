@@ -20,7 +20,10 @@ before running application migrations; the restricted `keel_schema_owner` role m
 The disposable CI database explicitly enables pgvector before applying the migration chain.
 Migration `0016_retrieval_source_eligibility_erasure` adds a forced-RLS cohort/source withdrawal fence,
 blocks stale rebuild publication and query results, and persists idempotent fenced erasure requests.
-It is a logical suppression boundary: source-object deletion, physical index compaction, backup expiry,
-and a production cleanup worker require separately qualified adapters and runbooks.
+Migration `0017_retrieval_erasure_leases` adds tenant/cohort-scoped skip-locked claims, lease epochs,
+bounded retry scheduling, and durable blocked/completed outcomes for those requests. These migrations
+provide query suppression and cleanup orchestration state only: source-object deletion, physical index
+compaction, backup expiry, and an end-to-end cleanup processor require separately qualified adapters
+and runbooks.
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
