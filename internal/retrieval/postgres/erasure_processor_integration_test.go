@@ -24,6 +24,10 @@ func TestErasureActionProcessorRequiresEveryManifestExecutor(t *testing.T) {
 	if _, err := NewErasureActionProcessor(&Repository{}, "eraser-test", time.Minute, time.Second, map[string]ErasureActionExecutor{}); err == nil {
 		t.Fatal("processor accepted a missing action executor")
 	}
+	var nilExecutor ErasureActionExecutorFunc
+	if _, err := nilExecutor.Execute(context.Background(), ErasureJob{}, "tenant", "cohort"); err == nil {
+		t.Fatal("nil executor function did not fail closed")
+	}
 }
 
 func TestPostgreSQLErasureActionProcessorOrdersReceiptsAndCompletes(t *testing.T) {
