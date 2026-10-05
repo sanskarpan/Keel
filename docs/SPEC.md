@@ -46,6 +46,10 @@ K2.6 preserves the deployed supplier-case V1 Temporal identifiers and signal sch
 
 ## 6. Hybrid retrieval
 
+Analyzer and chunker IDs are immutable inputs. `keel.unicode-words.v1` rejects invalid UTF-8 and bounded oversized inputs, applies NFKC and full Unicode case folding per token, segments Unicode letters/numbers while retaining combining marks, and treats punctuation/control characters as separators. Tokens carry half-open byte spans into the original UTF-8 source. Query analysis is capped at 64 terms. `keel.paragraph-window.v1` uses bounded windows (default 200 tokens, overlap 30, source <=1 MiB), does not split tokens, and records body source offsets separately from heading context; an empty document produces no chunks. Changes to any boundary-affecting option require a new analyzer/chunker ID and corpus build. Language coverage and stopword behavior must be explicit in a reviewed analyzer profile; the seed fixture does not establish multilingual retrieval quality.
+
+Every corpus build manifest MUST pin immutable analyzer/chunker IDs, source version set, model/provider revision and artifact digest, tokenizer/input limit, dimensions, vector normalization, distance function and corpus-build ID. `latest`/`default` aliases are not production identities. Embeddings from different model identities or dimensions MUST NOT share an index. K3.1 uses an evaluation-only hash-vectorizer fixture, never customer data. The labeled CC0 seed and its linter are correctness fixtures, not a relevance benchmark, production model, or serving qualification.
+
 Chunk documents into reproducible, versioned sections with parent titles and source offsets. Bound chunk size and extraction cost. Index only successfully scanned and published versions; document withdrawal/ACL changes invalidate eligibility immediately at query time, even before asynchronous index cleanup.
 
 BM25 score for query terms:
