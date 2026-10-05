@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keel.example/schemas/retrieval-eval-v1.json",
+  "title": "Keel retrieval evaluation corpus v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "dataset_id", "license", "synthetic_only", "documents", "queries", "access_denials"],
+  "properties": {
+    "schema_version": {"const": "keel.retrieval-eval.v1"},
+    "dataset_id": {"type": "string", "minLength": 3, "maxLength": 160},
+    "license": {"const": "CC0-1.0"},
+    "synthetic_only": {"const": true},
+    "documents": {"type": "array", "minItems": 1, "maxItems": 1000, "items": {"$ref": "#/$defs/document"}},
+    "queries": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"$ref": "#/$defs/query"}},
+    "access_denials": {"type": "array", "items": {"$ref": "#/$defs/accessDenial"}}
+  },
+  "$defs": {
+    "document": {"type": "object", "additionalProperties": false, "required": ["id", "version", "tenant", "visibility", "published", "text"], "properties": {"id": {"type": "string"}, "version": {"type": "string"}, "tenant": {"type": "string", "minLength": 1}, "visibility": {"type": "string", "minLength": 1}, "published": {"const": true}, "text": {"type": "string", "minLength": 1, "maxLength": 1048576}}},
+    "query": {"type": "object", "additionalProperties": false, "required": ["id", "partition", "text", "tenant", "visibility", "rationale", "no_answer", "judgments"], "properties": {"id": {"type": "string"}, "partition": {"enum": ["train", "dev", "holdout"]}, "text": {"type": "string", "minLength": 1}, "tenant": {"type": "string"}, "visibility": {"type": "string"}, "rationale": {"type": "string", "minLength": 1}, "no_answer": {"type": "boolean"}, "judgments": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/judgment"}}}},
+    "judgment": {"type": "object", "additionalProperties": false, "required": ["document_id", "document_version", "grade", "start_byte", "end_byte", "rationale"], "properties": {"document_id": {"type": "string"}, "document_version": {"type": "string"}, "grade": {"type": "integer", "minimum": 0, "maximum": 3}, "start_byte": {"type": "integer", "minimum": 0}, "end_byte": {"type": "integer", "minimum": 0}, "rationale": {"type": "string", "minLength": 1}}},
+    "accessDenial": {"type": "object", "additionalProperties": false, "required": ["query_id", "document_id", "document_version", "rationale"], "properties": {"query_id": {"type": "string"}, "document_id": {"type": "string"}, "document_version": {"type": "string"}, "rationale": {"type": "string", "minLength": 1}}}
+  }
+}
