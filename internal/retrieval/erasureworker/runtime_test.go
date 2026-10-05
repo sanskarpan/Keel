@@ -146,3 +146,33 @@ func TestRunPollsAndShutsDownOnCancellation(t *testing.T) {
 		t.Fatalf("run did not make exactly one poll before shutdown: calls=%d observations=%d", calls, observations)
 	}
 }
+
+func TestRunReportsPollErrorsBeforeObserving(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wantErr := errors.New("provider unavailable")
+	processor := processorFunc(func(context.Context, tenancy.TenantID, string) (postgres.ErasureJob, bool, error) {
+		return postgres.ErasureJob{State: "blocked"}, true, wantErr
+	})
+	var handled error
+	var observed Observation
+	observer := observerFunc(func(observation Observation) {
+		observed = observation
+		cancel()
+	})
+	runtime, err := New(processor,
+		[]Scope{{Tenant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VisibilityKey: "private_documents"}},
+		MinPollInterval, observer, func(err error) { handled = err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Run(ctx); err != nil {
+		t.Fatalf("run should shut down cleanly: %v", err)
+	}
+	if !errors.Is(handled, wantErr) {
+		t.Fatalf("worker error handler did not receive processor error: %v", handled)
+	}
+	if observed != (Observation{ScopeCount: 1, Claimed: 1, Blocked: 1, Errors: 1}) {
+		t.Fatalf("unexpected error observation: %#v", observed)
+	}
+}
