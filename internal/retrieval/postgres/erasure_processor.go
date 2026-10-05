@@ -34,6 +34,11 @@ type ErasureActionExecution struct {
 	ActorID       uuid.UUID
 	Reason        string
 	ReceiptSHA256 [32]byte
+	// Progress yields the live job lease without writing this action's receipt.
+	// It is reserved for successful bounded work such as one derived-index batch.
+	Progress bool
+	// ProgressDelay is required with Progress and is bounded by the repository.
+	ProgressDelay time.Duration
 }
 
 // ErasureActionExecutor runs one action for the current tenant/cohort job
@@ -89,8 +94,9 @@ func NewErasureActionProcessor(repository *Repository, workerID string, lease, b
 }
 
 // ProcessOne leases at most one due job. It returns claimed=false when no work
-// is due. On a handler or receipt error it schedules a bounded retry; exhausted
-// jobs transition to the existing durable blocked state.
+// is due. A successful bounded action may yield the lease with claimed=true and
+// no error while leaving the job pending. Handler and receipt errors consume
+// the bounded failure budget; exhausted jobs transition to the durable blocked state.
 func (p *ErasureActionProcessor) ProcessOne(ctx context.Context, tenant tenancy.TenantID, visibility string) (job ErasureJob, claimed bool, err error) {
 	if ctx == nil || p == nil || p.repository == nil {
 		return ErasureJob{}, false, errors.New("erasure processor context is required")
@@ -121,7 +127,22 @@ func (p *ErasureActionProcessor) ProcessOne(ctx context.Context, tenant tenancy.
 			return p.retry(ctx, tenant, visibility, job, "receipt_check_failed")
 		}
 		if recorded {
+			if result.Progress {
+				return p.retry(ctx, tenant, visibility, job, "action_outcome_invalid")
+			}
 			continue
+		}
+		if result.Progress {
+			if action != ErasureActionDerivedIndex || result.Disposition != "" || result.ActorID != uuid.Nil ||
+				result.Reason != "" || result.ReceiptSHA256 != ([32]byte{}) ||
+				result.ProgressDelay < MinErasureProgressDelay || result.ProgressDelay > MaxErasureProgressDelay {
+				return p.retry(ctx, tenant, visibility, job, "action_outcome_invalid")
+			}
+			yielded, yieldErr := p.repository.YieldErasureJob(ctx, tenant, visibility, p.workerID, job.ID, job.LeaseEpoch, result.ProgressDelay)
+			if yieldErr != nil {
+				return job, true, fmt.Errorf("yield retrieval erasure progress: %w", yieldErr)
+			}
+			return yielded, true, nil
 		}
 		if err := validateErasureExecution(action, result); err != nil {
 			return p.retry(ctx, tenant, visibility, job, "action_outcome_invalid")
