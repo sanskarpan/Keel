@@ -46,6 +46,9 @@ type ErasureActionExecutor interface {
 type ErasureActionExecutorFunc func(context.Context, ErasureJob, string, string) (ErasureActionExecution, error)
 
 func (f ErasureActionExecutorFunc) Execute(ctx context.Context, job ErasureJob, tenant, visibility string) (ErasureActionExecution, error) {
+	if f == nil {
+		return ErasureActionExecution{}, errors.New("erasure action executor function is nil")
+	}
 	return f(ctx, job, tenant, visibility)
 }
 
@@ -96,6 +99,7 @@ func (p *ErasureActionProcessor) ProcessOne(ctx context.Context, tenant tenancy.
 	if err != nil || !claimed {
 		return job, claimed, err
 	}
+	claimedJob := job
 	for _, action := range erasureActionOrder {
 		recorded, checkErr := p.hasReceipt(ctx, tenant, visibility, job.ID, action)
 		if checkErr != nil {
@@ -118,7 +122,7 @@ func (p *ErasureActionProcessor) ProcessOne(ctx context.Context, tenant tenancy.
 	}
 	job, err = p.repository.CompleteErasureJob(ctx, tenant, visibility, p.workerID, job.ID, job.LeaseEpoch)
 	if err != nil {
-		return p.retry(ctx, tenant, visibility, job, "completion_refused")
+		return p.retry(ctx, tenant, visibility, claimedJob, "completion_refused")
 	}
 	return job, true, nil
 }
