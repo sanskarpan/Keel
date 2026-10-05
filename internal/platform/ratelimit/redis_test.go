@@ -134,6 +134,26 @@ func TestRedisGlobalBucketIdempotencyAndIsolation(t *testing.T) {
 	if _, err := b.Allow(ctx, conflict); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting request ID reuse was accepted: %v", err)
 	}
+	// A denied admission must retain sub-unit refill credit when it advances
+	// the bucket timestamp; rounding it away would incorrectly return ~1s.
+	fractional := Request{TenantID: fmt.Sprintf("00000000-0000-4000-8000-%012x", (tenantScope+3)&0xffffffffffff), RouteID: "safe.read",
+		RequestID: "00000000-0000-4000-8000-000000000021",
+		Policy:    Policy{Digest: strings.Repeat("c", 64), CapacityUnits: 1, RefillUnitsPerSecond: 1, CostUnits: 1}}
+	if decision, err := a.Allow(ctx, fractional); err != nil || !decision.Allowed {
+		t.Fatalf("fractional refill setup: %+v err=%v", decision, err)
+	}
+	time.Sleep(550 * time.Millisecond)
+	fractional.RequestID = "00000000-0000-4000-8000-000000000022"
+	denied, err := b.Allow(ctx, fractional)
+	if err != nil || denied.Allowed || denied.RetryAfter <= 0 || denied.RetryAfter >= 750*time.Millisecond {
+		t.Fatalf("partial refill credit was not retained: %+v err=%v", denied, err)
+	}
+	time.Sleep(denied.RetryAfter + 50*time.Millisecond)
+	fractional.RequestID = "00000000-0000-4000-8000-000000000023"
+	refilled, err := a.Allow(ctx, fractional)
+	if err != nil || !refilled.Allowed {
+		t.Fatalf("bucket did not refill after remaining interval: %+v err=%v", refilled, err)
+	}
 	otherTenant := req
 	otherTenant.TenantID = fmt.Sprintf("00000000-0000-4000-8000-%012x", (tenantScope+2)&0xffffffffffff)
 	otherTenant.RequestID = "00000000-0000-4000-8000-000000000013"
