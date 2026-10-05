@@ -18,7 +18,7 @@ Public ingress, application workloads, extraction sandbox, database, event bus, 
 | Malicious PDF/DOCX/extraction payload | Quotas, type/magic checks, malware scan, sandbox/no network/resource limits | Bomb/recursive/archive/parser failure corpus |
 | Webhook SSRF/DNS rebinding | Safe resolver/egress proxy, IP-range policy, connect-time recheck, redirect policy | Metadata/private/IPv6/rebinding integration cases |
 | Replay bypasses approvals or causes duplicate effects | Separate permission, sandbox read-only replay, same event/effect IDs | Replay and revocation tests |
-| Model spends after budget/connection loss | Durable bounded reservation, token ceilings, liability state, provider reconciliation | Concurrent admission and unknown-usage cases |
+| Model spends after budget/connection loss | Durable bounded reservation, token ceilings, per-attempt liability, pinned provider capability, no fallback after ambiguous acceptance/output, provider reconciliation | Concurrent admission, idempotency replay, pre-token fallback, and unknown-usage cases |
 | Forged callback or key confusion | Exact-byte HMAC, timestamp tolerance, provider ID dedupe, key rotation | Signature/key-ID/timing/body-tamper tests |
 | Compromised workload reads all secrets | Per-role workload identity, minimum IAM/DB grants, separate key providers | Runtime effective-access audit |
 | Operator abuse | JIT break-glass, separate admin routes, immutable audit and approval policy | Administrative-action negative tests |
