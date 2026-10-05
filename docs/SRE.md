@@ -46,7 +46,7 @@ Config/secrets are validated at startup. Provider, OIDC and webhook keys rotate 
 |---|---|
 | PostgreSQL unavailable | Reject new commands/admissions; no blind cached authorization of writes; preserve in-flight unknown outcomes for retry by same key |
 | Kafka unavailable | Commit to outbox within bounded backlog; projections lag visibly; reduce/stop nonessential writes when safe buffer budget is reached |
-| Redis unavailable | Model/sensitive admission fails closed; bounded safe-read fallback; streams degrade to durable status/final result |
+| Redis unavailable | Model/budgeted/sensitive admission fails closed; no local quota expansion; streams degrade to durable status/final result. A restart-safe safe-read fallback is not yet enabled. |
 | Temporal unavailable | Case/approval intents persist; UI shows pending synchronization; deadline decision records remain authoritative |
 | Provider unavailable | Bounded pre-stream fallback; reservations/accounting per attempt; interrupted streams show explicit state |
 | Webhook outage | Per-endpoint circuit breaker, jitter retry and durable exhaustion; no core order outage |
