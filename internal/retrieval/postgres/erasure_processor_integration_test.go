@@ -30,6 +30,25 @@ func TestErasureActionProcessorRequiresEveryManifestExecutor(t *testing.T) {
 	}
 }
 
+func TestSupplierSourceObjectsExecutorRequiresLiveLease(t *testing.T) {
+	eraser := &receiptWritingSupplierEraser{}
+	executor, err := NewSupplierSourceObjectsExecutor(eraser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := ErasureJob{ID: uuid.New(), State: "cleanup_pending", LeaseOwner: sql.NullString{String: "eraser-adapter", Valid: true}, LeaseEpoch: 3}
+	if _, err := executor.Execute(context.Background(), job, uuid.NewString(), "adapter-cohort"); err != nil {
+		t.Fatalf("execute with current claim: %v", err)
+	}
+	if eraser.calls != 1 || eraser.worker != job.LeaseOwner.String || eraser.epoch != job.LeaseEpoch {
+		t.Fatalf("eraser did not receive current lease: %+v", eraser)
+	}
+	job.LeaseOwner.Valid = false
+	if _, err := executor.Execute(context.Background(), job, uuid.NewString(), "adapter-cohort"); err == nil {
+		t.Fatal("executor accepted an unclaimed job")
+	}
+}
+
 func TestPostgreSQLErasureActionProcessorOrdersReceiptsAndCompletes(t *testing.T) {
 	appDB, indexerDB := retrievalTestDBs(t)
 	app, err := New(appDB)
@@ -108,15 +127,12 @@ func TestPostgreSQLErasureActionProcessorResumesAfterPartialSuccess(t *testing.T
 	}
 	var order []string
 	executors := testErasureExecutors(&order)
-	deleteAttempts := 0
-	executors[ErasureActionSupplierSourceObject] = testErasureExecutor(func(_ context.Context, _ ErasureJob, _, _ string) (ErasureActionExecution, error) {
-		order = append(order, ErasureActionSupplierSourceObject)
-		deleteAttempts++
-		if deleteAttempts == 1 {
-			return ErasureActionExecution{}, errors.New("synthetic partial provider success")
-		}
-		return completeTestErasureAction(ErasureActionSupplierSourceObject), nil
-	})
+	sourceEraser := &receiptWritingSupplierEraser{repository: worker, order: &order, failFirst: true, actorID: uuid.New()}
+	sourceExecutor, err := NewSupplierSourceObjectsExecutor(sourceEraser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executors[ErasureActionSupplierSourceObject] = sourceExecutor
 	processor, err := NewErasureActionProcessor(worker, "eraser-retry", time.Minute, time.Second, executors)
 	if err != nil {
 		t.Fatal(err)
@@ -135,8 +151,8 @@ func TestPostgreSQLErasureActionProcessorResumesAfterPartialSuccess(t *testing.T
 	if err != nil || !claimed || completed.ID != request.ID || completed.State != "complete" {
 		t.Fatalf("resumed erasure job=%+v claimed=%t err=%v", completed, claimed, err)
 	}
-	if deleteAttempts != 2 || order[2] != ErasureActionSupplierSourceObject || len(order) != 7 {
-		t.Fatalf("partial success was repeated incorrectly: attempts=%d order=%v", deleteAttempts, order)
+	if sourceEraser.calls != 2 || order[2] != ErasureActionSupplierSourceObject || len(order) != 7 {
+		t.Fatalf("partial success was repeated incorrectly: attempts=%d order=%v", sourceEraser.calls, order)
 	}
 	if order[3] != ErasureActionDerivedIndex || order[4] != ErasureActionCacheRevocation ||
 		order[5] != ErasureActionQueuedWorkRevocation || order[6] != ErasureActionBackupExpiry {
@@ -164,4 +180,31 @@ func testErasureExecutors(order *[]string) map[string]ErasureActionExecutor {
 
 func completeTestErasureAction(action string) ErasureActionExecution {
 	return ErasureActionExecution{Disposition: ErasureReceiptComplete, ActorID: uuid.New(), ReceiptSHA256: sha256.Sum256([]byte("synthetic evidence:" + action))}
+}
+
+type receiptWritingSupplierEraser struct {
+	repository *Repository
+	order      *[]string
+	failFirst  bool
+	calls      int
+	actorID    uuid.UUID
+	worker     string
+	epoch      int64
+}
+
+func (e *receiptWritingSupplierEraser) EraseClaimed(ctx context.Context, tenant tenancy.TenantID, visibility, worker string, jobID uuid.UUID, epoch int64) error {
+	e.calls++
+	e.worker, e.epoch = worker, epoch
+	if e.order != nil {
+		*e.order = append(*e.order, ErasureActionSupplierSourceObject)
+	}
+	if e.failFirst && e.calls == 1 {
+		return errors.New("synthetic partial provider success")
+	}
+	if e.repository == nil {
+		return nil
+	}
+	_, err := e.repository.RecordErasureActionReceipt(ctx, tenant, visibility, worker, jobID, epoch,
+		ErasureActionSupplierSourceObject, ErasureReceiptComplete, e.actorID, "", sha256.Sum256([]byte("synthetic supplier delete evidence")))
+	return err
 }
