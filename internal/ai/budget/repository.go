@@ -397,6 +397,21 @@ func (r *Repository) finishOnDatabaseWith(ctx context.Context, db *sql.DB, tenan
 		if err != nil {
 			return err
 		}
+		if reconciliation {
+			// Queue-backed attempts must be finalized by the queue's atomic
+			// reconciliation function. The generic budget path cannot release
+			// their reservation without also terminalizing the job and releasing
+			// its execution-profile concurrency slot.
+			var queueBacked bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+				SELECT 1 FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2
+			)`, string(tenant), inferenceID).Scan(&queueBacked); err != nil {
+				return err
+			}
+			if queueBacked {
+				return ErrBudgetConflict
+			}
+		}
 		entryKind := kind
 		if reconciliation {
 			entryKind = "reconciliation"
