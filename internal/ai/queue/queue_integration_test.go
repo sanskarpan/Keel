@@ -18,6 +18,12 @@ import (
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
 
+type allowQueueReconciliation struct{}
+
+func (allowQueueReconciliation) AuthorizeBudgetReconciliation(context.Context, tenancy.TenantID, string, string, string, string, string, int64) error {
+	return nil
+}
+
 func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	appDSN := os.Getenv("KEEL_TEST_DATABASE_URL")
 	workerDSN := os.Getenv("KEEL_TEST_AI_WORKER_DATABASE_URL")
@@ -44,7 +50,7 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		return db
 	}
 	appDB, workerDB, admin := open(appDSN), open(workerDSN), open(adminDSN)
-	budgetRepo, err := budget.NewRepository(appDB, nil, nil, nil)
+	budgetRepo, err := budget.NewRepository(appDB, allowQueueReconciliation{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,5 +211,139 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	}
 	if _, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-stale", 5*time.Second); err != nil || claimed {
 		t.Fatalf("job exceeding updated token cap was claimed: claimed=%t err=%v", claimed, err)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.ai_execution_profiles SET max_concurrency=10,max_output_tokens=128,max_attempt_duration_ms=1000 WHERE tenant_id=$1 AND provider_id=$2 AND model_id=$3`, tenantID, provider, model); err != nil {
+		t.Fatal(err)
+	}
+	for _, worker := range []string{"worker-drain-a", "worker-drain-b"} {
+		if _, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, worker, 5*time.Second); err != nil || !claimed {
+			t.Fatalf("could not drain compatible queued work before expiry test: claimed=%t err=%v", claimed, err)
+		}
+	}
+	expired := createAdmission("member-expired")
+	if _, err := repo.Enqueue(ctx, expired); err != nil {
+		t.Fatal(err)
+	}
+	expiredLease, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-expired", 5*time.Second)
+	if err != nil || !claimed {
+		t.Fatalf("claim attempt for expiry test: claimed=%t err=%v", claimed, err)
+	}
+	time.Sleep(time.Until(expiredLease.AttemptDeadline) + 20*time.Millisecond)
+	if reaped, err := repo.ReapExpired(ctx, tenant, 10); err != nil || reaped < 1 {
+		t.Fatalf("expired attempt reaping count=%d err=%v", reaped, err)
+	}
+	if reaped, err := repo.ReapExpired(ctx, tenant, 10); err != nil || reaped != 0 {
+		t.Fatalf("replaying the expiry scan changed an already reconciled candidate: count=%d err=%v", reaped, err)
+	}
+	var outcome, liability string
+	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, expiredLease.InferenceID).Scan(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT liability_state FROM keel_meta.ai_budget_reservations WHERE tenant_id=$1 AND inference_id=$2`, tenantID, expiredLease.InferenceID).Scan(&liability); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "unknown" || liability != "unknown" {
+		t.Fatalf("expired call lost ambiguous protection: job=%s liability=%s", outcome, liability)
+	}
+	if _, err := repo.Renew(ctx, expiredLease, time.Second); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("unknown attempt renewed its stale lease: %v", err)
+	}
+	if err := repo.ReconcileUnknown(ctx, tenant, expiredLease.InferenceID, "principal:operator", "provider_outcome_verified", nil, "reconcile:provider-confirmed-no-charge"); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, expiredLease.InferenceID).Scan(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "no_charge" {
+		t.Fatalf("authorized no-charge reconciliation left job in %s", outcome)
+	}
+
+	// An explicit transport ambiguity keeps both the reservation and concurrency
+	// liability until an operator verifies the provider's actual result.
+	ambiguous := createAdmission("member-ambiguous")
+	if _, err := repo.Enqueue(ctx, ambiguous); err != nil {
+		t.Fatal(err)
+	}
+	ambiguousLease, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-ambiguous", 5*time.Second)
+	if err != nil || !claimed {
+		t.Fatalf("claim ambiguous attempt: claimed=%t err=%v", claimed, err)
+	}
+	if err := repo.RecordUnknown(ctx, ambiguousLease, "provider-response-lost"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordUnknown(ctx, ambiguousLease, "provider-response-lost"); err != nil {
+		t.Fatalf("replaying the identical unknown outcome: %v", err)
+	}
+	if _, err := repo.Renew(ctx, ambiguousLease, time.Second); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("ambiguous provider call renewed its lease: %v", err)
+	}
+	var ambiguousState, ambiguousLiability string
+	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, ambiguousLease.InferenceID).Scan(&ambiguousState); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT liability_state FROM keel_meta.ai_budget_reservations WHERE tenant_id=$1 AND inference_id=$2`, tenantID, ambiguousLease.InferenceID).Scan(&ambiguousLiability); err != nil {
+		t.Fatal(err)
+	}
+	if ambiguousState != "unknown" || ambiguousLiability != "unknown" {
+		t.Fatalf("ambiguous provider result lost its liability: job=%s budget=%s", ambiguousState, ambiguousLiability)
+	}
+	actual := ambiguous.Admission.Quote.MaximumLiabilityMicroUSD()
+	if err := repo.ReconcileUnknown(ctx, tenant, ambiguousLease.InferenceID, "principal:operator", "provider_outcome_verified", &actual, "reconcile:provider-confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.ReconcileUnknown(ctx, tenant, ambiguousLease.InferenceID, "principal:operator", "provider_outcome_verified", &actual, "reconcile:provider-confirmed"); err != nil {
+		t.Fatalf("replaying the identical reconciliation: %v", err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, ambiguousLease.InferenceID).Scan(&ambiguousState); err != nil {
+		t.Fatal(err)
+	}
+	if ambiguousState != "succeeded" {
+		t.Fatalf("confirmed reconciliation left job in %s", ambiguousState)
+	}
+
+	// A direct definite provider response settles its charge and queue state in
+	// one transaction; delivery replay must be harmless.
+	confirmed := createAdmission("member-confirmed")
+	if _, err := repo.Enqueue(ctx, confirmed); err != nil {
+		t.Fatal(err)
+	}
+	confirmedLease, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-confirmed", 5*time.Second)
+	if err != nil || !claimed {
+		t.Fatalf("claim confirmed attempt: claimed=%t err=%v", claimed, err)
+	}
+	if err := repo.SettleConfirmed(ctx, confirmedLease, confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SettleConfirmed(ctx, confirmedLease, confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:confirmed"); err != nil {
+		t.Fatalf("replaying the identical confirmed result: %v", err)
+	}
+	staleConfirmedLease := confirmedLease
+	staleConfirmedLease.Epoch++
+	if err := repo.SettleConfirmed(ctx, staleConfirmedLease, confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:confirmed"); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("stale lease epoch replay was accepted: %v", err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, confirmedLease.InferenceID).Scan(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "succeeded" {
+		t.Fatalf("confirmed result left job in %s", outcome)
+	}
+
+	noCharge := createAdmission("member-no-charge")
+	if _, err := repo.Enqueue(ctx, noCharge); err != nil {
+		t.Fatal(err)
+	}
+	noChargeLease, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-no-charge", 5*time.Second)
+	if err != nil || !claimed {
+		t.Fatalf("claim no-charge attempt: claimed=%t err=%v", claimed, err)
+	}
+	if err := repo.SettleNoCharge(ctx, noChargeLease, "provider-explicit-no-charge"); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, noChargeLease.InferenceID).Scan(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "no_charge" {
+		t.Fatalf("definite no-charge result left job in %s", outcome)
 	}
 }
