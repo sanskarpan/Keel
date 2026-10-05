@@ -150,6 +150,11 @@ jobs:
           KEEL_TEST_MIGRATION_DATABASE_URL: postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_TEMPORAL_ADDRESS: 127.0.0.1:7233
         run: make check
+      - name: Report supplier workflow history budget measurement
+        env:
+          KEEL_TEST_TEMPORAL_ADDRESS: 127.0.0.1:7233
+          KEEL_TEST_TEMPORAL_HISTORY_BUDGET: "1"
+        run: GOTOOLCHAIN=local go test -v ./internal/supplier/caseworkflow -run TestTemporalHistoryBudgetReplayAndSimulated72HourRecovery -count=1
       - name: Race-check packages
         env:
           KEEL_TEST_DATABASE_URL: postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable
