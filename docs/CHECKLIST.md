@@ -42,7 +42,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 ## K4 — AI gateway, budget and policy
 
 - [ ] K4.1 Build typed read-only agent query broker with protected session-role mapping.
-- [ ] K4.2 Implement versioned prompt/provider/tool policy and PII scrubbing before provider/logging.
+- [ ] K4.2 Implement versioned prompt/provider/tool policy and PII scrubbing before provider/logging. Partial offline foundation: PR #183 (issue #182) adds immutable code-owned bundle versions, fake-only provider/model registration, no-tools policy, canonical digest, typed provenance/classification, high-confidence scrubbing before provider exposure, and content-free policy logs. Evidence: `docs/K4.2-EVIDENCE.md`; local race tests, vet and full compile passed. This does not complete K4.2: no live adapter/deployment bundle, authenticated input-classification wiring, K4.1 broker, K4.3 spend admission, K4.4 leased runtime, or K5.4 retention/tracing; keep K4.2 open.
 - [ ] K4.3 Implement durable reserve/settle/unknown-liability ledger and safe price quoting.
 - [ ] K4.4 Add fair DB job claims, lease epochs, provider concurrency/token/time caps.
 - [ ] K4.5 Implement exact and scoped semantic cache, entity/polarity checks and labeled precision gate with >=600 independent eligible pairs per serving policy and one-sided 95% lower confidence bound >=99.5%.
