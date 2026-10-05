@@ -150,6 +150,18 @@ func TestPostgreSQLVectorPublicationExactAndBoundedHNSW(t *testing.T) {
 	if _, err := app.SearchVectorExact(ctx, tenancy.TenantID(uuid.NewString()), visibility, manifest.ID, manifest.Revision, query, 2, 10); !errors.Is(err, ErrNoActiveVectorBuild) {
 		t.Fatalf("another tenant read vector build: %v", err)
 	}
+	if _, err := app.WithdrawSource(ctx, tenant, visibility, uuid.New(), chunks[0].DocumentVersionID, uuid.New()); err != nil {
+		t.Fatalf("withdraw vector source: %v", err)
+	}
+	postWithdrawal, err := app.SearchVectorExact(ctx, tenant, visibility, manifest.ID, manifest.Revision, query, 5, 10)
+	if err != nil || len(postWithdrawal.Candidates) != 4 {
+		t.Fatalf("vector search did not suppress withdrawn source: candidates=%+v err=%v", postWithdrawal.Candidates, err)
+	}
+	for _, candidate := range postWithdrawal.Candidates {
+		if candidate.DocumentVersionID == chunks[0].DocumentVersionID {
+			t.Fatal("vector search returned a withdrawn document version")
+		}
+	}
 	assertVectorHNSWPlan(t, appDB, tenant, visibility, active, manifest, query)
 	if err := withScope(ctx, indexerDB, scope{tenant: tenant, visibility: visibility}, nil, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM keel_meta.retrieval_vector_chunks WHERE tenant_id=$1 AND vector_build_id=$2`, string(tenant), vectorBuild.ID)
