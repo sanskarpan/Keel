@@ -37,6 +37,7 @@ type Authorizer interface {
 	CanCreateSupplierCase(context.Context, Principal, string, string) bool
 	CanManageSupplierCase(context.Context, Principal, string) bool
 	CanSubmitSupplierCase(context.Context, Principal, string) bool
+	CanDecideSupplierCase(context.Context, Principal, string) bool
 }
 
 type Repository interface {
@@ -44,6 +45,8 @@ type Repository interface {
 	Create(context.Context, tenancy.TenantID, string, string, string, uint32, string) (cases.Case, error)
 	AttachEvidence(context.Context, tenancy.TenantID, string, string, string, string, string, string) (cases.Case, error)
 	Submit(context.Context, tenancy.TenantID, string, string) (cases.Case, error)
+	Decide(context.Context, tenancy.TenantID, string, cases.StepDecision) (cases.Case, error)
+	Expire(context.Context, tenancy.TenantID, string) (cases.Case, error)
 	Get(context.Context, tenancy.TenantID, string) (postgres.CaseView, error)
 }
 
@@ -68,6 +71,7 @@ func New(repo Repository, principals PrincipalResolver, authz Authorizer, clock 
 	h.mux.HandleFunc("GET /v1/supplier-cases/{case_id}", h.getCase)
 	h.mux.HandleFunc("POST /v1/supplier-cases/{case_id}/evidence", h.attachEvidence)
 	h.mux.HandleFunc("POST /v1/supplier-cases/{case_id}/submit", h.submitCase)
+	h.mux.HandleFunc("POST /v1/supplier-cases/{case_id}/decisions", h.decideCase)
 	return h, nil
 }
 
@@ -196,6 +200,40 @@ func (h *Handler) submitCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, caseResponse{CaseID: result.CaseID, SupplierID: result.SupplierID, Status: result.Status, Version: result.Version, EvidenceEpoch: result.EvidenceEpoch, EvidenceDigest: result.EvidenceDigest, PolicyID: result.PolicyID, PolicyVersion: result.PolicyVersion, DeadlineAt: result.DeadlineAt, UpdatedAt: result.UpdatedAt})
+}
+
+type decisionRequest struct {
+	DecisionID string `json:"decision_id"`
+	StepKey    string `json:"step_key"`
+	Outcome    string `json:"outcome"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+func (h *Handler) decideCase(w http.ResponseWriter, r *http.Request) {
+	principal, caseID, ok := h.casePrincipal(w, r)
+	if !ok {
+		return
+	}
+	if !h.authz.CanDecideSupplierCase(r.Context(), principal, caseID) {
+		writeProblem(w, 404, "resource_not_found")
+		return
+	}
+	var input decisionRequest
+	if decode(w, r, &input) != nil || !uuid.MatchString(input.DecisionID) {
+		writeProblem(w, 400, "invalid_request")
+		return
+	}
+	result, err := h.repo.Decide(r.Context(), principal.TenantID, caseID, cases.StepDecision{
+		DecisionID: input.DecisionID, StepKey: input.StepKey, Outcome: input.Outcome,
+		Reason: input.Reason, Actor: principal.ActorRef,
+	})
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, 200, caseResponse{CaseID: result.CaseID, SupplierID: result.SupplierID, Status: result.Status,
+		Version: result.Version, EvidenceEpoch: result.EvidenceEpoch, EvidenceDigest: result.EvidenceDigest,
+		PolicyID: result.PolicyID, PolicyVersion: result.PolicyVersion, DeadlineAt: result.DeadlineAt, UpdatedAt: result.UpdatedAt})
 }
 
 func (h *Handler) getCase(w http.ResponseWriter, r *http.Request) {

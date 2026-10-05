@@ -319,6 +319,9 @@ func (r *Repository) Submit(ctx context.Context, tenant tenancy.TenantID, caseID
 		if err != nil {
 			return err
 		}
+		if err := insertApprovalPlan(ctx, tx, tenant, current, policy); err != nil {
+			return err
+		}
 		if err := insertEvent(ctx, tx, tenant, event); err != nil {
 			return err
 		}
@@ -485,6 +488,7 @@ func insertEvent(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, event
 		previous = mustDecode(event.PrevHash)
 	}
 	var evidenceID any
+	var decisionID any
 	if event.Type == "supplier.case.evidence-added" {
 		var data cases.EvidenceAddedData
 		if err := json.Unmarshal(event.Data, &data); err != nil {
@@ -492,13 +496,224 @@ func insertEvent(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, event
 		}
 		evidenceID = data.Evidence.EvidenceID
 	}
+	if event.Type == "supplier.case.approval-decided" {
+		var data cases.CaseDecisionData
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return cases.ErrInvalidCase
+		}
+		decisionID = data.DecisionID
+	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_events
-		(tenant_id,case_id,aggregate_version,event_type,actor_ref,occurred_at,event_data,evidence_id,previous_hash,event_hash)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, string(tenant), event.CaseID, event.Version, event.Type, event.Actor, event.OccurredAt, []byte(event.Data), evidenceID, previous, mustDecode(event.Hash))
+		(tenant_id,case_id,aggregate_version,event_type,actor_ref,occurred_at,event_data,evidence_id,previous_hash,event_hash,decision_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, string(tenant), event.CaseID, event.Version, event.Type, event.Actor, event.OccurredAt, []byte(event.Data), evidenceID, previous, mustDecode(event.Hash), decisionID)
 	if err != nil {
 		return classify(err)
 	}
 	return nil
+}
+
+func insertApprovalPlan(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, current cases.Case, policy cases.Policy) error {
+	planHash := sha256.Sum256([]byte(current.PolicyDigest + ":" + current.EvidenceDigest))
+	for _, step := range policy.Steps {
+		dependencies := append([]string{}, step.DependsOn...)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.supplier_case_approval_plans
+			(tenant_id,case_id,step_key,required_role,depends_on,policy_version,policy_digest,evidence_digest,plan_digest)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, string(tenant), current.CaseID, step.Key, step.Role, dependencies,
+			current.PolicyVersion, mustDecode(current.PolicyDigest), mustDecode(current.EvidenceDigest), planHash[:]); err != nil {
+			return classify(err)
+		}
+	}
+	return nil
+}
+
+// Decide records one human decision while holding the case row lock. The caller
+// must pass the principal resolved from trusted request context; the DB rechecks
+// active reviewer assignment/delegation and the frozen plan before insert.
+func (r *Repository) Decide(ctx context.Context, tenant tenancy.TenantID, caseID string, decision cases.StepDecision) (cases.Case, error) {
+	if r == nil || r.db == nil {
+		return cases.Case{}, cases.ErrInvalidCase
+	}
+	tenant = tenancy.TenantID(strings.ToLower(string(tenant)))
+	caseID = strings.ToLower(caseID)
+	decision.DecisionID = strings.ToLower(decision.DecisionID)
+	decision.StepKey = strings.ToLower(strings.TrimSpace(decision.StepKey))
+	decision.Actor = strings.TrimSpace(decision.Actor)
+	decision.Outcome = strings.ToLower(strings.TrimSpace(decision.Outcome))
+	decision.Reason = strings.TrimSpace(decision.Reason)
+	var result cases.Case
+	err := tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
+		current, err := lockCase(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		requestDigest := decisionDigest(tenant, caseID, decision)
+		var storedDigest []byte
+		var storedActor, storedStep, storedOutcome string
+		lookupErr := tx.QueryRowContext(ctx, `SELECT request_digest,actor_ref,step_key,outcome
+			FROM keel_meta.supplier_case_decisions WHERE tenant_id=$1 AND case_id=$2 AND decision_id=$3`,
+			string(tenant), caseID, decision.DecisionID).Scan(&storedDigest, &storedActor, &storedStep, &storedOutcome)
+		if lookupErr == nil {
+			if equalBytes(storedDigest, requestDigest[:]) && storedActor == decision.Actor && storedStep == decision.StepKey && storedOutcome == decision.Outcome {
+				result = current
+				return nil
+			}
+			return ErrConflict
+		}
+		if !errors.Is(lookupErr, sql.ErrNoRows) {
+			return errors.New("supplier decision idempotency record could not be read")
+		}
+		evidence, err := loadEvidence(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		events, err := loadEvents(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		if err := verifyHistory(CaseView{Case: current, Evidence: evidence, Events: events}); err != nil {
+			return err
+		}
+		policy, err := loadPolicy(ctx, tx, tenant, current.PolicyID, current.PolicyVersion)
+		if err != nil {
+			return err
+		}
+		decisions, err := loadDecisions(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		var step cases.ReviewStep
+		found := false
+		for _, candidate := range policy.Steps {
+			if candidate.Key == decision.StepKey {
+				step, found = candidate, true
+				break
+			}
+		}
+		if !found {
+			return ErrConflict
+		}
+		decision.Role = step.Role // request-supplied role is never authoritative
+		now, err := dbNow(ctx, tx)
+		if err != nil {
+			return err
+		}
+		decision.DecidedAt = now
+		_, _, err = cases.Decide(current, policy, decisions, decision, submittedBy(events), events[0].Actor, now, current.LastEventHash)
+		if err != nil {
+			return err
+		}
+		var acceptedAt time.Time
+		if err := tx.QueryRowContext(ctx, `INSERT INTO keel_meta.supplier_case_decisions
+			(tenant_id,case_id,decision_id,step_key,actor_ref,effective_role,outcome,reason,request_digest,aggregate_version,accepted_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING accepted_at`, string(tenant), caseID, decision.DecisionID, decision.StepKey,
+			decision.Actor, decision.Role, decision.Outcome, decision.Reason, requestDigest[:], current.Version+1, now).Scan(&acceptedAt); err != nil {
+			return classify(err)
+		}
+		decision.DecidedAt = acceptedAt
+		updated, event, err := cases.Decide(current, policy, decisions, decision, submittedBy(events), events[0].Actor, acceptedAt, current.LastEventHash)
+		if err != nil {
+			return err
+		}
+		if err := insertEvent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		if err := updateCase(ctx, tx, tenant, current, updated); err != nil {
+			return err
+		}
+		if err := insertIntent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		result = updated
+		return nil
+	})
+	return result, err
+}
+
+// Expire is invoked by the durable Temporal deadline timer. It shares the case
+// lock and transaction with Decide, making the pre-deadline DB timestamp decisive.
+func (r *Repository) Expire(ctx context.Context, tenant tenancy.TenantID, caseID string) (cases.Case, error) {
+	if r == nil || r.db == nil {
+		return cases.Case{}, cases.ErrInvalidCase
+	}
+	tenant = tenancy.TenantID(strings.ToLower(string(tenant)))
+	caseID = strings.ToLower(caseID)
+	var result cases.Case
+	err := tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
+		current, err := lockCase(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		if current.Status == cases.Expired || current.Status == cases.Approved || current.Status == cases.Rejected || current.Status == cases.Canceled {
+			result = current
+			return nil
+		}
+		evidence, err := loadEvidence(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		events, err := loadEvents(ctx, tx, tenant, caseID)
+		if err != nil {
+			return err
+		}
+		if err := verifyHistory(CaseView{Case: current, Evidence: evidence, Events: events}); err != nil {
+			return err
+		}
+		now, err := dbNow(ctx, tx)
+		if err != nil {
+			return err
+		}
+		updated, event, err := cases.Expire(current, now, current.LastEventHash)
+		if err != nil {
+			return err
+		}
+		if err := insertEvent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		if err := updateCase(ctx, tx, tenant, current, updated); err != nil {
+			return err
+		}
+		if err := insertIntent(ctx, tx, tenant, event); err != nil {
+			return err
+		}
+		result = updated
+		return nil
+	})
+	return result, err
+}
+
+func submittedBy(events []cases.Event) string {
+	for _, event := range events {
+		if event.Type == "supplier.case.submitted" {
+			return event.Actor
+		}
+	}
+	return ""
+}
+
+func loadDecisions(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, caseID string) ([]cases.StepDecision, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT decision_id::text,step_key,actor_ref,outcome,effective_role,reason,accepted_at
+		FROM keel_meta.supplier_case_decisions WHERE tenant_id=$1 AND case_id=$2 ORDER BY accepted_at,decision_id`, string(tenant), caseID)
+	if err != nil {
+		return nil, errors.New("supplier decisions could not be read")
+	}
+	defer rows.Close()
+	var result []cases.StepDecision
+	for rows.Next() {
+		var item cases.StepDecision
+		if err := rows.Scan(&item.DecisionID, &item.StepKey, &item.Actor, &item.Outcome, &item.Role, &item.Reason, &item.DecidedAt); err != nil {
+			return nil, errors.New("supplier decision row is invalid")
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("supplier decisions could not be read")
+	}
+	return result, nil
+}
+
+func decisionDigest(tenant tenancy.TenantID, caseID string, decision cases.StepDecision) [32]byte {
+	canonical, _ := json.Marshal([]string{string(tenant), caseID, decision.DecisionID, decision.StepKey, decision.Actor, decision.Outcome, decision.Reason})
+	return sha256.Sum256(canonical)
 }
 
 func insertIntent(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, event cases.Event) error {
@@ -553,6 +768,7 @@ func verifyHistory(view CaseView) error {
 	var previous string
 	orderedEvidence := []cases.Evidence{}
 	versions := make(map[string]uint32)
+	status := cases.Collecting
 	for i, event := range view.Events {
 		if event.Version != uint64(i+1) || event.PrevHash != previous || !event.Verify() {
 			return fmt.Errorf("%w: event %d hash, sequence, or predecessor is invalid", cases.ErrInvalidCase, i+1)
@@ -570,6 +786,9 @@ func verifyHistory(view CaseView) error {
 				return fmt.Errorf("%w: case creation data does not match snapshot", cases.ErrInvalidCase)
 			}
 		} else if event.Type == "supplier.case.evidence-added" {
+			if status != cases.Collecting {
+				return cases.ErrInvalidCase
+			}
 			var data cases.EvidenceAddedData
 			if json.Unmarshal(event.Data, &data) != nil || data.Evidence.AddedBy != event.Actor || data.Epoch != uint64(len(orderedEvidence))+1 {
 				return fmt.Errorf("%w: evidence event data is invalid", cases.ErrInvalidCase)
@@ -592,13 +811,41 @@ func verifyHistory(view CaseView) error {
 				return fmt.Errorf("%w: evidence event digest is invalid", cases.ErrInvalidCase)
 			}
 		} else if event.Type == "supplier.case.submitted" {
-			if i != len(view.Events)-1 {
+			if status != cases.Collecting {
 				return cases.ErrInvalidCase
 			}
 			var data cases.CaseSubmittedData
 			if json.Unmarshal(event.Data, &data) != nil || data.PolicyVersion != view.Case.PolicyVersion || data.PolicyDigest != view.Case.PolicyDigest || data.EvidenceEpoch != view.Case.EvidenceEpoch || data.EvidenceDigest != view.Case.EvidenceDigest {
 				return fmt.Errorf("%w: submission does not match frozen policy and evidence", cases.ErrInvalidCase)
 			}
+			status = cases.Submitted
+		} else if event.Type == "supplier.case.approval-decided" {
+			if status != cases.Submitted {
+				return cases.ErrInvalidCase
+			}
+			var data cases.CaseDecisionData
+			if json.Unmarshal(event.Data, &data) != nil || data.DecisionID == "" || data.StepKey == "" ||
+				(data.Outcome != "approve" && data.Outcome != "reject") || data.PolicyDigest != view.Case.PolicyDigest ||
+				data.EvidenceDigest != view.Case.EvidenceDigest || (data.ResultingState != cases.Submitted && data.ResultingState != cases.Approved && data.ResultingState != cases.Rejected) {
+				return fmt.Errorf("%w: approval decision event is invalid", cases.ErrInvalidCase)
+			}
+			if data.Outcome == "reject" && data.ResultingState != cases.Rejected {
+				return cases.ErrInvalidCase
+			}
+			status = data.ResultingState
+		} else if event.Type == "supplier.case.expired" {
+			if status != cases.Submitted && status != cases.Collecting {
+				return cases.ErrInvalidCase
+			}
+			var data cases.CaseExpiredData
+			if json.Unmarshal(event.Data, &data) != nil {
+				return cases.ErrInvalidCase
+			}
+			deadline, err := time.Parse(time.RFC3339Nano, data.DeadlineAt)
+			if err != nil || !deadline.Equal(view.Case.DeadlineAt) || event.Actor != "service-principal:keel-supplier-case-expirer" {
+				return cases.ErrInvalidCase
+			}
+			status = cases.Expired
 		} else {
 			return fmt.Errorf("%w: unsupported event type", cases.ErrInvalidCase)
 		}
@@ -630,8 +877,20 @@ func verifyHistory(view CaseView) error {
 		if view.Case.Status != cases.Submitted {
 			return fmt.Errorf("%w: submitted event tail has a different snapshot state", cases.ErrInvalidCase)
 		}
+	case "supplier.case.approval-decided":
+		var data cases.CaseDecisionData
+		if json.Unmarshal(last.Data, &data) != nil || view.Case.Status != data.ResultingState {
+			return cases.ErrInvalidCase
+		}
+	case "supplier.case.expired":
+		if view.Case.Status != cases.Expired {
+			return cases.ErrInvalidCase
+		}
 	default:
 		return fmt.Errorf("%w: unsupported snapshot state", cases.ErrInvalidCase)
+	}
+	if status != view.Case.Status {
+		return fmt.Errorf("%w: replayed status differs from case snapshot", cases.ErrInvalidCase)
 	}
 	if !last.OccurredAt.Equal(view.Case.UpdatedAt) {
 		return fmt.Errorf("%w: snapshot update time differs from event tail", cases.ErrInvalidCase)

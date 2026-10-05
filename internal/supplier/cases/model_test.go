@@ -125,6 +125,68 @@ func TestSubmitRequiresAllEvidenceAndHonorsDeadline(t *testing.T) {
 	}
 }
 
+func TestDecisionsEnforceSeparationDependenciesAndFrozenBoundary(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	policy, _, err := validPolicy().Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := Case{TenantID: tenantID, CaseID: caseID, PolicyID: policyID, PolicyVersion: 1, PolicyDigest: policy.Digest,
+		EvidenceDigest: strings.Repeat("a", 64), Status: Submitted, Version: 3, DeadlineAt: now.Add(time.Hour), LastEventHash: strings.Repeat("b", 64)}
+	first := StepDecision{DecisionID: "11111111-1111-4111-8111-111111111111", StepKey: "risk", Actor: "principal:approver-1", Outcome: "approve", Role: "risk:reviewer"}
+	creatorDecision := first
+	creatorDecision.Actor = "principal:buyer-1"
+	if _, _, err := Decide(current, policy, nil, creatorDecision, "principal:requester-1", "principal:buyer-1", now, current.LastEventHash); !errors.Is(err, ErrConflict) {
+		t.Fatalf("creator was allowed to approve: %v", err)
+	}
+	submitterDecision := first
+	submitterDecision.Actor = "principal:requester-1"
+	if _, _, err := Decide(current, policy, nil, submitterDecision, "principal:requester-1", "principal:creator-1", now, current.LastEventHash); !errors.Is(err, ErrConflict) {
+		t.Fatalf("submitter was allowed to approve: %v", err)
+	}
+	updated, event, err := Decide(current, policy, nil, first, "principal:requester-1", "principal:creator-1", now, current.LastEventHash)
+	if err != nil || updated.Status != Submitted || event.Type != "supplier.case.approval-decided" {
+		t.Fatalf("first approval result: %+v event=%+v err=%v", updated, event, err)
+	}
+	if eligible := EligibleSteps(policy, []StepDecision{first}); len(eligible) != 1 || eligible[0].Key != "procurement" {
+		t.Fatalf("dependency did not unlock next step: %+v", eligible)
+	}
+	partialExpired, _, err := Expire(updated, current.DeadlineAt, updated.LastEventHash)
+	if err != nil || partialExpired.Status != Expired {
+		t.Fatalf("partial approval plan defeated expiry: %+v err=%v", partialExpired, err)
+	}
+	second := StepDecision{DecisionID: "22222222-2222-4222-8222-222222222222", StepKey: "procurement", Actor: "principal:approver-2", Outcome: "approve", Role: "procurement:reviewer"}
+	final, _, err := Decide(updated, policy, []StepDecision{first}, second, "principal:requester-1", "principal:creator-1", now.Add(time.Minute), updated.LastEventHash)
+	if err != nil || final.Status != Approved {
+		t.Fatalf("complete plan did not approve: %+v err=%v", final, err)
+	}
+	if _, _, err := Decide(partialExpired, policy, []StepDecision{first}, second, "principal:requester-1", "principal:creator-1", current.DeadlineAt.Add(time.Minute), partialExpired.LastEventHash); !errors.Is(err, ErrConflict) {
+		t.Fatalf("decision was accepted after expiry won: %v", err)
+	}
+	if _, _, err := Decide(current, policy, nil, first, "principal:requester-1", "principal:creator-1", current.DeadlineAt, current.LastEventHash); !errors.Is(err, ErrConflict) {
+		t.Fatalf("decision at deadline accepted: %v", err)
+	}
+	collecting := current
+	collecting.Status = Collecting
+	if _, _, err := Expire(collecting, now, collecting.LastEventHash); !errors.Is(err, ErrConflict) {
+		t.Fatalf("collecting case expired before its deadline: %v", err)
+	}
+	expiredCollecting, _, err := Expire(collecting, current.DeadlineAt, collecting.LastEventHash)
+	if err != nil || expiredCollecting.Status != Expired {
+		t.Fatalf("unsubmitted case did not expire at its deadline: %+v err=%v", expiredCollecting, err)
+	}
+	if _, _, err := Expire(current, current.DeadlineAt, strings.Repeat("a", 64)); err == nil {
+		t.Fatal("expiry accepted a different event hash")
+	}
+	expired, expiryEvent, err := Expire(current, current.DeadlineAt, current.LastEventHash)
+	if err != nil || expired.Status != Expired || expiryEvent.Actor != "service-principal:keel-supplier-case-expirer" {
+		t.Fatalf("deadline expiry failed: %+v event=%+v err=%v", expired, expiryEvent, err)
+	}
+	if _, _, err := Decide(expired, policy, nil, first, "principal:requester-1", "principal:creator-1", current.DeadlineAt.Add(time.Minute), expired.LastEventHash); !errors.Is(err, ErrConflict) {
+		t.Fatalf("decision was accepted after expiry won: %v", err)
+	}
+}
+
 func TestAddEvidenceRejectsGapAndHistoryTampering(t *testing.T) {
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	policy, _, _ := validPolicy().Canonical()
