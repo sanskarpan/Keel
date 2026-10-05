@@ -92,6 +92,8 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K4.3` | task | K4.3 Implement durable reserve/settle/unknown-liability ledger and safe price quoting. | [Open issue](https://github.com/sanskarpan/Keel/issues/33) |
 
+| `K4.3-follow-up` | bug | Route active budget-period row locking through a tenant-checked SECURITY DEFINER function without granting app UPDATE privileges. | [Open issue](https://github.com/sanskarpan/Keel/issues/189) |
+
 | `K4.4` | task | K4.4 Add fair DB job claims, lease epochs, provider concurrency/token/time caps. | [Open issue](https://github.com/sanskarpan/Keel/issues/34) |
 
 | `K4.5` | task | K4.5 Implement exact and scoped semantic cache, entity/polarity checks and labeled precision gate with >=600 independent eligible pairs per serving policy and one-sided 95% lower confidence bound >=99.5%. | [Open issue](https://github.com/sanskarpan/Keel/issues/35) |
