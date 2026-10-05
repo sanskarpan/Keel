@@ -104,6 +104,8 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K4.6` | task | K4.6 Add at most one pre-token fallback, provider idempotency capability and charged-attempt records. | [Open issue](https://github.com/sanskarpan/Keel/issues/36) |
 
+| `K4.6-attempt-core` | task | Add deterministic content-free provider attempt and one-fallback policy rules. Partial implementation for parent [issue #36](https://github.com/sanskarpan/Keel/issues/36), tracked by [issue #194](https://github.com/sanskarpan/Keel/issues/194). Persisted charge ledger, budget coupling, adapter qualification and runtime remain open. |
+
 | `K4.7` | task | K4.7 Add global home-region Redis rate limiting and bounded degradation policies. | [Open issue](https://github.com/sanskarpan/Keel/issues/37) |
 
 | `K4-GATE` | gate | K4 gate: budget races and provider uncertainty remain bounded; no tool writes; cache near-neighbor/privacy failures rejected. | [Open issue](https://github.com/sanskarpan/Keel/issues/38) |
