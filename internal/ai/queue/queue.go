@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sanskarpan/keel/internal/ai/budget"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
 
@@ -32,26 +33,21 @@ var (
 const MaxLease = 30 * time.Second
 
 type Repository struct {
-	appDB    *sql.DB
+	budget   *budget.Repository
 	workerDB *sql.DB
 }
 
-func NewRepository(appDB, workerDB *sql.DB) (*Repository, error) {
-	if appDB == nil || workerDB == nil {
-		return nil, errors.New("AI queue requires separate app and worker databases")
+func NewRepository(budgets *budget.Repository, workerDB *sql.DB) (*Repository, error) {
+	if budgets == nil || workerDB == nil {
+		return nil, errors.New("AI queue requires budget admission and a separate worker database")
 	}
-	return &Repository{appDB: appDB, workerDB: workerDB}, nil
+	return &Repository{budget: budgets, workerDB: workerDB}, nil
 }
 
 type JobSpec struct {
-	Tenant          tenancy.TenantID
-	InferenceID     string
-	AttemptID       string
-	PeriodID        string
+	Admission       budget.Admission
 	ProviderID      string
 	ModelID         string
-	PolicySHA256    string
-	Principal       string // Verified server-side identity binding; hashed before persistence.
 	MaxOutputTokens int
 }
 
@@ -64,11 +60,12 @@ func (r *Repository) Enqueue(ctx context.Context, spec JobSpec) (EnqueueResult, 
 	if !validSpec(spec) {
 		return EnqueueResult{}, ErrQueueUnavailable
 	}
-	policyHash, _ := hex.DecodeString(spec.PolicySHA256)
-	principalHash := sha256.Sum256([]byte(spec.Principal))
-	result := EnqueueResult{InferenceID: spec.InferenceID}
-	err := tenancy.WithTenantTx(ctx, r.appDB, spec.Tenant, nil, func(tx *sql.Tx) error {
-		if err := lockProfile(tx, ctx, spec.Tenant, spec.ProviderID, spec.ModelID); err != nil {
+	a := spec.Admission
+	policyHash, _ := hex.DecodeString(a.Quote.PolicyDigest())
+	principalHash := sha256.Sum256([]byte(a.PrincipalBinding))
+	result := EnqueueResult{InferenceID: a.InferenceID}
+	_, err := r.budget.AdmitWith(ctx, a, func(tx *sql.Tx, admitted budget.AdmissionResult) error {
+		if err := lockProfile(tx, ctx, a.Tenant, spec.ProviderID, spec.ModelID); err != nil {
 			return err
 		}
 		var configuredHash []byte
@@ -76,7 +73,7 @@ func (r *Repository) Enqueue(ctx context.Context, spec JobSpec) (EnqueueResult, 
 		var enabled bool
 		if err := tx.QueryRowContext(ctx, `SELECT policy_sha256,max_output_tokens,max_queue_depth,enabled
 			FROM keel_meta.ai_execution_profiles WHERE tenant_id=$1 AND provider_id=$2 AND model_id=$3`,
-			string(spec.Tenant), spec.ProviderID, spec.ModelID).Scan(&configuredHash, &maxTokens, &queueDepth, &enabled); err != nil {
+			string(a.Tenant), spec.ProviderID, spec.ModelID).Scan(&configuredHash, &maxTokens, &queueDepth, &enabled); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrQueueUnavailable
 			}
@@ -89,10 +86,10 @@ func (r *Repository) Enqueue(ctx context.Context, spec JobSpec) (EnqueueResult, 
 		var priorPolicy, priorPrincipal []byte
 		var priorTokens int
 		err := tx.QueryRowContext(ctx, `SELECT attempt_id::text,period_id::text,provider_id,model_id,policy_sha256,principal_sha256,max_output_tokens
-			FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, string(spec.Tenant), spec.InferenceID).
+			FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, string(a.Tenant), a.InferenceID).
 			Scan(&priorAttempt, &priorPeriod, &priorProvider, &priorModel, &priorPolicy, &priorPrincipal, &priorTokens)
 		if err == nil {
-			if priorAttempt != spec.AttemptID || priorPeriod != spec.PeriodID || priorProvider != spec.ProviderID || priorModel != spec.ModelID ||
+			if priorAttempt != a.AttemptID || priorPeriod != a.PeriodID || priorProvider != spec.ProviderID || priorModel != spec.ModelID ||
 				!equalHash(priorPolicy, policyHash) || !equalHash(priorPrincipal, principalHash[:]) || priorTokens != spec.MaxOutputTokens {
 				return ErrQueueConflict
 			}
@@ -105,23 +102,20 @@ func (r *Repository) Enqueue(ctx context.Context, spec JobSpec) (EnqueueResult, 
 		var queued int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.ai_jobs
 			WHERE tenant_id=$1 AND provider_id=$2 AND model_id=$3 AND state='queued'`,
-			string(spec.Tenant), spec.ProviderID, spec.ModelID).Scan(&queued); err != nil {
+			string(a.Tenant), spec.ProviderID, spec.ModelID).Scan(&queued); err != nil {
 			return err
 		}
 		if queued >= queueDepth {
 			return ErrQueueFull
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.ai_job_fairness(tenant_id,principal_sha256)
-			VALUES($1,$2) ON CONFLICT(tenant_id,principal_sha256) DO NOTHING`, string(spec.Tenant), principalHash[:]); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.ai_job_fairness(tenant_id,provider_id,model_id,principal_sha256)
+			VALUES($1,$2,$3,$4) ON CONFLICT(tenant_id,provider_id,model_id,principal_sha256) DO NOTHING`, string(a.Tenant), spec.ProviderID, spec.ModelID, principalHash[:]); err != nil {
 			return err
 		}
 		insert, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.ai_jobs
 			(tenant_id,inference_id,attempt_id,period_id,scope,provider_id,model_id,policy_sha256,principal_sha256,max_output_tokens)
-			SELECT $1,$2,$3,a.period_id,'inference',$5,$6,$7,$8,$9
-			FROM keel_meta.ai_inference_admissions a
-			WHERE a.tenant_id=$1 AND a.inference_id=$2 AND a.attempt_id=$3 AND a.period_id=$4 AND a.policy_sha256=$7`,
-			string(spec.Tenant), spec.InferenceID, spec.AttemptID, spec.PeriodID, spec.ProviderID, spec.ModelID,
-			policyHash, principalHash[:], spec.MaxOutputTokens)
+			VALUES($1,$2,$3,$4,'inference',$5,$6,$7,$8,$9)`,
+			string(a.Tenant), a.InferenceID, a.AttemptID, admitted.PeriodID, spec.ProviderID, spec.ModelID, policyHash, principalHash[:], spec.MaxOutputTokens)
 		if err != nil {
 			return err
 		}
@@ -217,9 +211,12 @@ func (r *Repository) Renew(ctx context.Context, lease Lease, extension time.Dura
 }
 
 func validSpec(spec JobSpec) bool {
-	if !validIdentity(spec.Tenant, spec.ProviderID, spec.ModelID) || uuid.Validate(spec.InferenceID) != nil ||
-		uuid.Validate(spec.AttemptID) != nil || uuid.Validate(spec.PeriodID) != nil || spec.MaxOutputTokens < 1 || spec.MaxOutputTokens > 131072 ||
-		!queuePrincipal.MatchString(spec.Principal) || !validDigest(spec.PolicySHA256) {
+	a := spec.Admission
+	if !validIdentity(a.Tenant, spec.ProviderID, spec.ModelID) || uuid.Validate(a.InferenceID) != nil ||
+		uuid.Validate(a.AttemptID) != nil || uuid.Validate(a.PeriodID) != nil || uuid.Validate(a.ReservationID) != nil ||
+		spec.MaxOutputTokens < 1 || spec.MaxOutputTokens > 131072 || !queuePrincipal.MatchString(a.PrincipalBinding) ||
+		!validDigest(a.Quote.PolicyDigest()) || !validDigest(a.RequestDigest) || a.Quote.ProviderID() != spec.ProviderID ||
+		a.Quote.ModelID() != spec.ModelID || a.PeriodStart.IsZero() || !a.PeriodEnd.After(a.PeriodStart) {
 		return false
 	}
 	return true
