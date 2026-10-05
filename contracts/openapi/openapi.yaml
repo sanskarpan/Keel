@@ -15,6 +15,7 @@ tags:
   - name: health
   - name: orders
   - name: supplier intake
+  - name: supplier cases
 paths:
   /health/live:
     get:
@@ -253,6 +254,134 @@ paths:
         '404': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
       x-keel-phase: K2.1
+  /v1/supplier-review-policies:
+    post:
+      tags: [supplier cases]
+      operationId: publishSupplierReviewPolicy
+      summary: Publish a new immutable version of a bounded declarative review policy.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublishSupplierReviewPolicyRequest' }
+      responses:
+        '201':
+          description: Policy version published.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierReviewPolicy' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.2
+  /v1/supplier-cases:
+    post:
+      tags: [supplier cases]
+      operationId: createSupplierCase
+      summary: Start a tenant-scoped supplier assessment against an immutable policy version.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSupplierCaseRequest' }
+      responses:
+        '201':
+          description: Case created with a database-time deadline and durable workflow intent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierCase' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.2
+  /v1/supplier-cases/{case_id}:
+    parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [supplier cases]
+      operationId: getSupplierCase
+      summary: Read a case snapshot and versioned evidence metadata after tenant authorization.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current tenant-authorized case state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierCase' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.2
+  /v1/supplier-cases/{case_id}/evidence:
+    parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [supplier cases]
+      operationId: attachSupplierCaseEvidence
+      summary: Attach one already-scanned upload to a case as an immutable evidence revision.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttachSupplierCaseEvidenceRequest' }
+      responses:
+        '200':
+          description: Evidence added and a durable workflow intent committed atomically.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierCase' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.2
+  /v1/supplier-cases/{case_id}/submit:
+    parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [supplier cases]
+      operationId: submitSupplierCase
+      summary: Freeze the selected policy and current evidence set for review.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Case submitted and workflow intent committed atomically.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierCase' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '500': { $ref: '#/components/responses/Problem' }
+      x-keel-phase: K2.2
   /v1/public/tenants/{tenant_id}/supplier-invitations/accept:
     parameters:
       - $ref: '#/components/parameters/TenantID'
@@ -620,6 +749,102 @@ components:
         upload_id: { type: string, format: uuid }
         state: { type: string, enum: [awaiting_upload, processing, ready, rejected, expired] }
         updated_at: { type: string, format: date-time }
+    PublishSupplierReviewPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [policy_id, version, name, required_evidence, steps]
+      properties:
+        policy_id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1, maximum: 2147483647 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        deadline_seconds: { type: integer, minimum: 0, maximum: 259200, default: 259200, description: Zero selects the policy default of 72 hours. }
+        required_evidence:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        steps:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items: { $ref: '#/components/schemas/SupplierReviewStep' }
+    SupplierReviewStep:
+      type: object
+      additionalProperties: false
+      required: [key, role]
+      properties:
+        key: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        role: { type: string, pattern: '^[a-z][a-z0-9:_-]{0,63}$' }
+        depends_on:
+          type: array
+          uniqueItems: true
+          items: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        parallel_id: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+    SupplierReviewPolicy:
+      type: object
+      additionalProperties: false
+      required: [policy_id, version, name, deadline_seconds, required_evidence, steps, digest, published_at]
+      properties:
+        policy_id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        deadline_seconds: { type: integer, minimum: 3600, maximum: 259200 }
+        required_evidence:
+          type: array
+          items: { type: string }
+        steps:
+          type: array
+          items: { $ref: '#/components/schemas/SupplierReviewStep' }
+        digest: { type: string, pattern: '^[a-f0-9]{64}$' }
+        published_at: { type: string, format: date-time }
+    CreateSupplierCaseRequest:
+      type: object
+      additionalProperties: false
+      required: [supplier_id, policy_id, policy_version]
+      properties:
+        supplier_id: { type: string, format: uuid }
+        policy_id: { type: string, format: uuid }
+        policy_version: { type: integer, minimum: 1 }
+    AttachSupplierCaseEvidenceRequest:
+      type: object
+      additionalProperties: false
+      required: [upload_id, slot, kind]
+      properties:
+        upload_id: { type: string, format: uuid }
+        slot: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+        kind: { type: string, pattern: '^[a-z][a-z0-9._-]{0,63}$' }
+    SupplierCase:
+      type: object
+      additionalProperties: false
+      required: [case_id, supplier_id, status, version, policy_id, policy_version, deadline_at]
+      properties:
+        case_id: { type: string, format: uuid }
+        supplier_id: { type: string, format: uuid }
+        status: { type: string, enum: [collecting, submitted, approved, rejected, canceled, expired] }
+        version: { type: integer, format: int64, minimum: 1 }
+        evidence_epoch: { type: integer, format: int64, minimum: 0 }
+        evidence_digest: { type: string, pattern: '^[a-f0-9]{64}$' }
+        policy_id: { type: string, format: uuid }
+        policy_version: { type: integer, minimum: 1 }
+        deadline_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        evidence:
+          type: array
+          items: { $ref: '#/components/schemas/SupplierCaseEvidence' }
+    SupplierCaseEvidence:
+      type: object
+      additionalProperties: false
+      required: [evidence_id, slot, kind, upload_id, version, media_type, bytes, sha256]
+      properties:
+        evidence_id: { type: string, format: uuid }
+        slot: { type: string }
+        kind: { type: string }
+        upload_id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        media_type: { type: string, enum: [application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, text/plain] }
+        bytes: { type: integer, minimum: 1, maximum: 20971520 }
+        sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
     OrderEventPage:
       type: object
       additionalProperties: false
