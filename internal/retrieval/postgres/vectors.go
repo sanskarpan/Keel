@@ -254,6 +254,30 @@ func (r *Repository) PublishVectorBuild(ctx context.Context, tenant tenancy.Tena
 		if state != "ready" {
 			return ErrVectorBuildNotReady
 		}
+		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT document_version_id FROM keel_meta.retrieval_chunks
+			WHERE tenant_id=$1 AND build_id=$2 AND visibility_key=$3 ORDER BY document_version_id`, string(s.tenant), corpusID, s.visibility)
+		if err != nil {
+			return fmt.Errorf("read source versions before vector publication: %w", err)
+		}
+		var sourceIDs []uuid.UUID
+		for rows.Next() {
+			var sourceID uuid.UUID
+			if err := rows.Scan(&sourceID); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			sourceIDs = append(sourceIDs, sourceID)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := lockEligibleSources(ctx, tx, s, sourceIDs); err != nil {
+			return fmt.Errorf("refuse stale vector publication: %w", err)
+		}
 		var old sql.NullString
 		var generation int64
 		if err := tx.QueryRowContext(ctx, `SELECT active_vector_build_id::text,generation FROM keel_meta.retrieval_vector_heads
@@ -407,7 +431,11 @@ func (r *Repository) searchVector(ctx context.Context, tenant tenancy.TenantID, 
 			result.CandidateCount = eligible
 		}
 		result.Candidates = sortVectorCandidates(candidates, topK)
-		return nil
+		ids := make([]uuid.UUID, 0, len(result.Candidates))
+		for _, candidate := range result.Candidates {
+			ids = append(ids, candidate.DocumentVersionID)
+		}
+		return lockEligibleSources(workCtx, tx, s, ids)
 	})
 	if err != nil {
 		return VectorSearchResult{}, err
@@ -442,6 +470,7 @@ func readExactVectorCandidates(ctx context.Context, tx *sql.Tx, s scope, b Vecto
 	literal := formatVector(query)
 	rows, err := tx.QueryContext(ctx, `SELECT v.chunk_id,c.document_version_id,c.chunk_ordinal,c.source_start_byte,c.source_end_byte,c.content_sha256,(v.embedding <=> $4::vector)::float8
 		FROM keel_meta.retrieval_vector_chunks v JOIN keel_meta.retrieval_chunks c ON c.tenant_id=v.tenant_id AND c.build_id=v.corpus_build_id AND c.chunk_id=v.chunk_id
+		JOIN keel_meta.retrieval_source_eligibility e ON e.tenant_id=c.tenant_id AND e.visibility_key=c.visibility_key AND e.document_version_id=c.document_version_id AND e.state='active'
 		WHERE v.tenant_id=$1 AND v.visibility_key=$2 AND v.vector_build_id=$3 ORDER BY v.embedding <=> $4::vector,v.chunk_id LIMIT $5`, string(s.tenant), s.visibility, b.ID, literal, limit)
 	if err != nil {
 		return nil, err
@@ -475,6 +504,7 @@ func readHNSWCandidates(ctx context.Context, tx *sql.Tx, s scope, b VectorBuild,
 	literal := formatVector(query)
 	sqlText := fmt.Sprintf(`SELECT v.chunk_id,c.document_version_id,c.chunk_ordinal,c.source_start_byte,c.source_end_byte,c.content_sha256,v.embedding::text
 		FROM keel_meta.retrieval_vector_chunks v JOIN keel_meta.retrieval_chunks c ON c.tenant_id=v.tenant_id AND c.build_id=v.corpus_build_id AND c.chunk_id=v.chunk_id
+		JOIN keel_meta.retrieval_source_eligibility e ON e.tenant_id=c.tenant_id AND e.visibility_key=c.visibility_key AND e.document_version_id=c.document_version_id AND e.state='active'
 		WHERE v.tenant_id=$1 AND v.visibility_key=$2 AND v.vector_build_id=$3 AND v.model_id='%s' AND v.model_revision='%s'
 		ORDER BY v.embedding::halfvec(%d) <=> $4::halfvec(%d) LIMIT $5`, modelID, revision, dims, dims)
 	rows, err := tx.QueryContext(ctx, sqlText, string(s.tenant), s.visibility, b.ID, literal, limit)
