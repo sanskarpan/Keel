@@ -266,6 +266,18 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if outcome != "unknown" || liability != "unknown" {
 		t.Fatalf("expired call lost ambiguous protection: job=%s liability=%s", outcome, liability)
 	}
+	if err := budgetRepo.ReconcileUnknown(ctx, tenant, expiredLease.InferenceID, "principal:operator", "provider_outcome_verified", nil, "reconcile:generic-path"); !errors.Is(err, budget.ErrBudgetConflict) {
+		t.Fatalf("generic budget reconciliation accepted a queue-backed attempt: %v", err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, expiredLease.InferenceID).Scan(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT liability_state FROM keel_meta.ai_budget_reservations WHERE tenant_id=$1 AND inference_id=$2`, tenantID, expiredLease.InferenceID).Scan(&liability); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "unknown" || liability != "unknown" {
+		t.Fatalf("rejected generic reconciliation changed queue liability: job=%s budget=%s", outcome, liability)
+	}
 	// A tenant-scoped app SQL session must not be able to manufacture settlement
 	// evidence for a queue-owned reservation or call the worker-only transition.
 	for name, statement := range map[string]string{
@@ -301,6 +313,12 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	}
 	if _, err := workerDB.ExecContext(ctx, `SELECT keel_meta.resolve_ai_job_outcome($1,$2,'no_charge','forged:no-charge')`, tenantID, expiredLease.InferenceID); err == nil {
 		t.Fatal("AI worker role called the revoked reconciliation transition")
+	}
+	for name, db := range map[string]*sql.DB{"application": appDB, "AI worker": workerDB} {
+		if _, err := db.ExecContext(ctx, `SET ROLE keel_budget_control`); err == nil {
+			_, _ = db.ExecContext(ctx, `RESET ROLE`)
+			t.Fatalf("%s identity can assume the trusted budget-control role", name)
+		}
 	}
 	err = tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `UPDATE keel_meta.ai_budget_accounts SET reserved_micro_usd=0 WHERE tenant_id=$1 AND period_id=$2`, tenantID, periodID)
