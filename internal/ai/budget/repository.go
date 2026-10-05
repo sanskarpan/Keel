@@ -203,6 +203,12 @@ func (r *Repository) MarkUnknown(ctx context.Context, tenant tenancy.TenantID, i
 	return r.finish(ctx, tenant, inferenceID, "unknown", 0, source, false)
 }
 
+// MarkUnknownWith atomically records ambiguous provider liability and applies a
+// caller-owned transition in the same tenant transaction.
+func (r *Repository) MarkUnknownWith(ctx context.Context, tenant tenancy.TenantID, inferenceID, source string, after func(*sql.Tx) error) error {
+	return r.finishAuthorizedWith(ctx, tenant, inferenceID, "unknown", 0, source, false, "", "", after)
+}
+
 // RecordEstimate appends a provisional usage estimate for an unknown attempt without changing
 // committed or reserved counters. Estimates are evidence only; the complete reserve remains held.
 func (r *Repository) RecordEstimate(ctx context.Context, tenant tenancy.TenantID, inferenceID string, amount int64, source string) error {
@@ -239,19 +245,31 @@ func (r *Repository) RecordEstimate(ctx context.Context, tenant tenancy.TenantID
 // SettleConfirmed records actual cost in full, including overruns, and blocks further admission
 // when the quote or hard period limit is exceeded. It never clamps a provider charge.
 func (r *Repository) SettleConfirmed(ctx context.Context, tenant tenancy.TenantID, inferenceID string, actual int64, source string) error {
+	return r.SettleConfirmedWith(ctx, tenant, inferenceID, actual, source, nil)
+}
+
+func (r *Repository) SettleConfirmedWith(ctx context.Context, tenant tenancy.TenantID, inferenceID string, actual int64, source string, after func(*sql.Tx) error) error {
 	if actual <= 0 {
 		return ErrBudgetConflict
 	}
-	return r.finish(ctx, tenant, inferenceID, "confirmed", actual, source, false)
+	return r.finishAuthorizedWith(ctx, tenant, inferenceID, "confirmed", actual, source, false, "", "", after)
 }
 
 func (r *Repository) SettleNoCharge(ctx context.Context, tenant tenancy.TenantID, inferenceID, source string) error {
 	return r.finish(ctx, tenant, inferenceID, "no_charge", 0, source, false)
 }
 
+func (r *Repository) SettleNoChargeWith(ctx context.Context, tenant tenancy.TenantID, inferenceID, source string, after func(*sql.Tx) error) error {
+	return r.finishAuthorizedWith(ctx, tenant, inferenceID, "no_charge", 0, source, false, "", "", after)
+}
+
 // ReconcileUnknown is deliberately unavailable until a verified-identity authorizer is wired.
 // The decision and reason are passed to the authorizer before any database mutation.
 func (r *Repository) ReconcileUnknown(ctx context.Context, tenant tenancy.TenantID, inferenceID, actor, reason string, actual *int64, source string) error {
+	return r.ReconcileUnknownWith(ctx, tenant, inferenceID, actor, reason, actual, source, nil)
+}
+
+func (r *Repository) ReconcileUnknownWith(ctx context.Context, tenant tenancy.TenantID, inferenceID, actor, reason string, actual *int64, source string, after func(*sql.Tx) error) error {
 	if r.reconciler == nil || !principalRef.MatchString(actor) || !reasonCode.MatchString(reason) {
 		return ErrReconciliationDenied
 	}
@@ -267,12 +285,12 @@ func (r *Repository) ReconcileUnknown(ctx context.Context, tenant tenancy.Tenant
 		return fmt.Errorf("%w: %v", ErrReconciliationDenied, err)
 	}
 	if actual == nil {
-		return r.finishAuthorized(ctx, tenant, inferenceID, "reconciliation", 0, source, true, actor, reason)
+		return r.finishAuthorizedWith(ctx, tenant, inferenceID, "reconciliation", 0, source, true, actor, reason, after)
 	}
 	if *actual == 0 {
-		return r.finishAuthorized(ctx, tenant, inferenceID, "reconciliation", 0, source, true, actor, reason)
+		return r.finishAuthorizedWith(ctx, tenant, inferenceID, "reconciliation", 0, source, true, actor, reason, after)
 	}
-	return r.finishAuthorized(ctx, tenant, inferenceID, "reconciliation", *actual, source, true, actor, reason)
+	return r.finishAuthorizedWith(ctx, tenant, inferenceID, "reconciliation", *actual, source, true, actor, reason, after)
 }
 
 // AdjustSettled appends an authorized signed correction to a settled attempt. It preserves the
@@ -331,6 +349,10 @@ func (r *Repository) finish(ctx context.Context, tenant tenancy.TenantID, infere
 }
 
 func (r *Repository) finishAuthorized(ctx context.Context, tenant tenancy.TenantID, inferenceID, kind string, amount int64, source string, reconciliation bool, actor, reason string) error {
+	return r.finishAuthorizedWith(ctx, tenant, inferenceID, kind, amount, source, reconciliation, actor, reason, nil)
+}
+
+func (r *Repository) finishAuthorizedWith(ctx context.Context, tenant tenancy.TenantID, inferenceID, kind string, amount int64, source string, reconciliation bool, actor, reason string, after func(*sql.Tx) error) error {
 	if !budgetUUID.MatchString(string(tenant)) || !budgetUUID.MatchString(inferenceID) || len(source) < 1 || len(source) > 160 || strings.ContainsAny(source, "\r\n\x00") {
 		return ErrBudgetConflict
 	}
@@ -357,6 +379,9 @@ func (r *Repository) finishAuthorized(ctx context.Context, tenant tenancy.Tenant
 		err = tx.QueryRowContext(ctx, `SELECT amount_micro_usd,source_ref FROM keel_meta.ai_usage_ledger WHERE tenant_id=$1 AND attempt_id=$2 AND entry_kind=$3`, string(tenant), attempt, entryKind).Scan(&oldAmount, &oldSource)
 		if err == nil {
 			if oldAmount == amount && oldSource == source {
+				if after != nil {
+					return after(tx)
+				}
 				return nil
 			}
 			return ErrBudgetConflict
@@ -377,7 +402,13 @@ func (r *Repository) finishAuthorized(ctx context.Context, tenant tenancy.Tenant
 			if _, err = tx.ExecContext(ctx, `UPDATE keel_meta.ai_budget_reservations SET liability_state='unknown' WHERE tenant_id=$1 AND inference_id=$2`, string(tenant), inferenceID); err != nil {
 				return err
 			}
-			return appendLedger(ctx, tx, tenant, inferenceID, attempt, "unknown", 0, "unknown", source, "", "")
+			if err := appendLedger(ctx, tx, tenant, inferenceID, attempt, "unknown", 0, "unknown", source, "", ""); err != nil {
+				return err
+			}
+			if after != nil {
+				return after(tx)
+			}
+			return nil
 		}
 		committed, okC := parseCounter(committedText)
 		reserved, okR := parseCounter(reservedText)
@@ -397,10 +428,13 @@ func (r *Repository) finishAuthorized(ctx context.Context, tenant tenancy.Tenant
 		if _, err = tx.ExecContext(ctx, `UPDATE keel_meta.ai_budget_reservations SET liability_state='settled' WHERE tenant_id=$1 AND inference_id=$2`, string(tenant), inferenceID); err != nil {
 			return err
 		}
-		if amount == 0 {
-			return appendLedger(ctx, tx, tenant, inferenceID, attempt, entryKind, 0, "exact", source, actor, reason)
+		if err := appendLedger(ctx, tx, tenant, inferenceID, attempt, entryKind, amount, "exact", source, actor, reason); err != nil {
+			return err
 		}
-		return appendLedger(ctx, tx, tenant, inferenceID, attempt, entryKind, amount, "exact", source, actor, reason)
+		if after != nil {
+			return after(tx)
+		}
+		return nil
 	})
 }
 
