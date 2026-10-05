@@ -220,6 +220,30 @@ func (r *Repository) Publish(ctx context.Context, tenant tenancy.TenantID, visib
 		if state != "ready" {
 			return ErrBuildNotReady
 		}
+		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT document_version_id FROM keel_meta.retrieval_chunks
+			WHERE tenant_id=$1 AND build_id=$2 AND visibility_key=$3 ORDER BY document_version_id`, string(s.tenant), buildID, s.visibility)
+		if err != nil {
+			return fmt.Errorf("read source versions before publication: %w", err)
+		}
+		var sourceIDs []uuid.UUID
+		for rows.Next() {
+			var sourceID uuid.UUID
+			if err := rows.Scan(&sourceID); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			sourceIDs = append(sourceIDs, sourceID)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := lockEligibleSources(ctx, tx, s, sourceIDs); err != nil {
+			return fmt.Errorf("refuse stale retrieval publication: %w", err)
+		}
 		var old sql.NullString
 		var generation int64
 		if err := tx.QueryRowContext(ctx, `SELECT active_build_id::text,generation FROM keel_meta.retrieval_corpus_heads WHERE tenant_id=$1 AND visibility_key=$2 FOR UPDATE`, string(s.tenant), s.visibility).Scan(&old, &generation); err != nil {
@@ -327,6 +351,7 @@ func (r *Repository) SearchScores(ctx context.Context, tenant tenancy.TenantID, 
 		query := `SELECT c.chunk_id,c.document_version_id,c.chunk_ordinal,c.source_start_byte,c.source_end_byte,c.content_sha256,c.token_count,p.term_id,p.term_frequency,st.document_frequency
 			FROM keel_meta.retrieval_chunks c JOIN keel_meta.retrieval_term_postings p ON p.tenant_id=c.tenant_id AND p.build_id=c.build_id AND p.chunk_id=c.chunk_id
 			JOIN keel_meta.retrieval_term_statistics st ON st.tenant_id=p.tenant_id AND st.build_id=p.build_id AND st.term_id=p.term_id
+			JOIN keel_meta.retrieval_source_eligibility e ON e.tenant_id=c.tenant_id AND e.visibility_key=c.visibility_key AND e.document_version_id=c.document_version_id AND e.state='active'
 			WHERE c.tenant_id=$1 AND c.visibility_key=$2 AND c.build_id=$3 AND p.term_key_id=$4 AND p.term_id IN (` + strings.Join(placeholders, ",") + `)
 			ORDER BY c.chunk_id,p.term_id LIMIT ` + limitArg
 		rows, err := tx.QueryContext(ctx, query, args...)
@@ -399,12 +424,44 @@ func (r *Repository) SearchScores(ctx context.Context, tenant tenancy.TenantID, 
 		if len(result.Candidates) > topK {
 			result.Candidates = result.Candidates[:topK]
 		}
-		return nil
+		ids := make([]uuid.UUID, 0, len(result.Candidates))
+		for _, candidate := range result.Candidates {
+			ids = append(ids, candidate.DocumentVersionID)
+		}
+		return lockEligibleSources(ctx, tx, s, ids)
 	})
 	if err != nil {
 		return SearchResult{}, err
 	}
 	return result, nil
+}
+
+// lockEligibleSources defines the query/revocation race: a query that locks an
+// active source first is ordered before a concurrent withdrawal; a withdrawal
+// that commits first makes this repeatable-read transaction fail to acquire a
+// current lock (serialization failure) or return no candidates. Callers must
+// retry serialization failures before exposing any result.
+func lockEligibleSources(ctx context.Context, tx *sql.Tx, s scope, ids []uuid.UUID) error {
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	for _, id := range ids {
+		if id == uuid.Nil {
+			return errors.New("retrieval candidate has an empty source version")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		var state string
+		err := tx.QueryRowContext(ctx, `SELECT state FROM keel_meta.retrieval_source_eligibility
+			WHERE tenant_id=$1 AND visibility_key=$2 AND document_version_id=$3 FOR SHARE`, string(s.tenant), s.visibility, id).Scan(&state)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && state != "active") {
+			return errors.New("retrieval source was withdrawn during query")
+		}
+		if err != nil {
+			return fmt.Errorf("lock current retrieval source eligibility: %w", err)
+		}
+	}
+	return nil
 }
 
 type rowScanner interface{ Scan(...any) error }
