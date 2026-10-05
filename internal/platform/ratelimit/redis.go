@@ -67,7 +67,7 @@ func NewRedisClient(cfg ClientConfig) (*redis.Client, error) {
 	}
 	options := &redis.Options{Addr: cfg.Addr, Username: cfg.Username, Password: cfg.Password,
 		DialTimeout: cfg.DialTimeout, ReadTimeout: cfg.ReadTimeout, WriteTimeout: cfg.WriteTimeout,
-		PoolSize: cfg.PoolSize, MaxRetries: 0}
+		PoolSize: cfg.PoolSize, MaxRetries: -1}
 	if cfg.TLSConfig != nil {
 		options.TLSConfig = cfg.TLSConfig.Clone()
 		if options.TLSConfig.InsecureSkipVerify || options.TLSConfig.MaxVersion != 0 && options.TLSConfig.MaxVersion < tls.VersionTLS12 {
