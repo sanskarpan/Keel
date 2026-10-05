@@ -19,7 +19,9 @@ Problem response: `{type,title,status,code,detail,request_id,retry_after_seconds
 | `POST /v1/supplier-cases/{id}/invitations` | coordinator; expiring purpose-scoped invitation |
 | `POST /v1/supplier-cases/{id}/submit` | coordinator/invited supplier according to policy; freeze evidence digest and approval plan, enter submitted, create durable workflow intent |
 | `POST /v1/supplier-cases/{id}/decisions` | currently unmounted K2.4 boundary; body contains stable `decision_id`, `step_key`, `outcome`, and optional bounded `reason`; actor/tenant are trusted context and role comes from the frozen plan |
-| `POST /v1/supplier-cases/{id}/cancel` | coordinator/admin; durable cancellation intent |
+| `POST /v1/supplier-cases/{id}/cancel` | unmounted K2.5 boundary; stable `cancellation_id` and bounded reason; cancellation, approval and expiry serialize under the same database row lock |
+| `POST /v1/supplier-cases/{id}/manual-reviews` | current reviewer requests a bounded evidence-scoped review; does not approve the supplier case or override scanner/extractor results |
+| `POST /v1/supplier-cases/{id}/manual-reviews/{review_id}/resolution` | current independent reviewer records `confirmed` or `replacement-required` with a bounded rationale |
 | `POST /v1/documents/uploads` | authorized case/document writer; metadata and scoped presigned URL |
 | `POST /v1/documents/uploads/{id}/complete` | owner of upload; verify size/hash/type/object version, enqueue scan; 202 |
 | `GET /v1/documents/{id}/versions/{version}` | document reader; immutable cited version metadata |
@@ -51,6 +53,8 @@ Problem response: `{type,title,status,code,detail,request_id,retry_after_seconds
 Admin/operator APIs are separately routed, strongly authenticated and never accessed by ordinary model tools. Bulk replay/erasure have explicit maximum batch sizes and progress IDs.
 
 K2.4 decision acceptance is a case-app boundary only: PostgreSQL rechecks the frozen step role, active reviewer grant/delegation, separation of duties, dependency completion and database deadline while holding the case lock. Identical decision IDs with identical content replay safely; conflicting reuse returns a conflict. The endpoint must remain unmounted until K0 identity and runtime authorization wiring plus reviewer-grant provisioning are qualified.
+
+K2.5 cancellation and manual-review handlers are also unmounted. Cancellation is allowed only before the persisted deadline for collecting/submitted cases; it revokes invitations and prevents new intake. Manual review is evidence-scoped and role-bound, and its resolution cannot satisfy the frozen approval plan. Reminder/expiry effects are internal durable records. No notification provider or public notification endpoint is configured; external sinks must support effect-key idempotency and are at-least-once until provider acknowledgement semantics are qualified.
 
 ## 3. Order and inference examples
 

@@ -137,3 +137,14 @@ Migrations `0011_supplier_case_approval_arbitration` and `0012_supplier_case_exp
 | `supplier_case_decisions` | `(tenant,case,decision)` with unique step, outcome, reason, request digest and accepted aggregate version | App SELECT/INSERT only; database stamps acceptance after taking the case row lock |
 
 Decision triggers enforce the frozen plan step, active grant or one direct delegation, requester separation, completed prerequisites and strict `accepted_at < deadline_at`. Deferred checks bind each immutable decision to an event with the same actor and acceptance timestamp, plus its versioned case snapshot and workflow intent. The case row serializes decisions and expiry; the expiry trigger independently requires a submitted case and a matching deadline timestamp between persisted deadline and database current time. No role/member management endpoint or Temporal expiry activity is mounted; those remain identity/runtime gates.
+
+## 10. Supplier lifecycle effects (K2.5)
+
+Migration `0013_supplier_case_lifecycle_effects` extends immutable case events with cancellation and evidence-review identities, plus these tenant-forced-RLS tables:
+
+| Table | Key and purpose | Mutation boundary |
+|---|---|---|
+| `supplier_case_manual_reviews` | `(tenant,case,review)`; immutable evidence digest, requester/reason, open/confirmed/replacement-required state and event versions | App inserts; one trigger-verified resolution update; reviewer role and separation are rechecked |
+| `supplier_case_activity_effects` | `(tenant,effect)` plus unique `(tenant,effect_key)`; reminder/expiry type, occurrence, canonical payload digest, due/available time, attempt state and lease owner/epoch | Trusted case-insert trigger schedules; worker SELECT/UPDATE only; payload/key immutable and transitions fenced |
+
+The cancellation event and case snapshot commit with workflow intent under the same row lock as decisions and expiry; invitation revocation and pending-effect cancellation are atomic. Intake triggers reject invitations, sessions, uploads and evidence writes once the case is no longer collecting. Reminder occurrences are midpoint and deadline-minus-one-hour when they are not immediate; deadline expiry has its own durable activity effect. A fixed security-definer lookup gives the worker only current principal refs, case state and deadline after checking its live lease. Only active principals in a frozen approval plan currently receive reminders; effects that become due before submission have no recipient and are completed as no-ops. Supplier and requester routing requires a separately designed, reauthorized destination model. Reminder delivery is at-least-once across an external acknowledgement failure; a qualified sink must deduplicate stable effect keys and reject a changed payload digest. The local sink abstraction is not external-provider qualification.

@@ -187,6 +187,33 @@ func TestDecisionsEnforceSeparationDependenciesAndFrozenBoundary(t *testing.T) {
 	}
 }
 
+func TestCancellationAndManualReviewRemainAuditedAndBounded(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	current := Case{TenantID: tenantID, CaseID: caseID, PolicyID: policyID, PolicyVersion: 1,
+		PolicyDigest: strings.Repeat("a", 64), EvidenceDigest: strings.Repeat("b", 64), Status: Submitted,
+		Version: 5, DeadlineAt: now.Add(time.Hour), LastEventHash: strings.Repeat("c", 64)}
+	updated, requested, err := RequestManualReview(current, "33333333-3333-4333-8333-333333333333",
+		"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "ambiguous clause", "principal:reviewer-1", now, current.LastEventHash)
+	if err != nil || updated.Status != Submitted || requested.Type != "supplier.case.manual-review-requested" {
+		t.Fatalf("manual review changed case approval state: %+v %+v %v", updated, requested, err)
+	}
+	resolved, event, err := ResolveManualReview(updated, "33333333-3333-4333-8333-333333333333",
+		"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "replacement-required", "date is unreadable", "principal:reviewer-2", now.Add(time.Minute), updated.LastEventHash)
+	if err != nil || resolved.Status != Submitted || event.Type != "supplier.case.manual-review-resolved" {
+		t.Fatalf("manual review resolution bypassed normal approval: %+v %+v %v", resolved, event, err)
+	}
+	canceled, cancellation, err := Cancel(current, "44444444-4444-4444-8444-444444444444", "supplier withdrew", "principal:buyer-1", now, current.LastEventHash)
+	if err != nil || canceled.Status != Canceled || cancellation.Type != "supplier.case.canceled" {
+		t.Fatalf("cancel transition failed: %+v %+v %v", canceled, cancellation, err)
+	}
+	if _, _, err := Cancel(current, "44444444-4444-4444-8444-444444444444", "supplier withdrew", "principal:buyer-1", current.DeadlineAt, current.LastEventHash); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cancellation won at/after deadline: %v", err)
+	}
+	if _, _, err := Cancel(canceled, "55555555-5555-4555-8555-555555555555", "again", "principal:buyer-1", now.Add(2*time.Minute), canceled.LastEventHash); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second terminal cancellation succeeded: %v", err)
+	}
+}
+
 func TestAddEvidenceRejectsGapAndHistoryTampering(t *testing.T) {
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	policy, _, _ := validPolicy().Canonical()

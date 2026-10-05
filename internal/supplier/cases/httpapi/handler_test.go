@@ -49,6 +49,8 @@ type fakeRepository struct {
 	submitted    bool
 	decided      bool
 	decision     cases.StepDecision
+	canceled     bool
+	manualReview cases.ManualReviewData
 }
 
 func (r *fakeRepository) PublishPolicy(_ context.Context, _ tenancy.TenantID, p cases.Policy, _ string) (cases.Policy, error) {
@@ -80,6 +82,21 @@ func (r *fakeRepository) Decide(_ context.Context, t tenancy.TenantID, id string
 	r.decided = true
 	r.decision = decision
 	return cases.Case{CaseID: id, Status: cases.Submitted, Version: 4}, nil
+}
+func (r *fakeRepository) Cancel(_ context.Context, _ tenancy.TenantID, id, cancellationID, reason, actor string) (cases.Case, error) {
+	r.canceled = true
+	r.actor = actor
+	return cases.Case{CaseID: id, Status: cases.Canceled, Version: 2}, nil
+}
+func (r *fakeRepository) RequestManualReview(_ context.Context, _ tenancy.TenantID, id string, review cases.ManualReviewData, actor string) (cases.Case, error) {
+	r.manualReview = review
+	r.actor = actor
+	return cases.Case{CaseID: id, Status: cases.Submitted, Version: 4}, nil
+}
+func (r *fakeRepository) ResolveManualReview(_ context.Context, _ tenancy.TenantID, id string, review cases.ManualReviewData, actor string) (cases.Case, error) {
+	r.manualReview = review
+	r.actor = actor
+	return cases.Case{CaseID: id, Status: cases.Submitted, Version: 5}, nil
 }
 func (r *fakeRepository) Expire(_ context.Context, _ tenancy.TenantID, id string) (cases.Case, error) {
 	return cases.Case{CaseID: id, Status: cases.Expired}, nil
@@ -190,5 +207,29 @@ func TestDecisionRouteUsesTrustedPrincipalAndRejectsCallerAuthorityFields(t *tes
 	h.ServeHTTP(res, req)
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("caller-supplied actor/role accepted: status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestCancellationAndManualReviewUseTrustedPrincipal(t *testing.T) {
+	tenant, _ := tenancy.ParseTenantID("11111111-1111-4111-8111-111111111111")
+	repo := &fakeRepository{}
+	h := testHandler(t, Principal{TenantID: tenant, ActorRef: "principal:case-reviewer"}, true, allowCaseActions{manage: true, decide: true}, repo)
+	request := httptest.NewRequest(http.MethodPost, "/v1/supplier-cases/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/cancel", strings.NewReader(`{"cancellation_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","reason":"withdrawn"}`))
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !repo.canceled || repo.actor != "principal:case-reviewer" {
+		t.Fatalf("cancel did not use trusted actor: status=%d actor=%s", response.Code, repo.actor)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/supplier-cases/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/manual-reviews", strings.NewReader(`{"review_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","evidence_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","reason":"unclear clause"}`))
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || repo.manualReview.ReviewID != "cccccccc-cccc-4ccc-8ccc-cccccccccccc" || repo.actor != "principal:case-reviewer" {
+		t.Fatalf("manual review request did not use trusted actor: status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/supplier-cases/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/manual-reviews/cccccccc-cccc-4ccc-8ccc-cccccccccccc/resolution", strings.NewReader(`{"evidence_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","outcome":"confirmed","reason":"checked by authorized reviewer"}`))
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || repo.manualReview.Outcome != "confirmed" {
+		t.Fatalf("manual review resolution failed: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
