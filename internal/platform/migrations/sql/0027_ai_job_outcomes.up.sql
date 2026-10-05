@@ -235,11 +235,162 @@ REVOKE ALL ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) FRO
 GRANT EXECUTE ON FUNCTION keel_meta.record_ai_job_outcome(uuid,uuid,text,bigint,text,text) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.expire_ai_job(uuid,uuid,text,bigint,text) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.list_expired_ai_jobs(uuid,integer) TO keel_ai_worker;
-GRANT EXECUTE ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) TO keel_ai_worker;
+GRANT EXECUTE ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) TO keel_budget_control;
+
+-- The worker can invoke state transitions, but it cannot directly edit budget
+-- projections, reservations, or ledger rows. These routines own each complete
+-- accounting + queue state change in one SECURITY DEFINER transaction.
+CREATE FUNCTION keel_meta.apply_ai_job_outcome(p_tenant uuid,p_inference uuid,p_worker text,p_epoch bigint,
+                                               p_kind text,p_amount bigint,p_source text)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,keel_meta,keel_private,pg_temp AS $$
+DECLARE j record; budget_row record; committed_next numeric; reserved_next numeric; blocked_next boolean;
+        old_amount bigint; old_source text;
+BEGIN
+    IF p_tenant IS DISTINCT FROM keel_private.current_tenant_id() OR p_worker !~ '^[A-Za-z0-9._~-]{1,120}$'
+       OR p_epoch<1 OR p_kind NOT IN ('unknown','confirmed','no_charge') OR p_amount<0
+       OR p_source !~ '^[A-Za-z0-9._:/~-]{1,160}$' OR (p_kind='confirmed' AND p_amount<=0)
+       OR (p_kind<>'confirmed' AND p_amount<>0) THEN
+        RAISE EXCEPTION 'invalid AI job outcome';
+    END IF;
+    SELECT state,outcome_kind,outcome_source_ref,outcome_worker_id,lease_owner,lease_epoch
+      INTO j FROM keel_meta.ai_jobs WHERE tenant_id=p_tenant AND inference_id=p_inference FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'AI job lease is no longer current'; END IF;
+    IF j.state IN ('unknown','succeeded','no_charge') AND j.outcome_kind=p_kind AND j.outcome_source_ref=p_source
+       AND j.outcome_worker_id=p_worker AND j.lease_epoch=p_epoch THEN
+        SELECT amount_micro_usd,source_ref INTO old_amount,old_source FROM keel_meta.ai_usage_ledger
+         WHERE tenant_id=p_tenant AND inference_id=p_inference AND entry_kind=p_kind;
+        IF FOUND AND old_amount=p_amount AND old_source=p_source THEN RETURN true; END IF;
+        RAISE EXCEPTION 'conflicting AI job result replay';
+    END IF;
+    IF j.state<>'leased' OR j.lease_owner<>p_worker OR j.lease_epoch<>p_epoch THEN
+        RAISE EXCEPTION 'AI job lease is no longer current';
+    END IF;
+    SELECT a.period_id,a.attempt_id,a.max_liability_micro_usd,r.amount_micro_usd,r.liability_state,
+           b.committed_micro_usd,b.reserved_micro_usd,b.hard_limit_micro_usd,b.overrun_blocked
+      INTO budget_row FROM keel_meta.ai_inference_admissions a
+      JOIN keel_meta.ai_budget_reservations r USING(tenant_id,inference_id,attempt_id,period_id,scope)
+      JOIN keel_meta.ai_budget_accounts b USING(tenant_id,period_id,scope)
+     WHERE a.tenant_id=p_tenant AND a.inference_id=p_inference FOR UPDATE OF r,b;
+    IF NOT FOUND OR budget_row.liability_state<>'reserved' THEN RAISE EXCEPTION 'AI job budget is not reserved'; END IF;
+    IF p_kind='unknown' THEN
+        UPDATE keel_meta.ai_budget_reservations SET liability_state='unknown'
+         WHERE tenant_id=p_tenant AND inference_id=p_inference;
+        INSERT INTO keel_meta.ai_usage_ledger(tenant_id,entry_id,inference_id,attempt_id,entry_kind,amount_micro_usd,confidence,currency,source_ref)
+         VALUES(p_tenant,gen_random_uuid(),p_inference,budget_row.attempt_id,'unknown',0,'unknown','USD',p_source);
+    ELSE
+        committed_next:=budget_row.committed_micro_usd+p_amount;
+        reserved_next:=budget_row.reserved_micro_usd-budget_row.amount_micro_usd;
+        IF reserved_next<0 THEN RAISE EXCEPTION 'AI budget reservation counter underflow'; END IF;
+        blocked_next:=budget_row.overrun_blocked OR p_amount>budget_row.max_liability_micro_usd OR committed_next>budget_row.hard_limit_micro_usd
+            OR committed_next+reserved_next>budget_row.hard_limit_micro_usd;
+        UPDATE keel_meta.ai_budget_accounts SET committed_micro_usd=committed_next,reserved_micro_usd=reserved_next,
+            overrun_blocked=blocked_next,version=version+1 WHERE tenant_id=p_tenant AND period_id=budget_row.period_id AND scope='inference';
+        UPDATE keel_meta.ai_budget_reservations SET liability_state='settled'
+         WHERE tenant_id=p_tenant AND inference_id=p_inference;
+        INSERT INTO keel_meta.ai_usage_ledger(tenant_id,entry_id,inference_id,attempt_id,entry_kind,amount_micro_usd,confidence,currency,source_ref)
+         VALUES(p_tenant,gen_random_uuid(),p_inference,budget_row.attempt_id,p_kind,p_amount,'exact','USD',p_source);
+    END IF;
+    UPDATE keel_meta.ai_jobs SET state=CASE p_kind WHEN 'unknown' THEN 'unknown' WHEN 'confirmed' THEN 'succeeded' ELSE 'no_charge' END,
+        outcome_kind=p_kind,outcome_source_ref=p_source,outcome_worker_id=p_worker,
+        lease_owner=CASE WHEN p_kind='unknown' THEN lease_owner ELSE NULL END,
+        lease_until=CASE WHEN p_kind='unknown' THEN lease_until ELSE NULL END,
+        attempt_deadline_at=CASE WHEN p_kind='unknown' THEN attempt_deadline_at ELSE NULL END
+     WHERE tenant_id=p_tenant AND inference_id=p_inference AND state='leased' AND lease_owner=p_worker AND lease_epoch=p_epoch;
+    IF NOT FOUND THEN RAISE EXCEPTION 'AI job lease is no longer current'; END IF;
+    RETURN true;
+END $$;
+
+CREATE OR REPLACE FUNCTION keel_meta.expire_ai_job(p_tenant uuid,p_inference uuid,p_worker text,p_epoch bigint,p_source text)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,keel_meta,keel_private,pg_temp AS $$
+DECLARE j record; changed boolean;
+BEGIN
+    IF p_tenant IS DISTINCT FROM keel_private.current_tenant_id() OR p_worker !~ '^[A-Za-z0-9._~-]{1,120}$'
+       OR p_epoch<1 OR p_source !~ '^[A-Za-z0-9._:/~-]{1,160}$' THEN RAISE EXCEPTION 'invalid expired AI job transition'; END IF;
+    SELECT state,outcome_kind,outcome_source_ref,outcome_worker_id,lease_owner,lease_epoch,lease_until,attempt_deadline_at
+      INTO j FROM keel_meta.ai_jobs WHERE tenant_id=p_tenant AND inference_id=p_inference FOR UPDATE;
+    IF FOUND AND j.state='unknown' AND j.outcome_kind='unknown' AND j.outcome_source_ref=p_source
+       AND j.outcome_worker_id=p_worker AND j.lease_epoch=p_epoch THEN RETURN false; END IF;
+    IF NOT FOUND OR j.state<>'leased' OR j.lease_owner<>p_worker OR j.lease_epoch<>p_epoch
+       OR (j.lease_until>clock_timestamp() AND j.attempt_deadline_at>clock_timestamp()) THEN
+        RAISE EXCEPTION 'AI job lease is not expired or no longer current';
+    END IF;
+    SELECT keel_meta.apply_ai_job_outcome(p_tenant,p_inference,p_worker,p_epoch,'unknown',0,p_source) INTO changed;
+    RETURN changed;
+END $$;
+
+CREATE FUNCTION keel_meta.reconcile_ai_job_outcome(p_tenant uuid,p_inference uuid,p_kind text,p_amount bigint,
+                                                    p_source text,p_actor text,p_reason text)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,keel_meta,keel_private,pg_temp AS $$
+DECLARE j record; budget_row record; committed_next numeric; reserved_next numeric; blocked_next boolean;
+        old_amount bigint; old_source text; old_actor text; old_reason text; next_state text; next_kind text;
+BEGIN
+    IF p_tenant IS DISTINCT FROM keel_private.current_tenant_id() OR p_kind NOT IN ('confirmed','no_charge') OR p_amount<0
+       OR (p_kind='no_charge' AND p_amount<>0) OR p_source !~ '^[A-Za-z0-9._:/~-]{1,160}$'
+       OR (p_kind='confirmed' AND p_amount<=0)
+       OR p_actor !~ '^principal:[A-Za-z0-9._~-]{1,120}$' OR p_reason !~ '^[a-z][a-z0-9_]{1,39}$' THEN
+        RAISE EXCEPTION 'invalid reconciled AI job outcome';
+    END IF;
+    next_state:=CASE p_kind WHEN 'confirmed' THEN 'succeeded' ELSE 'no_charge' END;
+    next_kind:=CASE p_kind WHEN 'confirmed' THEN 'reconciled_confirmed' ELSE 'reconciled_no_charge' END;
+    SELECT state,outcome_kind,outcome_source_ref,outcome_worker_id INTO j
+      FROM keel_meta.ai_jobs WHERE tenant_id=p_tenant AND inference_id=p_inference FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'AI job is not awaiting outcome reconciliation'; END IF;
+    IF j.state=next_state AND j.outcome_kind=next_kind AND j.outcome_source_ref=p_source THEN
+        SELECT amount_micro_usd,source_ref,reconciled_by,reason_code INTO old_amount,old_source,old_actor,old_reason
+          FROM keel_meta.ai_usage_ledger WHERE tenant_id=p_tenant AND inference_id=p_inference
+           AND entry_kind='reconciliation' AND source_ref=p_source;
+        IF FOUND AND old_amount=p_amount AND old_source=p_source AND old_actor=p_actor AND old_reason=p_reason THEN RETURN true; END IF;
+        RAISE EXCEPTION 'conflicting AI reconciliation replay';
+    END IF;
+    IF j.state<>'unknown' THEN RAISE EXCEPTION 'AI job is not awaiting outcome reconciliation'; END IF;
+    SELECT a.period_id,a.attempt_id,a.max_liability_micro_usd,r.amount_micro_usd,r.liability_state,
+           b.committed_micro_usd,b.reserved_micro_usd,b.hard_limit_micro_usd,b.overrun_blocked
+      INTO budget_row FROM keel_meta.ai_inference_admissions a
+      JOIN keel_meta.ai_budget_reservations r USING(tenant_id,inference_id,attempt_id,period_id,scope)
+      JOIN keel_meta.ai_budget_accounts b USING(tenant_id,period_id,scope)
+     WHERE a.tenant_id=p_tenant AND a.inference_id=p_inference FOR UPDATE OF r,b;
+    IF NOT FOUND OR budget_row.liability_state<>'unknown' THEN RAISE EXCEPTION 'AI job liability is not unknown'; END IF;
+    committed_next:=budget_row.committed_micro_usd+p_amount;
+    reserved_next:=budget_row.reserved_micro_usd-budget_row.amount_micro_usd;
+    IF reserved_next<0 THEN RAISE EXCEPTION 'AI budget reservation counter underflow'; END IF;
+    blocked_next:=budget_row.overrun_blocked OR p_amount>budget_row.max_liability_micro_usd OR committed_next>budget_row.hard_limit_micro_usd
+        OR committed_next+reserved_next>budget_row.hard_limit_micro_usd;
+    UPDATE keel_meta.ai_budget_accounts SET committed_micro_usd=committed_next,reserved_micro_usd=reserved_next,
+        overrun_blocked=blocked_next,version=version+1 WHERE tenant_id=p_tenant AND period_id=budget_row.period_id AND scope='inference';
+    UPDATE keel_meta.ai_budget_reservations SET liability_state='settled' WHERE tenant_id=p_tenant AND inference_id=p_inference;
+    INSERT INTO keel_meta.ai_usage_ledger(tenant_id,entry_id,inference_id,attempt_id,entry_kind,amount_micro_usd,confidence,currency,source_ref,reconciled_by,reason_code)
+      VALUES(p_tenant,gen_random_uuid(),p_inference,budget_row.attempt_id,'reconciliation',p_amount,'exact','USD',p_source,p_actor,p_reason);
+    UPDATE keel_meta.ai_jobs SET state=next_state,outcome_kind=next_kind,outcome_source_ref=p_source,
+        lease_owner=NULL,lease_until=NULL,attempt_deadline_at=NULL
+     WHERE tenant_id=p_tenant AND inference_id=p_inference AND state='unknown';
+    IF NOT FOUND THEN RAISE EXCEPTION 'AI job is not awaiting outcome reconciliation'; END IF;
+    RETURN true;
+END $$;
+
+REVOKE ALL ON FUNCTION keel_meta.record_ai_job_outcome(uuid,uuid,text,bigint,text,text) FROM keel_app,keel_ai_worker,keel_budget_control;
+REVOKE ALL ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) FROM keel_app,keel_ai_worker,keel_budget_control;
+REVOKE ALL ON FUNCTION keel_meta.apply_ai_job_outcome(uuid,uuid,text,bigint,text,bigint,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION keel_meta.reconcile_ai_job_outcome(uuid,uuid,text,bigint,text,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION keel_meta.apply_ai_job_outcome(uuid,uuid,text,bigint,text,bigint,text) TO keel_ai_worker;
+GRANT EXECUTE ON FUNCTION keel_meta.expire_ai_job(uuid,uuid,text,bigint,text) TO keel_ai_worker;
+GRANT EXECUTE ON FUNCTION keel_meta.list_expired_ai_jobs(uuid,integer) TO keel_ai_worker;
+GRANT EXECUTE ON FUNCTION keel_meta.reconcile_ai_job_outcome(uuid,uuid,text,bigint,text,text,text) TO keel_budget_control;
+
+REVOKE INSERT,UPDATE,DELETE ON keel_meta.ai_budget_accounts,keel_meta.ai_budget_reservations,keel_meta.ai_usage_ledger FROM keel_ai_worker;
+REVOKE UPDATE (committed_micro_usd,reserved_micro_usd,overrun_blocked,version) ON keel_meta.ai_budget_accounts FROM keel_ai_worker;
+REVOKE UPDATE (liability_state) ON keel_meta.ai_budget_reservations FROM keel_ai_worker;
+REVOKE INSERT ON keel_meta.ai_usage_ledger FROM keel_ai_worker;
 
 -- Queue-linked budget outcomes are written with the isolated AI worker DB
 -- identity. keel_app retains standalone budget operations, but cannot forge
 -- settlement evidence for an inference that has entered the provider queue.
+ALTER TABLE keel_meta.ai_budget_accounts
+    ADD COLUMN opening_committed_micro_usd numeric(30,0) NOT NULL DEFAULT 0;
+UPDATE keel_meta.ai_budget_accounts
+   SET opening_committed_micro_usd=committed_micro_usd;
 CREATE POLICY ai_budget_accounts_ai_worker ON keel_meta.ai_budget_accounts
     TO keel_ai_worker USING (tenant_id=(SELECT keel_private.current_tenant_id()))
     WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
@@ -255,6 +406,21 @@ CREATE POLICY ai_budget_reservations_ai_worker ON keel_meta.ai_budget_reservatio
 CREATE POLICY ai_usage_ledger_ai_worker ON keel_meta.ai_usage_ledger
     TO keel_ai_worker USING (tenant_id=(SELECT keel_private.current_tenant_id()))
     WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+CREATE POLICY ai_budget_accounts_budget_control ON keel_meta.ai_budget_accounts
+    TO keel_budget_control USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+CREATE POLICY ai_budget_period_heads_budget_control ON keel_meta.ai_budget_period_heads
+    TO keel_budget_control USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+CREATE POLICY ai_inference_admissions_budget_control ON keel_meta.ai_inference_admissions
+    TO keel_budget_control USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+CREATE POLICY ai_budget_reservations_budget_control ON keel_meta.ai_budget_reservations
+    TO keel_budget_control USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+CREATE POLICY ai_usage_ledger_budget_control ON keel_meta.ai_usage_ledger
+    TO keel_budget_control USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
 
 GRANT SELECT ON keel_meta.ai_budget_accounts,keel_meta.ai_budget_period_heads,
     keel_meta.ai_inference_admissions,keel_meta.ai_budget_reservations,keel_meta.ai_usage_ledger TO keel_ai_worker;
@@ -262,6 +428,12 @@ GRANT UPDATE (committed_micro_usd,reserved_micro_usd,overrun_blocked,version)
     ON keel_meta.ai_budget_accounts TO keel_ai_worker;
 GRANT UPDATE (liability_state) ON keel_meta.ai_budget_reservations TO keel_ai_worker;
 GRANT INSERT ON keel_meta.ai_usage_ledger TO keel_ai_worker;
+GRANT SELECT ON keel_meta.ai_budget_accounts,keel_meta.ai_budget_period_heads,
+    keel_meta.ai_inference_admissions,keel_meta.ai_budget_reservations,keel_meta.ai_usage_ledger TO keel_budget_control;
+GRANT UPDATE (committed_micro_usd,reserved_micro_usd,overrun_blocked,version)
+    ON keel_meta.ai_budget_accounts TO keel_budget_control;
+GRANT UPDATE (liability_state) ON keel_meta.ai_budget_reservations TO keel_budget_control;
+GRANT INSERT ON keel_meta.ai_usage_ledger TO keel_budget_control;
 
 CREATE FUNCTION keel_meta.guard_queued_ai_budget_mutation()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
@@ -274,8 +446,9 @@ BEGIN
         target_tenant:=NEW.tenant_id; target_inference:=NEW.inference_id;
     END IF;
     IF EXISTS(SELECT 1 FROM keel_meta.ai_jobs j WHERE j.tenant_id=target_tenant AND j.inference_id=target_inference)
-       AND NOT pg_catalog.pg_has_role(session_user,'keel_ai_worker','MEMBER') THEN
-        RAISE EXCEPTION 'queued AI budget outcomes require the isolated AI worker database identity'
+       AND NOT (pg_catalog.pg_has_role(session_user,'keel_ai_worker','MEMBER') OR
+                pg_catalog.pg_has_role(session_user,'keel_budget_control','MEMBER')) THEN
+        RAISE EXCEPTION 'queued AI budget outcomes require an isolated worker or budget-control identity'
             USING ERRCODE='42501';
     END IF;
     RETURN NEW;
@@ -287,3 +460,69 @@ CREATE TRIGGER guard_queued_ai_reservation_outcome
 CREATE TRIGGER guard_queued_ai_ledger_insert
     BEFORE INSERT ON keel_meta.ai_usage_ledger
     FOR EACH ROW EXECUTE FUNCTION keel_meta.guard_queued_ai_budget_mutation();
+
+-- Treat the redundant account counters as checked projections of durable
+-- reservations and ledger entries. Deferred checks allow the existing
+-- transaction to append all related rows before validating the final state.
+CREATE FUNCTION keel_meta.check_ai_budget_account_totals()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,keel_meta,pg_temp AS $$
+DECLARE target_tenant uuid; target_period uuid; target_scope text; opening_committed numeric;
+        account_reserved numeric; account_committed numeric;
+        durable_reserved numeric; durable_committed numeric;
+BEGIN
+    target_tenant:=NEW.tenant_id;
+    IF TG_TABLE_NAME='ai_budget_accounts' THEN
+        target_period:=NEW.period_id; target_scope:=NEW.scope;
+    ELSIF TG_TABLE_NAME='ai_budget_reservations' THEN
+        target_period:=NEW.period_id; target_scope:=NEW.scope;
+    ELSE
+        SELECT a.period_id,a.scope INTO target_period,target_scope
+          FROM keel_meta.ai_inference_admissions a
+         WHERE a.tenant_id=NEW.tenant_id AND a.inference_id=NEW.inference_id;
+    END IF;
+    SELECT b.reserved_micro_usd,b.committed_micro_usd,b.opening_committed_micro_usd
+      INTO account_reserved,account_committed,opening_committed
+      FROM keel_meta.ai_budget_accounts b
+     WHERE b.tenant_id=target_tenant AND b.period_id=target_period AND b.scope=target_scope;
+    IF NOT FOUND THEN RAISE EXCEPTION 'AI budget account projection is missing'; END IF;
+    SELECT COALESCE(sum(r.amount_micro_usd),0) INTO durable_reserved
+      FROM keel_meta.ai_budget_reservations r
+     WHERE r.tenant_id=target_tenant AND r.period_id=target_period AND r.scope=target_scope
+       AND r.liability_state IN ('reserved','unknown');
+    SELECT COALESCE(sum(l.amount_micro_usd),0) INTO durable_committed
+      FROM keel_meta.ai_usage_ledger l
+      JOIN keel_meta.ai_inference_admissions a USING (tenant_id,inference_id,attempt_id)
+     WHERE l.tenant_id=target_tenant AND a.period_id=target_period AND a.scope=target_scope
+       AND l.entry_kind IN ('confirmed','no_charge','reconciliation','adjustment');
+    IF account_reserved IS DISTINCT FROM durable_reserved OR account_committed IS DISTINCT FROM opening_committed+durable_committed THEN
+        RAISE EXCEPTION 'AI budget account counters do not match durable reservation and ledger totals'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE CONSTRAINT TRIGGER check_ai_budget_account_totals_account
+    AFTER INSERT OR UPDATE ON keel_meta.ai_budget_accounts
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+    EXECUTE FUNCTION keel_meta.check_ai_budget_account_totals();
+CREATE CONSTRAINT TRIGGER check_ai_budget_account_totals_reservation
+    AFTER INSERT OR UPDATE ON keel_meta.ai_budget_reservations
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+    EXECUTE FUNCTION keel_meta.check_ai_budget_account_totals();
+CREATE CONSTRAINT TRIGGER check_ai_budget_account_totals_ledger
+    AFTER INSERT ON keel_meta.ai_usage_ledger
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+    EXECUTE FUNCTION keel_meta.check_ai_budget_account_totals();
+
+-- Final privilege state (after all helper-table grants above): worker roles
+-- read through the guarded functions and have no direct budget DML.
+REVOKE INSERT,UPDATE,DELETE ON keel_meta.ai_budget_accounts,keel_meta.ai_budget_reservations,keel_meta.ai_usage_ledger FROM keel_ai_worker;
+REVOKE UPDATE (committed_micro_usd,reserved_micro_usd,overrun_blocked,version) ON keel_meta.ai_budget_accounts FROM keel_ai_worker;
+REVOKE UPDATE (liability_state) ON keel_meta.ai_budget_reservations FROM keel_ai_worker;
+REVOKE INSERT ON keel_meta.ai_usage_ledger FROM keel_ai_worker;
+REVOKE ALL ON FUNCTION keel_meta.record_ai_job_outcome(uuid,uuid,text,bigint,text,text) FROM keel_app,keel_ai_worker,keel_budget_control;
+REVOKE ALL ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) FROM keel_app,keel_ai_worker,keel_budget_control;
+GRANT EXECUTE ON FUNCTION keel_meta.apply_ai_job_outcome(uuid,uuid,text,bigint,text,bigint,text) TO keel_ai_worker;
+GRANT EXECUTE ON FUNCTION keel_meta.expire_ai_job(uuid,uuid,text,bigint,text) TO keel_ai_worker;
+GRANT EXECUTE ON FUNCTION keel_meta.list_expired_ai_jobs(uuid,integer) TO keel_ai_worker;
+GRANT EXECUTE ON FUNCTION keel_meta.reconcile_ai_job_outcome(uuid,uuid,text,bigint,text,text,text) TO keel_budget_control;
