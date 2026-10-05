@@ -259,6 +259,29 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if outcome != "unknown" || liability != "unknown" {
 		t.Fatalf("expired call lost ambiguous protection: job=%s liability=%s", outcome, liability)
 	}
+	// A tenant-scoped app SQL session must not be able to manufacture settlement
+	// evidence for a queue-owned reservation or call the worker-only transition.
+	for name, statement := range map[string]string{
+		"liability": `UPDATE keel_meta.ai_budget_reservations SET liability_state='settled' WHERE tenant_id=$1 AND inference_id=$2`,
+		"ledger": `INSERT INTO keel_meta.ai_usage_ledger(tenant_id,entry_id,inference_id,attempt_id,entry_kind,amount_micro_usd,confidence,currency,source_ref,reconciled_by,reason_code)
+			SELECT tenant_id,$3,inference_id,attempt_id,'reconciliation',0,'exact','USD','forged:no-charge','principal:attacker','provider_outcome_verified'
+			FROM keel_meta.ai_inference_admissions WHERE tenant_id=$1 AND inference_id=$2`,
+	} {
+		err := tenancy.WithTenantTx(ctx, appDB, tenant, nil, func(tx *sql.Tx) error {
+			if name == "ledger" {
+				_, err := tx.ExecContext(ctx, statement, tenantID, expiredLease.InferenceID, uuid.NewString())
+				return err
+			}
+			_, err := tx.ExecContext(ctx, statement, tenantID, expiredLease.InferenceID)
+			return err
+		})
+		if err == nil {
+			t.Fatalf("application role forged queued budget %s evidence", name)
+		}
+	}
+	if _, err := appDB.ExecContext(ctx, `SELECT keel_meta.resolve_ai_job_outcome($1,$2,'no_charge','forged:no-charge')`, tenantID, expiredLease.InferenceID); err == nil {
+		t.Fatal("application role called the worker-only outcome transition")
+	}
 	if _, err := repo.Renew(ctx, expiredLease, time.Second); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("unknown attempt renewed its stale lease: %v", err)
 	}
@@ -324,6 +347,26 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	confirmedLease, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-confirmed", 5*time.Second)
 	if err != nil || !claimed {
 		t.Fatalf("claim confirmed attempt: claimed=%t err=%v", claimed, err)
+	}
+	rollbackErr := errors.New("injected queue callback failure")
+	err = repo.outcomeBudget.SettleConfirmedWith(ctx, tenant, confirmedLease.InferenceID,
+		confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:rollback", func(*sql.Tx) error { return rollbackErr })
+	if !errors.Is(err, rollbackErr) {
+		t.Fatalf("injected settlement callback failure: %v", err)
+	}
+	var rollbackJob, rollbackLiability string
+	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, confirmedLease.InferenceID).Scan(&rollbackJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT liability_state FROM keel_meta.ai_budget_reservations WHERE tenant_id=$1 AND inference_id=$2`, tenantID, confirmedLease.InferenceID).Scan(&rollbackLiability); err != nil {
+		t.Fatal(err)
+	}
+	var rollbackRows int
+	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.ai_usage_ledger WHERE tenant_id=$1 AND inference_id=$2 AND entry_kind='confirmed'`, tenantID, confirmedLease.InferenceID).Scan(&rollbackRows); err != nil {
+		t.Fatal(err)
+	}
+	if rollbackJob != "leased" || rollbackLiability != "reserved" || rollbackRows != 0 {
+		t.Fatalf("callback error failed to roll back full outcome: job=%s liability=%s ledger=%d", rollbackJob, rollbackLiability, rollbackRows)
 	}
 	if err := repo.SettleConfirmed(ctx, confirmedLease, confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:confirmed"); err != nil {
 		t.Fatal(err)
