@@ -3,7 +3,6 @@ package erasureworker
 import (
 	"context"
 	"errors"
-	"reflect"
 	"testing"
 	"time"
 
@@ -29,83 +28,83 @@ func (noopObserver) ObserveErasurePoll(Observation) {}
 
 func noopErrorHandler(error) {}
 
-func TestNewValidatesAndCopiesAuthorizedScopes(t *testing.T) {
+func validScope() Scope {
+	return Scope{Tenant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VisibilityKey: "private_documents"}
+}
+
+func TestNewValidatesAndNormalizesAuthorizedScope(t *testing.T) {
 	processor := processorFunc(func(context.Context, tenancy.TenantID, string) (postgres.ErasureJob, bool, error) {
 		return postgres.ErasureJob{}, false, nil
 	})
-	scopes := []Scope{{Tenant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VisibilityKey: "private_documents"}}
-	runtime, err := New(processor, scopes, time.Second, noopObserver{}, noopErrorHandler)
+	scope := validScope()
+	scope.Tenant = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+	runtime, err := New(processor, scope, time.Second, noopObserver{}, noopErrorHandler)
 	if err != nil {
 		t.Fatalf("construct runtime: %v", err)
 	}
-	scopes[0].Tenant = "invalid"
-	if got := runtime.scopes[0].Tenant; got != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
-		t.Fatalf("runtime scope was aliased to caller memory: %q", got)
+	if got := string(runtime.scope.Tenant); got != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+		t.Fatalf("tenant was not normalized: %q", got)
+	}
+	if got := runtime.scope.VisibilityKey; got != "private_documents" {
+		t.Fatalf("visibility key changed unexpectedly: %q", got)
 	}
 
 	for _, tc := range []struct {
-		name     string
-		scopes   []Scope
-		interval time.Duration
+		name      string
+		processor Processor
+		scope     Scope
+		interval  time.Duration
+		observer  Observer
+		onError   ErrorHandler
 	}{
-		{name: "empty scope set", scopes: nil, interval: time.Second},
-		{name: "invalid tenant", scopes: []Scope{{Tenant: "invalid", VisibilityKey: "private_documents"}}, interval: time.Second},
-		{name: "invalid visibility", scopes: []Scope{{Tenant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VisibilityKey: " "}}, interval: time.Second},
-		{name: "duplicate scope", scopes: []Scope{{Tenant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VisibilityKey: "private_documents"}, {Tenant: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", VisibilityKey: "private_documents"}}, interval: time.Second},
-		{name: "poll interval too short", scopes: []Scope{{Tenant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VisibilityKey: "private_documents"}}, interval: MinPollInterval - time.Nanosecond},
-		{name: "poll interval too long", scopes: []Scope{{Tenant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VisibilityKey: "private_documents"}}, interval: MaxPollInterval + time.Nanosecond},
+		{name: "nil processor", processor: nil, scope: validScope(), interval: time.Second, observer: noopObserver{}, onError: noopErrorHandler},
+		{name: "nil observer", processor: processor, scope: validScope(), interval: time.Second, onError: noopErrorHandler},
+		{name: "nil error handler", processor: processor, scope: validScope(), interval: time.Second, observer: noopObserver{}},
+		{name: "invalid tenant", processor: processor, scope: Scope{VisibilityKey: "private_documents"}, interval: time.Second, observer: noopObserver{}, onError: noopErrorHandler},
+		{name: "invalid visibility", processor: processor, scope: Scope{Tenant: validScope().Tenant, VisibilityKey: " "}, interval: time.Second, observer: noopObserver{}, onError: noopErrorHandler},
+		{name: "poll interval too short", processor: processor, scope: validScope(), interval: MinPollInterval - time.Nanosecond, observer: noopObserver{}, onError: noopErrorHandler},
+		{name: "poll interval too long", processor: processor, scope: validScope(), interval: MaxPollInterval + time.Nanosecond, observer: noopObserver{}, onError: noopErrorHandler},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := New(processor, tc.scopes, tc.interval, noopObserver{}, noopErrorHandler); err == nil {
+			if _, err := New(tc.processor, tc.scope, tc.interval, tc.observer, tc.onError); err == nil {
 				t.Fatal("expected invalid runtime configuration to fail")
 			}
 		})
 	}
 }
 
-func TestPollOnceIsBoundedAndContinuesAfterScopeError(t *testing.T) {
-	tenantA := tenancy.TenantID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-	tenantB := tenancy.TenantID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
-	wantScopes := []Scope{{Tenant: tenantA, VisibilityKey: "private_documents"}, {Tenant: tenantB, VisibilityKey: "supplier_portal"}}
-	var gotScopes []Scope
-	failure := errors.New("transient database error")
+func TestPollOnceReportsTerminalOutcomeAndError(t *testing.T) {
+	failure := errors.New("provider unavailable")
 	processor := processorFunc(func(_ context.Context, tenant tenancy.TenantID, visibility string) (postgres.ErasureJob, bool, error) {
-		gotScopes = append(gotScopes, Scope{Tenant: tenant, VisibilityKey: visibility})
-		if tenant == tenantA {
-			return postgres.ErasureJob{State: "blocked"}, true, failure
+		if tenant != validScope().Tenant || visibility != validScope().VisibilityKey {
+			t.Fatalf("runtime used wrong scope: %s/%s", tenant, visibility)
 		}
-		return postgres.ErasureJob{State: "complete"}, true, nil
+		return postgres.ErasureJob{State: "blocked"}, true, failure
 	})
-	runtime, err := New(processor, wantScopes, time.Second, noopObserver{}, noopErrorHandler)
+	runtime, err := New(processor, validScope(), time.Second, noopObserver{}, noopErrorHandler)
 	if err != nil {
 		t.Fatal(err)
 	}
 	observation, err := runtime.PollOnce(context.Background())
 	if !errors.Is(err, failure) {
-		t.Fatalf("expected aggregated scope error, got %v", err)
+		t.Fatalf("expected processor error, got %v", err)
 	}
-	want := Observation{ScopeCount: 2, Claimed: 2, Completed: 1, Blocked: 1, Errors: 1}
-	if !reflect.DeepEqual(observation, want) {
+	want := Observation{ScopeCount: 1, Claimed: 1, Blocked: 1, Errors: 1}
+	if observation != want {
 		t.Fatalf("unexpected poll observation: got %#v, want %#v", observation, want)
-	}
-	if !reflect.DeepEqual(gotScopes, wantScopes) {
-		t.Fatalf("runtime did not process exactly one bounded attempt per scope: got %#v", gotScopes)
 	}
 }
 
-func TestPollOnceHonorsCancellationBeforeNextScope(t *testing.T) {
+func TestPollOnceHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	tenantA := tenancy.TenantID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-	tenantB := tenancy.TenantID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
-	var calls int
-	processor := processorFunc(func(_ context.Context, tenant tenancy.TenantID, _ string) (postgres.ErasureJob, bool, error) {
+	defer cancel()
+	calls := 0
+	processor := processorFunc(func(context.Context, tenancy.TenantID, string) (postgres.ErasureJob, bool, error) {
 		calls++
-		if tenant == tenantA {
-			cancel()
-		}
-		return postgres.ErasureJob{}, true, nil
+		cancel()
+		return postgres.ErasureJob{State: "cleanup_pending"}, true, nil
 	})
-	runtime, err := New(processor, []Scope{{Tenant: tenantA, VisibilityKey: "private_documents"}, {Tenant: tenantB, VisibilityKey: "supplier_portal"}}, time.Second, noopObserver{}, noopErrorHandler)
+	runtime, err := New(processor, validScope(), time.Second, noopObserver{}, noopErrorHandler)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,19 +112,19 @@ func TestPollOnceHonorsCancellationBeforeNextScope(t *testing.T) {
 		t.Fatalf("expected context cancellation, got %v", err)
 	}
 	if calls != 1 {
-		t.Fatalf("runtime called processor %d times after cancellation; want 1", calls)
+		t.Fatalf("runtime called processor %d times; want 1", calls)
 	}
 }
 
 func TestRunPollsAndShutsDownOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var calls int
+	calls := 0
 	processor := processorFunc(func(context.Context, tenancy.TenantID, string) (postgres.ErasureJob, bool, error) {
 		calls++
 		return postgres.ErasureJob{}, false, nil
 	})
-	var observations int
+	observations := 0
 	observer := observerFunc(func(observation Observation) {
 		observations++
 		if observation != (Observation{ScopeCount: 1}) {
@@ -133,9 +132,7 @@ func TestRunPollsAndShutsDownOnCancellation(t *testing.T) {
 		}
 		cancel()
 	})
-	runtime, err := New(processor,
-		[]Scope{{Tenant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VisibilityKey: "private_documents"}},
-		MaxPollInterval, observer, noopErrorHandler)
+	runtime, err := New(processor, validScope(), MaxPollInterval, observer, noopErrorHandler)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,9 +157,7 @@ func TestRunReportsPollErrorsBeforeObserving(t *testing.T) {
 		observed = observation
 		cancel()
 	})
-	runtime, err := New(processor,
-		[]Scope{{Tenant: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", VisibilityKey: "private_documents"}},
-		MinPollInterval, observer, func(err error) { handled = err })
+	runtime, err := New(processor, validScope(), MinPollInterval, observer, func(err error) { handled = err })
 	if err != nil {
 		t.Fatal(err)
 	}
