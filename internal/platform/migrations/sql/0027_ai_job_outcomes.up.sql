@@ -232,7 +232,58 @@ REVOKE ALL ON FUNCTION keel_meta.record_ai_job_outcome(uuid,uuid,text,bigint,tex
 REVOKE ALL ON FUNCTION keel_meta.expire_ai_job(uuid,uuid,text,bigint,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION keel_meta.list_expired_ai_jobs(uuid,integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION keel_meta.record_ai_job_outcome(uuid,uuid,text,bigint,text,text) TO keel_app,keel_ai_worker;
-GRANT EXECUTE ON FUNCTION keel_meta.expire_ai_job(uuid,uuid,text,bigint,text) TO keel_app,keel_ai_worker;
+GRANT EXECUTE ON FUNCTION keel_meta.record_ai_job_outcome(uuid,uuid,text,bigint,text,text) TO keel_ai_worker;
+GRANT EXECUTE ON FUNCTION keel_meta.expire_ai_job(uuid,uuid,text,bigint,text) TO keel_ai_worker;
 GRANT EXECUTE ON FUNCTION keel_meta.list_expired_ai_jobs(uuid,integer) TO keel_ai_worker;
-GRANT EXECUTE ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) TO keel_app;
+GRANT EXECUTE ON FUNCTION keel_meta.resolve_ai_job_outcome(uuid,uuid,text,text) TO keel_ai_worker;
+
+-- Queue-linked budget outcomes are written with the isolated AI worker DB
+-- identity. keel_app retains standalone budget operations, but cannot forge
+-- settlement evidence for an inference that has entered the provider queue.
+CREATE POLICY ai_budget_accounts_ai_worker ON keel_meta.ai_budget_accounts
+    TO keel_ai_worker USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+CREATE POLICY ai_budget_period_heads_ai_worker ON keel_meta.ai_budget_period_heads
+    TO keel_ai_worker USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+CREATE POLICY ai_inference_admissions_ai_worker ON keel_meta.ai_inference_admissions
+    TO keel_ai_worker USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+CREATE POLICY ai_budget_reservations_ai_worker ON keel_meta.ai_budget_reservations
+    TO keel_ai_worker USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+CREATE POLICY ai_usage_ledger_ai_worker ON keel_meta.ai_usage_ledger
+    TO keel_ai_worker USING (tenant_id=(SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id=(SELECT keel_private.current_tenant_id()));
+
+GRANT SELECT ON keel_meta.ai_budget_accounts,keel_meta.ai_budget_period_heads,
+    keel_meta.ai_inference_admissions,keel_meta.ai_budget_reservations,keel_meta.ai_usage_ledger TO keel_ai_worker;
+GRANT UPDATE (committed_micro_usd,reserved_micro_usd,overrun_blocked,version)
+    ON keel_meta.ai_budget_accounts TO keel_ai_worker;
+GRANT UPDATE (liability_state) ON keel_meta.ai_budget_reservations TO keel_ai_worker;
+GRANT INSERT ON keel_meta.ai_usage_ledger TO keel_ai_worker;
+
+CREATE FUNCTION keel_meta.guard_queued_ai_budget_mutation()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path=pg_catalog,keel_meta,pg_temp AS $$
+DECLARE target_tenant uuid; target_inference uuid;
+BEGIN
+    IF TG_TABLE_NAME='ai_budget_reservations' THEN
+        target_tenant:=NEW.tenant_id; target_inference:=NEW.inference_id;
+    ELSE
+        target_tenant:=NEW.tenant_id; target_inference:=NEW.inference_id;
+    END IF;
+    IF EXISTS(SELECT 1 FROM keel_meta.ai_jobs j WHERE j.tenant_id=target_tenant AND j.inference_id=target_inference)
+       AND NOT pg_catalog.pg_has_role(session_user,'keel_ai_worker','MEMBER') THEN
+        RAISE EXCEPTION 'queued AI budget outcomes require the isolated AI worker database identity'
+            USING ERRCODE='42501';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER guard_queued_ai_reservation_outcome
+    BEFORE UPDATE OF liability_state ON keel_meta.ai_budget_reservations
+    FOR EACH ROW WHEN (OLD.liability_state IS DISTINCT FROM NEW.liability_state)
+    EXECUTE FUNCTION keel_meta.guard_queued_ai_budget_mutation();
+CREATE TRIGGER guard_queued_ai_ledger_insert
+    BEFORE INSERT ON keel_meta.ai_usage_ledger
+    FOR EACH ROW EXECUTE FUNCTION keel_meta.guard_queued_ai_budget_mutation();
