@@ -229,8 +229,22 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		t.Fatalf("claim attempt for expiry test: claimed=%t err=%v", claimed, err)
 	}
 	time.Sleep(time.Until(expiredLease.AttemptDeadline) + 20*time.Millisecond)
-	if reaped, err := repo.ReapExpired(ctx, tenant, 10); err != nil || reaped < 1 {
-		t.Fatalf("expired attempt reaping count=%d err=%v", reaped, err)
+	var reaped [2]int
+	var reapErrors [2]error
+	reapStart := make(chan struct{})
+	var reapWG sync.WaitGroup
+	for i := range reaped {
+		reapWG.Add(1)
+		go func(i int) {
+			defer reapWG.Done()
+			<-reapStart
+			reaped[i], reapErrors[i] = repo.ReapExpired(ctx, tenant, 10)
+		}(i)
+	}
+	close(reapStart)
+	reapWG.Wait()
+	if reapErrors[0] != nil || reapErrors[1] != nil || reaped[0]+reaped[1] < 1 {
+		t.Fatalf("concurrent expired attempt reaping counts=%v errors=%v", reaped, reapErrors)
 	}
 	if reaped, err := repo.ReapExpired(ctx, tenant, 10); err != nil || reaped != 0 {
 		t.Fatalf("replaying the expiry scan changed an already reconciled candidate: count=%d err=%v", reaped, err)
