@@ -153,6 +153,20 @@ func TestDeploymentRecipeFixtures(t *testing.T) {
 	}
 }
 
+func TestRetrievalEvaluationSchemasAndSeedCorpus(t *testing.T) {
+	root := repositoryRoot(t)
+	corpusSchema := compileSchema(t, filepath.Join(root, "research/retrieval/v1/corpus.schema.json"))
+	manifestSchema := compileSchema(t, filepath.Join(root, "research/retrieval/v1/build-manifest.schema.json"))
+	corpus := readFixture(t, root, "research/retrieval/v1/corpus.json")
+	manifest := readFixture(t, root, "research/retrieval/v1/build-manifest.json")
+	if err := corpusSchema.Validate(decodeFixture(t, "retrieval corpus", corpus)); err != nil {
+		t.Fatalf("retrieval corpus does not match schema: %v", err)
+	}
+	if err := manifestSchema.Validate(decodeFixture(t, "retrieval build manifest", manifest)); err != nil {
+		t.Fatalf("retrieval build manifest does not match schema: %v", err)
+	}
+}
+
 func TestOrderEventFixtures(t *testing.T) {
 	root := repositoryRoot(t)
 	schema := compileSchema(t, filepath.Join(root, "contracts/events/order-submitted.v1.schema.json"))
