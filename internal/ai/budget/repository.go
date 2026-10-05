@@ -53,6 +53,16 @@ func NewRepository(db *sql.DB, reconciler ReconciliationAuthorizer, controlDB *s
 	return &Repository{db: db, reconciler: reconciler, controlDB: controlDB, controller: controller}, nil
 }
 
+// WithDatabase returns a repository with the same policy collaborators and a
+// different credential pool. Queue outcome transactions use the dedicated AI
+// worker identity so ordinary app SQL cannot forge queue settlement evidence.
+func (r *Repository) WithDatabase(db *sql.DB) (*Repository, error) {
+	if db == nil {
+		return nil, errors.New("AI budget database is required")
+	}
+	return &Repository{db: db, reconciler: r.reconciler, controlDB: r.controlDB, controller: r.controller}, nil
+}
+
 // RaiseLimitAndReopen is a separately authorized and audited recovery operation using a
 // dedicated keel_budget_control connection. It cannot lower the cap below committed liability.
 func (r *Repository) RaiseLimitAndReopen(ctx context.Context, tenant tenancy.TenantID, periodID, eventID, actor, reason string, newLimit int64) error {
