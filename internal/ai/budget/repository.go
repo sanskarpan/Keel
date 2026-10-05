@@ -53,16 +53,6 @@ func NewRepository(db *sql.DB, reconciler ReconciliationAuthorizer, controlDB *s
 	return &Repository{db: db, reconciler: reconciler, controlDB: controlDB, controller: controller}, nil
 }
 
-// WithDatabase returns a repository with the same policy collaborators and a
-// different credential pool. Queue outcome transactions use the dedicated AI
-// worker identity so ordinary app SQL cannot forge queue settlement evidence.
-func (r *Repository) WithDatabase(db *sql.DB) (*Repository, error) {
-	if db == nil {
-		return nil, errors.New("AI budget database is required")
-	}
-	return &Repository{db: db, reconciler: r.reconciler, controlDB: r.controlDB, controller: r.controller}, nil
-}
-
 // RaiseLimitAndReopen is a separately authorized and audited recovery operation using a
 // dedicated keel_budget_control connection. It cannot lower the cap below committed liability.
 func (r *Repository) RaiseLimitAndReopen(ctx context.Context, tenant tenancy.TenantID, periodID, eventID, actor, reason string, newLimit int64) error {
@@ -280,7 +270,7 @@ func (r *Repository) ReconcileUnknown(ctx context.Context, tenant tenancy.Tenant
 }
 
 func (r *Repository) ReconcileUnknownWith(ctx context.Context, tenant tenancy.TenantID, inferenceID, actor, reason string, actual *int64, source string, after func(*sql.Tx) error) error {
-	if r.reconciler == nil || !principalRef.MatchString(actor) || !reasonCode.MatchString(reason) {
+	if r.reconciler == nil || r.controlDB == nil || !principalRef.MatchString(actor) || !reasonCode.MatchString(reason) {
 		return ErrReconciliationDenied
 	}
 	if actual != nil && *actual < 0 {
@@ -294,13 +284,36 @@ func (r *Repository) ReconcileUnknownWith(ctx context.Context, tenant tenancy.Te
 	if err := r.reconciler.AuthorizeBudgetReconciliation(ctx, tenant, inferenceID, actor, reason, source, decision, amount); err != nil {
 		return fmt.Errorf("%w: %v", ErrReconciliationDenied, err)
 	}
+	// Financial reconciliation is committed through the separately credentialed
+	// budget-control identity; ordinary app and AI-worker SQL cannot self-authorize.
 	if actual == nil {
-		return r.finishAuthorizedWith(ctx, tenant, inferenceID, "reconciliation", 0, source, true, actor, reason, after)
+		return r.finishOnDatabaseWith(ctx, r.controlDB, tenant, inferenceID, "reconciliation", 0, source, true, actor, reason, after)
 	}
 	if *actual == 0 {
-		return r.finishAuthorizedWith(ctx, tenant, inferenceID, "reconciliation", 0, source, true, actor, reason, after)
+		return r.finishOnDatabaseWith(ctx, r.controlDB, tenant, inferenceID, "reconciliation", 0, source, true, actor, reason, after)
 	}
-	return r.finishAuthorizedWith(ctx, tenant, inferenceID, "reconciliation", *actual, source, true, actor, reason, after)
+	return r.finishOnDatabaseWith(ctx, r.controlDB, tenant, inferenceID, "reconciliation", *actual, source, true, actor, reason, after)
+}
+
+// AuthorizeQueueReconciliation runs the verified authorization boundary first,
+// then invokes a queue-owned atomic SECURITY DEFINER transition using the
+// isolated budget-control identity. The callback owns all database writes.
+func (r *Repository) AuthorizeQueueReconciliation(ctx context.Context, tenant tenancy.TenantID, inferenceID, actor, reason string, actual *int64, source string, apply func(*sql.Tx, int64) error) error {
+	if r.reconciler == nil || r.controlDB == nil || apply == nil || !principalRef.MatchString(actor) || !reasonCode.MatchString(reason) ||
+		!budgetUUID.MatchString(string(tenant)) || !budgetUUID.MatchString(inferenceID) || len(source) < 1 || len(source) > 160 || strings.ContainsAny(source, "\r\n\x00") {
+		return ErrReconciliationDenied
+	}
+	if actual != nil && *actual < 0 {
+		return ErrBudgetConflict
+	}
+	decision, amount := "no_charge", int64(0)
+	if actual != nil && *actual > 0 {
+		decision, amount = "confirmed", *actual
+	}
+	if err := r.reconciler.AuthorizeBudgetReconciliation(ctx, tenant, inferenceID, actor, reason, source, decision, amount); err != nil {
+		return fmt.Errorf("%w: %v", ErrReconciliationDenied, err)
+	}
+	return tenancy.WithTenantTx(ctx, r.controlDB, tenant, nil, func(tx *sql.Tx) error { return apply(tx, amount) })
 }
 
 // AdjustSettled appends an authorized signed correction to a settled attempt. It preserves the
@@ -363,10 +376,14 @@ func (r *Repository) finishAuthorized(ctx context.Context, tenant tenancy.Tenant
 }
 
 func (r *Repository) finishAuthorizedWith(ctx context.Context, tenant tenancy.TenantID, inferenceID, kind string, amount int64, source string, reconciliation bool, actor, reason string, after func(*sql.Tx) error) error {
+	return r.finishOnDatabaseWith(ctx, r.db, tenant, inferenceID, kind, amount, source, reconciliation, actor, reason, after)
+}
+
+func (r *Repository) finishOnDatabaseWith(ctx context.Context, db *sql.DB, tenant tenancy.TenantID, inferenceID, kind string, amount int64, source string, reconciliation bool, actor, reason string, after func(*sql.Tx) error) error {
 	if !budgetUUID.MatchString(string(tenant)) || !budgetUUID.MatchString(inferenceID) || len(source) < 1 || len(source) > 160 || strings.ContainsAny(source, "\r\n\x00") {
 		return ErrBudgetConflict
 	}
-	return tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
+	return tenancy.WithTenantTx(ctx, db, tenant, nil, func(tx *sql.Tx) error {
 		var period, attempt, state string
 		var reservedAmount, maximum, limit int64
 		var committedText, reservedText string
