@@ -49,6 +49,25 @@ func TestSupplierSourceObjectsExecutorRequiresLiveLease(t *testing.T) {
 	}
 }
 
+func TestDerivedIndexCleanupExecutorRequiresLiveLease(t *testing.T) {
+	eraser := &receiptWritingDerivedIndexEraser{}
+	executor, err := NewDerivedIndexCleanupExecutor(eraser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := ErasureJob{ID: uuid.New(), State: "cleanup_pending", LeaseOwner: sql.NullString{String: "index-adapter", Valid: true}, LeaseEpoch: 7}
+	if _, err := executor.Execute(context.Background(), job, uuid.NewString(), "adapter-cohort"); err != nil {
+		t.Fatalf("execute with current claim: %v", err)
+	}
+	if eraser.calls != 1 || eraser.worker != job.LeaseOwner.String || eraser.epoch != job.LeaseEpoch {
+		t.Fatalf("eraser did not receive current lease: %+v", eraser)
+	}
+	job.LeaseOwner.Valid = false
+	if _, err := executor.Execute(context.Background(), job, uuid.NewString(), "adapter-cohort"); err == nil {
+		t.Fatal("executor accepted an unclaimed job")
+	}
+}
+
 func TestPostgreSQLErasureActionProcessorOrdersReceiptsAndCompletes(t *testing.T) {
 	appDB, indexerDB := retrievalTestDBs(t)
 	app, err := New(appDB)
@@ -160,6 +179,69 @@ func TestPostgreSQLErasureActionProcessorResumesAfterPartialSuccess(t *testing.T
 	}
 }
 
+func TestPostgreSQLErasureActionProcessorResumesDerivedIndexReceiptHandoff(t *testing.T) {
+	appDB, indexerDB := retrievalTestDBs(t)
+	app, err := New(appDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(indexerDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tenant := tenancy.TenantID(uuid.NewString())
+	visibility := "erasure-index-retry:" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	hasher, err := index.NewHMACTermHasher(string(tenant), "erasure-index-retry-v1", []byte(strings.Repeat("i", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := preparedChunk(t, hasher, uuid.New(), "source processed across a retried derived-index erasure lease")
+	createReadyBuild(t, worker, tenant, visibility, buildSpec(uuid.New(), hasher.KeyID(), 1), chunk)
+	request, err := app.WithdrawSource(ctx, tenant, visibility, uuid.New(), chunk.DocumentVersionID, uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	executors := testErasureExecutors(&order)
+	indexEraser := &receiptWritingDerivedIndexEraser{repository: worker, order: &order, failFirst: true, actorID: uuid.New()}
+	indexExecutor, err := NewDerivedIndexCleanupExecutor(indexEraser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executors[ErasureActionDerivedIndex] = indexExecutor
+	processor, err := NewErasureActionProcessor(worker, "eraser-index-retry", time.Minute, time.Second, executors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, claimed, err := processor.ProcessOne(ctx, tenant, visibility)
+	if !claimed || !errors.Is(err, ErrErasureActionFailed) || job.State != "cleanup_pending" || job.LeaseOwner.Valid {
+		t.Fatalf("failed action retry state=%+v claimed=%t err=%v", job, claimed, err)
+	}
+	if delay := time.Until(job.AvailableAt); delay > 0 {
+		time.Sleep(delay + 25*time.Millisecond)
+	}
+	completed, claimed, err := processor.ProcessOne(ctx, tenant, visibility)
+	if err != nil || !claimed || completed.ID != request.ID || completed.State != "complete" {
+		t.Fatalf("resumed erasure job=%+v claimed=%t err=%v", completed, claimed, err)
+	}
+	if indexEraser.calls != 2 {
+		t.Fatalf("derived-index action attempts=%d want retry then receipt replay", indexEraser.calls)
+	}
+	var receipts int
+	scope, err := newScope(tenant, visibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := withScope(ctx, appDB, scope, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.retrieval_erasure_action_receipts
+			WHERE tenant_id=$1 AND visibility_key=$2 AND job_id=$3 AND action_key=$4`,
+			string(tenant), visibility, request.ID, ErasureActionDerivedIndex).Scan(&receipts)
+	}); err != nil || receipts != 1 {
+		t.Fatalf("derived-index receipt count=%d err=%v", receipts, err)
+	}
+}
+
 func testErasureExecutors(order *[]string) map[string]ErasureActionExecutor {
 	result := make(map[string]ErasureActionExecutor, len(erasureActionOrder))
 	for _, action := range erasureActionOrder {
@@ -190,6 +272,33 @@ type receiptWritingSupplierEraser struct {
 	actorID    uuid.UUID
 	worker     string
 	epoch      int64
+}
+
+type receiptWritingDerivedIndexEraser struct {
+	repository *Repository
+	order      *[]string
+	failFirst  bool
+	calls      int
+	actorID    uuid.UUID
+	worker     string
+	epoch      int64
+}
+
+func (e *receiptWritingDerivedIndexEraser) CleanupClaimed(ctx context.Context, tenant tenancy.TenantID, visibility, worker string, jobID uuid.UUID, epoch int64) error {
+	e.calls++
+	e.worker, e.epoch = worker, epoch
+	if e.order != nil {
+		*e.order = append(*e.order, ErasureActionDerivedIndex)
+	}
+	if e.failFirst && e.calls == 1 {
+		return errors.New("synthetic bounded cleanup made progress without a final receipt")
+	}
+	if e.repository == nil {
+		return nil
+	}
+	_, err := e.repository.RecordErasureActionReceipt(ctx, tenant, visibility, worker, jobID, epoch,
+		ErasureActionDerivedIndex, ErasureReceiptComplete, e.actorID, "", sha256.Sum256([]byte("synthetic derived-index cleanup evidence")))
+	return err
 }
 
 func (e *receiptWritingSupplierEraser) EraseClaimed(ctx context.Context, tenant tenancy.TenantID, visibility, worker string, jobID uuid.UUID, epoch int64) error {
