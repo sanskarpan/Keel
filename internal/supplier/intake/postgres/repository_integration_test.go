@@ -178,6 +178,9 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = objects.Close() })
+	if _, _, err := objects.Put(ctx, objectKey, bytesReader(data), intake.MaxUploadBytes); err != nil {
+		t.Fatalf("persist raw upload object: %v", err)
+	}
 	storedBytes, storedDigest, err := objects.Put(ctx, outputKey, bytesReader(document.Text), intake.MaxExtractedSize)
 	if err != nil || storedBytes != int64(len(document.Text)) || storedDigest != document.TextSHA256 {
 		t.Fatalf("persist extracted output: bytes=%d digest=%x err=%v", storedBytes, storedDigest, err)
@@ -269,8 +272,28 @@ func TestPostgreSQLSupplierInvitationAndUploadLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := appRetrieval.WithdrawSource(ctx, tenant, visibility, uuid.New(), documentID, uuid.New()); err != nil {
+		withdrawal, err := appRetrieval.WithdrawSource(ctx, tenant, visibility, uuid.New(), documentID, uuid.New())
+		if err != nil {
 			t.Fatal(err)
+		}
+		eraser, err := citationintake.NewEraser(appDB, objects)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := eraser.Erase(ctx, tenant, visibility, documentID, withdrawal.EligibilityGeneration+1); !errors.Is(err, citationintake.ErrSourceErasureNotAuthorized) {
+			t.Fatalf("source erasure accepted a mismatched withdrawal generation: %v", err)
+		}
+		if err := eraser.Erase(ctx, tenant, visibility, documentID, withdrawal.EligibilityGeneration); err != nil {
+			t.Fatalf("erase withdrawn supplier source objects: %v", err)
+		}
+		if err := eraser.Erase(ctx, tenant, visibility, documentID, withdrawal.EligibilityGeneration); err != nil {
+			t.Fatalf("retry idempotent source object erasure: %v", err)
+		}
+		for _, key := range []string{objectKey, outputKey} {
+			if object, err := objects.Open(ctx, key); err == nil {
+				_ = object.Close()
+				t.Fatalf("source object %q remained after erasure", key)
+			}
 		}
 		if _, err := reader.ReadCitationRange(ctx, tenant, visibility, ref); !errors.Is(err, hybrid.ErrCitationNotAuthorized) {
 			t.Fatalf("withdrawn citation remained readable: %v", err)
