@@ -28,6 +28,7 @@ var (
 	queueModel          = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$`)
 	queueWorker         = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,120}$`)
 	queuePrincipal      = regexp.MustCompile(`^principal:[A-Za-z0-9._~-]{1,120}$`)
+	queueOutcomeSource  = regexp.MustCompile(`^[A-Za-z0-9._:/~-]{1,160}$`)
 )
 
 const MaxLease = 30 * time.Second
@@ -210,6 +211,112 @@ func (r *Repository) Renew(ctx context.Context, lease Lease, extension time.Dura
 	return renewed, nil
 }
 
+// RecordUnknown atomically retains the K4.3 reserve and changes the leased job
+// to unknown. Unknown jobs continue to consume provider concurrency and cannot
+// be renewed or reclaimed.
+func (r *Repository) RecordUnknown(ctx context.Context, lease Lease, source string) error {
+	if !validLease(lease) || !queueOutcomeSource.MatchString(source) {
+		return ErrLeaseLost
+	}
+	return mapQueueError(tenancy.WithTenantTx(ctx, r.workerDB, lease.Tenant, nil, func(tx *sql.Tx) error {
+		var ok bool
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.apply_ai_job_outcome($1,$2,$3,$4,'unknown',0,$5)`,
+			string(lease.Tenant), lease.InferenceID, lease.WorkerID, lease.Epoch, source).Scan(&ok)
+	}))
+}
+
+// SettleConfirmed atomically settles the full observed provider charge and
+// terminalizes the exact fenced attempt.
+func (r *Repository) SettleConfirmed(ctx context.Context, lease Lease, actualMicroUSD int64, source string) error {
+	if !validLease(lease) || !queueOutcomeSource.MatchString(source) || actualMicroUSD <= 0 {
+		return ErrQueueConflict
+	}
+	return mapQueueError(tenancy.WithTenantTx(ctx, r.workerDB, lease.Tenant, nil, func(tx *sql.Tx) error {
+		var ok bool
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.apply_ai_job_outcome($1,$2,$3,$4,'confirmed',$5,$6)`,
+			string(lease.Tenant), lease.InferenceID, lease.WorkerID, lease.Epoch, actualMicroUSD, source).Scan(&ok)
+	}))
+}
+
+// SettleNoCharge releases the reserve only for a definite no-charge result.
+func (r *Repository) SettleNoCharge(ctx context.Context, lease Lease, source string) error {
+	if !validLease(lease) || !queueOutcomeSource.MatchString(source) {
+		return ErrQueueConflict
+	}
+	return mapQueueError(tenancy.WithTenantTx(ctx, r.workerDB, lease.Tenant, nil, func(tx *sql.Tx) error {
+		var ok bool
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.apply_ai_job_outcome($1,$2,$3,$4,'no_charge',0,$5)`,
+			string(lease.Tenant), lease.InferenceID, lease.WorkerID, lease.Epoch, source).Scan(&ok)
+	}))
+}
+
+// ReconcileUnknown applies an authorized K4.3 resolution and the matching queue
+// terminal transition in one transaction. Nil/zero actual means no charge.
+func (r *Repository) ReconcileUnknown(ctx context.Context, tenant tenancy.TenantID, inferenceID, actor, reason string, actual *int64, source string) error {
+	if uuid.Validate(string(tenant)) != nil || uuid.Validate(inferenceID) != nil || !queueOutcomeSource.MatchString(source) {
+		return ErrQueueConflict
+	}
+	kind := "no_charge"
+	if actual != nil && *actual > 0 {
+		kind = "confirmed"
+	}
+	return mapQueueError(r.budget.AuthorizeQueueReconciliation(ctx, tenant, inferenceID, actor, reason, actual, source, func(tx *sql.Tx, amount int64) error {
+		var ok bool
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.reconcile_ai_job_outcome($1,$2,$3,$4,$5,$6,$7)`, string(tenant), inferenceID, kind, amount, source, actor, reason).Scan(&ok)
+	}))
+}
+
+// ReapExpired marks at most limit expired attempts unknown. Candidate listing is
+// advisory; each decision rechecks the exact owner/epoch and expiry while the
+// budget reserve, unknown ledger row and job transition share one transaction.
+func (r *Repository) ReapExpired(ctx context.Context, tenant tenancy.TenantID, limit int) (int, error) {
+	if uuid.Validate(string(tenant)) != nil || limit < 1 || limit > 100 {
+		return 0, ErrQueueUnavailable
+	}
+	type candidate struct {
+		inference, worker string
+		epoch             int64
+	}
+	candidates := make([]candidate, 0, limit)
+	err := tenancy.WithTenantTx(ctx, r.workerDB, tenant, nil, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT inference_id::text,worker_id,lease_epoch FROM keel_meta.list_expired_ai_jobs($1,$2)`, string(tenant), limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item candidate
+			if err := rows.Scan(&item.inference, &item.worker, &item.epoch); err != nil {
+				return err
+			}
+			candidates = append(candidates, item)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return 0, mapQueueError(err)
+	}
+	marked := 0
+	for _, item := range candidates {
+		source := fmt.Sprintf("lease-expired:%d", item.epoch)
+		newlyExpired := false
+		err := tenancy.WithTenantTx(ctx, r.workerDB, tenant, nil, func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx, `SELECT keel_meta.expire_ai_job($1,$2,$3,$4,$5)`, string(tenant), item.inference, item.worker, item.epoch, source).Scan(&newlyExpired)
+		})
+		if errors.Is(err, ErrLeaseLost) || errors.Is(err, budget.ErrBudgetConflict) ||
+			(err != nil && strings.Contains(strings.ToLower(err.Error()), "not expired or no longer current")) {
+			continue
+		}
+		if err != nil {
+			return marked, mapQueueError(err)
+		}
+		if newlyExpired {
+			marked++
+		}
+	}
+	return marked, nil
+}
+
 func validSpec(spec JobSpec) bool {
 	a := spec.Admission
 	if !validIdentity(a.Tenant, spec.ProviderID, spec.ModelID) || uuid.Validate(a.InferenceID) != nil ||
@@ -252,6 +359,9 @@ func lockProfile(tx *sql.Tx, ctx context.Context, tenant tenancy.TenantID, provi
 }
 
 func mapQueueError(err error) error {
+	if err == nil {
+		return nil
+	}
 	switch {
 	case errors.Is(err, ErrQueueUnavailable), errors.Is(err, ErrQueueFull), errors.Is(err, ErrQueueConflict), errors.Is(err, ErrLeaseLost):
 		return err
@@ -259,6 +369,10 @@ func mapQueueError(err error) error {
 		return ErrQueueFull
 	case strings.Contains(strings.ToLower(err.Error()), "ai job lease is no longer current"):
 		return ErrLeaseLost
+	case strings.Contains(strings.ToLower(err.Error()), "not expired or no longer current"):
+		return ErrLeaseLost
+	case strings.Contains(strings.ToLower(err.Error()), "outcome conflicts with existing disposition"), strings.Contains(strings.ToLower(err.Error()), "requires matching durable budget disposition"):
+		return ErrQueueConflict
 	default:
 		return fmt.Errorf("AI queue transaction: %w", err)
 	}

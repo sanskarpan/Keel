@@ -96,7 +96,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K4.4` | task | K4.4 Add fair DB job claims, lease epochs, provider concurrency/token/time caps. | [Open issue](https://github.com/sanskarpan/Keel/issues/34) |
 
-| `K4.4-outcomes` | task | Reconcile expired AI attempts with K4.3 liability; terminalize confirmed/no-charge outcomes safely and never replay an ambiguous billable attempt. | [Open issue](https://github.com/sanskarpan/Keel/issues/190) |
+| `K4.4-outcomes` | task | Reconcile expired AI attempts with K4.3 liability; terminalize confirmed/no-charge outcomes safely and never replay an ambiguous billable attempt. Implementation slice for [issue #190](https://github.com/sanskarpan/Keel/issues/190): migration `0027`, atomic budget/job outcomes, bounded expiry reaper, fenced idempotent reconciliation and operating/recovery contract in `docs/K4.4-OUTCOME-EVIDENCE.md`; close after the linked PR's PostgreSQL contract CI passes. |
 
 | `K4.5` | task | K4.5 Implement exact and scoped semantic cache, entity/polarity checks and labeled precision gate with >=600 independent eligible pairs per serving policy and one-sided 95% lower confidence bound >=99.5%. | [Open issue](https://github.com/sanskarpan/Keel/issues/35) |
 
