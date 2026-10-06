@@ -348,8 +348,9 @@ func TestPostgresDegradedFleetPolicyKillSwitchTakesEffectImmediately(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstRequestID := uuid.NewString()
 	first, err := limiter.Allow(ctx, DegradedRequest{TenantID: string(tenant), RouteID: route,
-		RequestID: uuid.NewString(), PolicyDigest: tenantPolicy.Digest})
+		RequestID: firstRequestID, PolicyDigest: tenantPolicy.Digest})
 	if err != nil || !first.Allowed {
 		t.Fatalf("enabled fleet policy did not admit the initial request: decision=%+v err=%v", first, err)
 	}
@@ -365,8 +366,13 @@ func TestPostgresDegradedFleetPolicyKillSwitchTakesEffectImmediately(t *testing.
 	if !errors.Is(err, ErrDegradedPolicyRejected) || decision.Allowed {
 		t.Fatalf("disabled fleet policy did not immediately reject fallback: decision=%+v err=%v", decision, err)
 	}
-	if !strings.Contains(metrics.PrometheusMetrics(), `result="policy_rejected"} 1`) {
-		t.Fatal("dynamic kill-switch rejection was not recorded as a bounded policy outcome")
+	replay, err := limiter.Allow(ctx, DegradedRequest{TenantID: string(tenant), RouteID: route,
+		RequestID: firstRequestID, PolicyDigest: tenantPolicy.Digest})
+	if !errors.Is(err, ErrDegradedPolicyRejected) || replay.Allowed {
+		t.Fatalf("fleet kill switch allowed an exact receipt replay: decision=%+v err=%v", replay, err)
+	}
+	if !strings.Contains(metrics.PrometheusMetrics(), `result="policy_rejected"} 2`) {
+		t.Fatal("dynamic kill-switch rejections were not recorded as bounded policy outcomes")
 	}
 	var receipts int
 	if err := adminDB.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.rate_limit_degraded_receipts
