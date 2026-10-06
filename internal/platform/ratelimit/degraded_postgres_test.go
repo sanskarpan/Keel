@@ -1031,6 +1031,73 @@ func TestPostgresFallbackBoundsAfterExecutedRedisAdmissionReplyIsLost(t *testing
 	}
 }
 
+func TestCoordinatorFailsClosedWhenAmbiguousRedisAdmissionCannotReachPostgres(t *testing.T) {
+	_, _, rateControl := openDegradedTestDatabases(t)
+	redisURL := os.Getenv("KEEL_TEST_REDIS_URL")
+	if redisURL == "" {
+		t.Skip("set KEEL_TEST_REDIS_URL to qualify ambiguous home-region Redis responses")
+	}
+	options, err := redis.ParseURL(redisURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.MaxRetries = -1
+	redisClient := redis.NewClient(options)
+	t.Cleanup(func() { _ = redisClient.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	region := "test-" + uuid.NewString()[:8]
+	tenant, err := tenancy.ParseTenantID(uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: "safe.read",
+		Capacity: 1, RefillPerSec: 1, Enabled: true}
+	policy.Digest = TenantPolicyDigest(policy)
+	control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetTenantPolicy(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	primary, err := New(redisClient, Config{Region: region, HomeRegion: region, KeyID: "pg-unavailable-test",
+		Secret: []byte("postgres-unavailable-test-secret-material-0123"), ReplayTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedDB, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = failedDB.Close() })
+	fallback, err := NewDegradedLimiter(failedDB,
+		DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCoordinator(appliedThenLostRedisResponse{primary: primary}, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{TenantID: string(tenant), RouteID: policy.RouteID, RequestID: uuid.NewString(),
+		Policy: Policy{Digest: policy.Digest, CapacityUnits: policy.Capacity,
+			RefillUnitsPerSecond: policy.RefillPerSec, CostUnits: 1}}
+	if decision, err := coordinator.Allow(ctx, request); !errors.Is(err, ErrDegradedUnavailable) || decision.Allowed {
+		t.Fatalf("ambiguous Redis success with unavailable PostgreSQL did not fail closed: decision=%+v err=%v", decision, err)
+	}
+
+	// The Redis script committed before the response was hidden. An independent
+	// request must therefore observe the spent Redis token despite fallback DB
+	// failure; the outage cannot multiply the primary allowance.
+	second, err := primary.Allow(ctx, Request{TenantID: string(tenant), RouteID: policy.RouteID,
+		RequestID: uuid.NewString(), Policy: request.Policy})
+	if err != nil || second.Allowed {
+		t.Fatalf("PostgreSQL outage multiplied an ambiguous Redis admission: decision=%+v err=%v", second, err)
+	}
+}
+
 func TestCoordinatorBoundsFallbackAfterAmbiguousRedisSuccess(t *testing.T) {
 	appDB, _, rateControl := openDegradedTestDatabases(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
