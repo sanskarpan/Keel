@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +16,8 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
+	"github.com/sanskarpan/keel/internal/platform/buildinfo"
+	"github.com/sanskarpan/keel/internal/platform/health"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
 
@@ -35,6 +39,23 @@ type stubSafeReadFallback struct {
 	decision DegradedDecision
 	err      error
 	calls    int
+}
+
+func TestDegradedMetricsAreLowCardinalityAndScrapedByHealthHandler(t *testing.T) {
+	metrics := NewDegradedMetrics()
+	metrics.record("allowed", 25*time.Millisecond)
+	metrics.record("db_error", 5*time.Millisecond)
+	metrics.record("tenant-private-123", time.Second)
+	handler := health.NewHandlerWithMetrics(buildinfo.Info{}, metrics)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	content := response.Body.String()
+	if response.Code != 200 || !strings.Contains(content, `keel_rate_limit_degraded_admissions_total{result="allowed"} 1`) ||
+		!strings.Contains(content, `keel_rate_limit_degraded_admissions_total{result="db_error"} 1`) ||
+		!strings.Contains(content, `keel_rate_limit_degraded_admission_duration_seconds_sum{result="allowed"} 0.025000`) ||
+		!strings.Contains(content, `result="invalid_request"`) || strings.Contains(content, "tenant-private-123") {
+		t.Fatalf("health metrics missing fixed low-cardinality degraded series or exposed input: %s", content)
+	}
 }
 
 func (s *stubSafeReadFallback) Allow(context.Context, DegradedRequest) (DegradedDecision, error) {
