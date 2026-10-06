@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
@@ -60,6 +63,81 @@ type DegradedLimiter struct {
 	db      *sql.DB
 	region  string
 	enabled bool
+	metrics *DegradedMetrics
+}
+
+// DegradedMetrics is a low-cardinality Prometheus extension. Its only label
+// is a fixed outcome enum; tenant, route, request, region and outage IDs are
+// intentionally excluded.
+type DegradedMetrics struct {
+	mu      sync.Mutex
+	samples map[string]degradedMetricSample
+}
+
+type degradedMetricSample struct {
+	count    uint64
+	duration time.Duration
+}
+
+var degradedMetricOutcomes = []string{
+	"allowed", "limited", "disabled", "policy_rejected", "window_expired",
+	"idempotency_conflict", "invalid_request", "db_error",
+}
+
+func NewDegradedMetrics() *DegradedMetrics {
+	samples := make(map[string]degradedMetricSample, len(degradedMetricOutcomes))
+	for _, outcome := range degradedMetricOutcomes {
+		samples[outcome] = degradedMetricSample{}
+	}
+	return &DegradedMetrics{samples: samples}
+}
+
+func (m *DegradedMetrics) record(outcome string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	if _, ok := m.samples[outcome]; !ok {
+		outcome = "invalid_request"
+	}
+	sample := m.samples[outcome]
+	sample.count++
+	sample.duration += duration
+	m.samples[outcome] = sample
+	m.mu.Unlock()
+}
+
+// PrometheusMetrics implements the health endpoint's structural
+// MetricsExtension contract with a fixed set of outcome labels.
+func (m *DegradedMetrics) PrometheusMetrics() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	samples := make(map[string]degradedMetricSample, len(m.samples))
+	for outcome, sample := range m.samples {
+		samples[outcome] = sample
+	}
+	m.mu.Unlock()
+	outcomes := make([]string, 0, len(samples))
+	for outcome := range samples {
+		outcomes = append(outcomes, outcome)
+	}
+	sort.Strings(outcomes)
+	var b strings.Builder
+	b.WriteString("# HELP keel_rate_limit_degraded_admissions_total PostgreSQL safe-read fallback outcomes.\n")
+	b.WriteString("# TYPE keel_rate_limit_degraded_admissions_total counter\n")
+	b.WriteString("# HELP keel_rate_limit_degraded_admission_duration_seconds_sum Cumulative fallback admission duration.\n")
+	b.WriteString("# TYPE keel_rate_limit_degraded_admission_duration_seconds_sum counter\n")
+	b.WriteString("# HELP keel_rate_limit_degraded_admission_duration_seconds_count Fallback admission observations.\n")
+	b.WriteString("# TYPE keel_rate_limit_degraded_admission_duration_seconds_count counter\n")
+	for _, outcome := range outcomes {
+		sample := samples[outcome]
+		fmt.Fprintf(&b, "keel_rate_limit_degraded_admissions_total{result=%q} %d\n", outcome, sample.count)
+		fmt.Fprintf(&b, "keel_rate_limit_degraded_admission_duration_seconds_sum{result=%q} %.6f\n", outcome, sample.duration.Seconds())
+		fmt.Fprintf(&b, "keel_rate_limit_degraded_admission_duration_seconds_count{result=%q} %d\n", outcome, sample.count)
+	}
+	return b.String()
 }
 
 type PrimaryAdmission interface {
@@ -113,22 +191,47 @@ func (c *Coordinator) Allow(ctx context.Context, request Request) (Decision, err
 }
 
 func NewDegradedLimiter(db *sql.DB, cfg DegradedConfig) (*DegradedLimiter, error) {
+	return NewDegradedLimiterWithMetrics(db, cfg, NewDegradedMetrics())
+}
+
+// NewDegradedLimiterWithMetrics creates a limiter whose metrics can also be
+// attached to health.NewHandlerWithMetrics / RunWithMetrics.
+func NewDegradedLimiterWithMetrics(db *sql.DB, cfg DegradedConfig, metrics *DegradedMetrics) (*DegradedLimiter, error) {
 	if db == nil || !validIdentifier(cfg.Region, maxRegionLength) || cfg.Region != cfg.HomeRegion {
 		return nil, ErrInvalidConfig
 	}
-	return &DegradedLimiter{db: db, region: cfg.Region, enabled: cfg.Enabled}, nil
+	if metrics == nil {
+		metrics = NewDegradedMetrics()
+	}
+	return &DegradedLimiter{db: db, region: cfg.Region, enabled: cfg.Enabled, metrics: metrics}, nil
+}
+
+func (l *DegradedLimiter) Metrics() *DegradedMetrics {
+	if l == nil {
+		return nil
+	}
+	return l.metrics
 }
 
 func (l *DegradedLimiter) Allow(ctx context.Context, request DegradedRequest) (DegradedDecision, error) {
+	started := time.Now()
+	outcome := "db_error"
+	var metrics *DegradedMetrics
+	if l != nil {
+		metrics = l.metrics
+	}
+	defer func() { metrics.record(outcome, time.Since(started)) }()
 	if l == nil || l.db == nil {
 		return DegradedDecision{}, ErrDegradedUnavailable
 	}
 	if !l.enabled {
+		outcome = "disabled"
 		return DegradedDecision{}, ErrDegradedDisabled
 	}
 	tenant, err := tenancy.ParseTenantID(request.TenantID)
 	if err != nil || !degradedRequestUUIDPattern.MatchString(request.RequestID) ||
 		!validIdentifier(request.RouteID, maxRouteLength) || !degradedDigestPattern.MatchString(request.PolicyDigest) {
+		outcome = "invalid_request"
 		return DegradedDecision{}, ErrInvalidConfig
 	}
 	digest, _ := hex.DecodeString(request.PolicyDigest)
@@ -154,12 +257,20 @@ func (l *DegradedLimiter) Allow(ctx context.Context, request DegradedRequest) (D
 	}
 	switch code {
 	case -1:
+		outcome = "idempotency_conflict"
 		return DegradedDecision{}, ErrIdempotencyConflict
 	case 0, 1:
+		if result.Allowed {
+			outcome = "allowed"
+		} else {
+			outcome = "limited"
+		}
 		return result, nil
 	case 2:
+		outcome = "policy_rejected"
 		return DegradedDecision{}, ErrDegradedPolicyRejected
 	case 3:
+		outcome = "window_expired"
 		return result, ErrDegradedWindowExpired
 	default:
 		return DegradedDecision{}, ErrDegradedUnavailable
