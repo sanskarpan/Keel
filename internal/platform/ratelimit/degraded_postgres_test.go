@@ -10,9 +10,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1074,7 +1076,131 @@ func TestCoordinatorReplaysAdmissionAfterLostPostgresResponse(t *testing.T) {
 	}
 }
 
-func openDegradedTestDatabases(t *testing.T) (app, admin, control *sql.DB) {
+// Run with a fixed count such as -benchtime=1024x. Adaptive Go calibration can
+// issue large bursts of durable database writes while estimating this benchmark.
+func BenchmarkPostgresDegradedAdmissionContention(b *testing.B) {
+	appDB, adminDB, rateControl := openDegradedTestDatabases(b)
+	for _, workers := range []int{1, 8, 32} {
+		b.Run(fmt.Sprintf("workers-%d", workers), func(b *testing.B) {
+			b.StopTimer()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			region := "bench-" + uuid.NewString()[:8]
+			defer cleanupDegradedBenchmarkRegion(b, adminDB, region)
+
+			tenant, err := tenancy.ParseTenantID(uuid.NewString())
+			if err != nil {
+				b.Fatal(err)
+			}
+			fleet := FleetPolicy{Region: region, Capacity: 1_000_000_000, RefillPerSec: 100_000_000, Enabled: true}
+			fleet.Digest = FleetPolicyDigest(fleet)
+			policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: "safe.read",
+				Capacity: fleet.Capacity, RefillPerSec: fleet.RefillPerSec, Enabled: true}
+			policy.Digest = TenantPolicyDigest(policy)
+			control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := control.SetFleetPolicy(ctx, fleet); err != nil {
+				b.Fatal(err)
+			}
+			if err := control.SetTenantPolicy(ctx, policy); err != nil {
+				b.Fatal(err)
+			}
+			limiter, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			var next atomic.Uint64
+			var samplesMu sync.Mutex
+			samples := make([]time.Duration, 0, b.N/16+1)
+			var firstErr error
+			var errOnce sync.Once
+			var wg sync.WaitGroup
+			b.ResetTimer()
+			started := time.Now()
+			for worker := 0; worker < workers; worker++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						index := next.Add(1) - 1
+						if index >= uint64(b.N) {
+							return
+						}
+						started := time.Now()
+						decision, err := limiter.Allow(ctx, DegradedRequest{TenantID: string(tenant), RouteID: policy.RouteID,
+							RequestID: uuid.NewString(), PolicyDigest: policy.Digest})
+						elapsed := time.Since(started)
+						if err != nil {
+							errOnce.Do(func() { firstErr = err })
+							return
+						}
+						if !decision.Allowed {
+							errOnce.Do(func() { firstErr = fmt.Errorf("benchmark admission unexpectedly limited") })
+							return
+						}
+						if index%16 == 0 {
+							samplesMu.Lock()
+							samples = append(samples, elapsed)
+							samplesMu.Unlock()
+						}
+					}
+				}()
+			}
+			wg.Wait()
+			elapsed := time.Since(started)
+			b.StopTimer()
+			if firstErr != nil {
+				b.Fatal(firstErr)
+			}
+			if len(samples) == 0 {
+				b.Fatal("benchmark collected no latency samples")
+			}
+			sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+			quantile := func(percent int) float64 {
+				index := (len(samples) - 1) * percent / 100
+				return float64(samples[index].Nanoseconds()) / 1000
+			}
+			b.ReportMetric(float64(workers), "workers")
+			b.ReportMetric(float64(b.N)/elapsed.Seconds(), "ops/s")
+			b.ReportMetric(quantile(50), "p50-us")
+			b.ReportMetric(quantile(95), "p95-us")
+			b.ReportMetric(quantile(99), "p99-us")
+		})
+	}
+}
+
+func cleanupDegradedBenchmarkRegion(t testing.TB, admin *sql.DB, region string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := admin.BeginTx(ctx, nil)
+	if err != nil {
+		t.Errorf("begin benchmark fixture cleanup: %v", err)
+		return
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`DELETE FROM keel_meta.rate_limit_degraded_receipts WHERE home_region=$1`,
+		`DELETE FROM keel_meta.rate_limit_degraded_tenant_buckets WHERE home_region=$1`,
+		`DELETE FROM keel_meta.rate_limit_degraded_windows WHERE home_region=$1`,
+		`DELETE FROM keel_meta.rate_limit_degraded_fleet_buckets WHERE home_region=$1`,
+		`DELETE FROM keel_meta.rate_limit_degraded_tenant_policies WHERE home_region=$1`,
+		`DELETE FROM keel_meta.rate_limit_degraded_fleet_policies WHERE home_region=$1`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement, region); err != nil {
+			t.Errorf("clean benchmark fixture region %s: %v", region, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Errorf("commit benchmark fixture cleanup: %v", err)
+	}
+}
+
+func openDegradedTestDatabases(t testing.TB) (app, admin, control *sql.DB) {
 	t.Helper()
 	appDSN := os.Getenv("KEEL_TEST_DATABASE_URL")
 	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
