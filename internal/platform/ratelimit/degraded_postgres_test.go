@@ -95,6 +95,36 @@ func TestAdmissionCoordinatorFallsBackOnlyOnRedisAvailability(t *testing.T) {
 	if _, err := coordinator.Allow(context.Background(), request); !errors.Is(err, ErrUnavailable) || fallback.calls != 0 {
 		t.Fatalf("higher-cost request was silently downgraded for fallback: err=%v calls=%d", err, fallback.calls)
 	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	fallback.calls = 0
+	coordinator, _ = NewCoordinator(stubPrimaryAdmission{err: ErrUnavailable}, fallback)
+	if _, err := coordinator.Allow(canceled, request); !errors.Is(err, ErrUnavailable) || fallback.calls != 0 {
+		t.Fatalf("canceled primary request entered fallback: err=%v calls=%d", err, fallback.calls)
+	}
+}
+
+func TestDegradedPostgresUnavailableFailsClosed(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	limiter, err := NewDegradedLimiter(db, DegradedConfig{Region: "test-local", HomeRegion: "test-local", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err = limiter.Allow(ctx, DegradedRequest{TenantID: "00000000-0000-4000-8000-000000000001", RouteID: "safe.read",
+		RequestID: "00000000-0000-4000-8000-000000000002", PolicyDigest: strings.Repeat("0", 64)})
+	if !errors.Is(err, ErrDegradedUnavailable) {
+		t.Fatalf("PostgreSQL outage did not fail closed: %v", err)
+	}
+	if !strings.Contains(limiter.Metrics().PrometheusMetrics(), `result="db_error"`) {
+		t.Fatal("PostgreSQL outage was not recorded as a bounded metric outcome")
+	}
 }
 
 func TestPostgresDegradedAdmissionIsFleetBoundRestartSafeAndTenantScoped(t *testing.T) {
@@ -302,6 +332,67 @@ func TestPostgresDegradedWindowDeadlineUsesPostLockDatabaseTime(t *testing.T) {
 	if err := <-result; err != ErrDegradedWindowExpired {
 		t.Fatalf("lock wait crossed the outage deadline but request was admitted: %v", err)
 	}
+}
+
+func TestPostgresDegradedExpiredReceiptKeyCanBeReusedAfterBoundedCleanup(t *testing.T) {
+	appDB, admin, rateControl := openDegradedTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	region := "test-" + uuid.NewString()[:8]
+	tenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	route := "safe.read"
+	fleet := FleetPolicy{Region: region, Capacity: 2, RefillPerSec: 1, Enabled: true}
+	fleet.Digest = FleetPolicyDigest(fleet)
+	policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: route, Capacity: 2, RefillPerSec: 1, Enabled: true}
+	policy.Digest = TenantPolicyDigest(policy)
+	control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetTenantPolicy(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	limiter, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := uuid.NewString()
+	first, err := limiter.Allow(ctx, DegradedRequest{TenantID: string(tenant), RouteID: route, RequestID: requestID, PolicyDigest: policy.Digest})
+	if err != nil || !first.Allowed || first.Replayed {
+		t.Fatalf("initial request was not admitted: %+v err=%v", first, err)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.rate_limit_degraded_receipts
+		SET created_at=clock_timestamp()-interval '2 seconds',expires_at=clock_timestamp()-interval '1 second'
+		WHERE tenant_id=$1 AND home_region=$2 AND route_id=$3 AND request_id=$4`, string(tenant), region, route, requestID); err != nil {
+		t.Fatal(err)
+	}
+	// More than 100 older stale receipts ensure the bounded global cleanup does
+	// not happen to remove the target key; exact-key deletion must free it.
+	if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.rate_limit_degraded_receipts
+		(tenant_id,home_region,route_id,request_id,policy_sha256,fleet_policy_sha256,outage_id,allowed,remaining_units,
+		retry_after_ms,created_at,expires_at)
+		SELECT $1,$2,$3,gen_random_uuid(),$4,$5,w.outage_id,false,0,0,
+		clock_timestamp()-interval '31 minutes',clock_timestamp()-interval '30 minutes'
+		FROM generate_series(1,101), keel_meta.rate_limit_degraded_windows w WHERE w.home_region=$2`,
+		string(tenant), region, route, mustHex(t, policy.Digest), mustHex(t, fleet.Digest)); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := limiter.Allow(ctx, DegradedRequest{TenantID: string(tenant), RouteID: route, RequestID: requestID, PolicyDigest: policy.Digest})
+	if err != nil || !replay.Allowed || replay.Replayed {
+		t.Fatalf("expired request key was not safely re-admitted: %+v err=%v", replay, err)
+	}
+}
+
+func mustHex(t *testing.T, value string) []byte {
+	t.Helper()
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decoded
 }
 
 func TestPostgresDegradedRecoveryRequiresRateControlRoleAndHealthyRedis(t *testing.T) {
