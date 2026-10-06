@@ -129,6 +129,26 @@ func TestAdmissionCoordinatorFallsBackOnlyOnRedisAvailability(t *testing.T) {
 	}
 }
 
+func TestAdmissionCoordinatorNeverBypassesHealthyRedisDecision(t *testing.T) {
+	request := Request{TenantID: "00000000-0000-4000-8000-000000000001", RouteID: "safe.read",
+		RequestID: "00000000-0000-4000-8000-000000000002", Policy: Policy{Digest: "policy-digest", CostUnits: 1}}
+	for _, primaryDecision := range []Decision{
+		{Allowed: true, Remaining: 4},
+		{Allowed: false, Remaining: 0, RetryAfter: 250 * time.Millisecond},
+	} {
+		fallback := &stubSafeReadFallback{decision: DegradedDecision{Allowed: true, Remaining: 3}}
+		coordinator, err := NewCoordinator(stubPrimaryAdmission{decision: primaryDecision}, fallback)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decision, err := coordinator.Allow(context.Background(), request)
+		if err != nil || decision != primaryDecision || fallback.calls != 0 {
+			t.Fatalf("healthy Redis decision was changed or bypassed: primary=%+v got=%+v err=%v fallback_calls=%d",
+				primaryDecision, decision, err, fallback.calls)
+		}
+	}
+}
+
 func TestDegradedPostgresUnavailableFailsClosed(t *testing.T) {
 	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
 	if err != nil {
