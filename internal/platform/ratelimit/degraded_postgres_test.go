@@ -682,7 +682,16 @@ func TestPostgresDegradedAdmissionIsFleetBoundRestartSafeAndTenantScoped(t *test
 		SET started_at=clock_timestamp()-interval '61 seconds',expires_at=clock_timestamp()-interval '2 seconds' WHERE home_region=$1`, region); err != nil {
 		t.Fatal(err)
 	}
-	next := inputs[5]
+	// Keep this expiry check on a tenant whose policy was not changed above;
+	// otherwise the stale-policy rejection can mask the expired-window result
+	// when that tenant happened to win the concurrent admission race.
+	next := inputs[0]
+	for _, candidate := range inputs {
+		if candidate.tenant != first.tenant {
+			next = candidate
+			break
+		}
+	}
 	next.request = uuid.NewString()
 	if _, err := restartedLimiter.Allow(ctx, DegradedRequest{TenantID: string(next.tenant), RouteID: route, RequestID: next.request, PolicyDigest: next.digest}); err != ErrDegradedWindowExpired {
 		t.Fatalf("expired degraded window silently renewed while Redis remained unavailable: %v", err)

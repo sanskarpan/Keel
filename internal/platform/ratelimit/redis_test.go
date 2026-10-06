@@ -5,9 +5,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -72,6 +74,71 @@ func redisHashTag(key string) string {
 		return ""
 	}
 	return key[start+1 : start+1+end]
+}
+
+
+type syntheticRedisError string
+
+func (e syntheticRedisError) Error() string { return string(e) }
+func (syntheticRedisError) RedisError()       {}
+
+func TestRedisFailureClassification(t *testing.T) {
+	connectionRefused := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	cases := []struct {
+		name      string
+		err       error
+		wantError error
+	}{
+		{name: "connection failure", err: connectionRefused, wantError: ErrUnavailable},
+		{name: "local pool saturation", err: errors.New("redis: connection pool timeout"), wantError: ErrRedisFailure},
+		{name: "cluster failover", err: syntheticRedisError("CLUSTERDOWN The cluster is down"), wantError: ErrUnavailable},
+		{name: "loading", err: syntheticRedisError("LOADING Redis is loading the dataset"), wantError: ErrUnavailable},
+		{name: "read only failover", err: syntheticRedisError("READONLY You can't write against a read only replica"), wantError: ErrUnavailable},
+		{name: "transient retry", err: syntheticRedisError("TRYAGAIN temporary cluster condition"), wantError: ErrUnavailable},
+		{name: "bad credentials", err: syntheticRedisError("WRONGPASS invalid username-password pair"), wantError: ErrRedisFailure},
+		{name: "ACL denial", err: syntheticRedisError("NOPERM this user has no permissions"), wantError: ErrRedisFailure},
+		{name: "cluster routing mismatch", err: syntheticRedisError("MOVED 1 127.0.0.1:7001"), wantError: ErrRedisFailure},
+		{name: "script failure", err: syntheticRedisError("ERR user_script: invalid operation"), wantError: ErrRedisFailure},
+		{name: "unknown protocol failure", err: errors.New("unexpected Redis response type"), wantError: ErrRedisFailure},
+		{name: "request deadline", err: context.DeadlineExceeded, wantError: ErrUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyRedisError(tc.err); !errors.Is(got, tc.wantError) {
+				t.Fatalf("classified %v as %v; want %v", tc.err, got, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestCoordinatorDoesNotFallbackForPermanentRedisFailure(t *testing.T) {
+	fallback := &stubSafeReadFallback{decision: DegradedDecision{Allowed: true}}
+	coordinator, err := NewCoordinator(stubPrimaryAdmission{err: ErrRedisFailure}, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{TenantID: "00000000-0000-4000-8000-000000000001", RouteID: "safe.read",
+		RequestID: "00000000-0000-4000-8000-000000000002",
+		Policy:    Policy{Digest: strings.Repeat("a", 64), CostUnits: 1}}
+	if _, err := coordinator.Allow(context.Background(), request); !errors.Is(err, ErrRedisFailure) || fallback.calls != 0 {
+		t.Fatalf("permanent Redis command failure entered fallback: err=%v calls=%d", err, fallback.calls)
+	}
+}
+
+func TestRedisLimiterRejectsNilContextBeforeRedis(t *testing.T) {
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	t.Cleanup(func() { _ = client.Close() })
+	limiter, err := New(client, Config{Region: "us-east-1", HomeRegion: "us-east-1", KeyID: "hmac-v1",
+		Secret: []byte(strings.Repeat("s", 32)), ReplayTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{TenantID: "00000000-0000-4000-8000-000000000001", RouteID: "safe.read",
+		RequestID: "00000000-0000-4000-8000-000000000002",
+		Policy:    Policy{Digest: strings.Repeat("a", 64), CapacityUnits: 1, RefillUnitsPerSecond: 1, CostUnits: 1}}
+	if _, err := limiter.Allow(nil, request); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("nil context was not rejected before Redis: %v", err)
+	}
 }
 
 func TestRedisUnavailableFailsClosed(t *testing.T) {
