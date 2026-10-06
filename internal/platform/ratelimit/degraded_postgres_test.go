@@ -65,6 +65,23 @@ type stubSafeReadFallback struct {
 	calls    int
 }
 
+type responseLosingFallback struct {
+	fallback SafeReadFallback
+	loseNext bool
+}
+
+func (f *responseLosingFallback) Allow(ctx context.Context, request DegradedRequest) (DegradedDecision, error) {
+	decision, err := f.fallback.Allow(ctx, request)
+	if err != nil {
+		return DegradedDecision{}, err
+	}
+	if f.loseNext {
+		f.loseNext = false
+		return DegradedDecision{}, ErrDegradedUnavailable
+	}
+	return decision, nil
+}
+
 func TestDegradedMetricsAreLowCardinalityAndScrapedByHealthHandler(t *testing.T) {
 	metrics := NewDegradedMetrics()
 	metrics.record("allowed", 25*time.Millisecond)
@@ -863,6 +880,63 @@ func TestCoordinatorBoundsFallbackAfterAmbiguousRedisSuccess(t *testing.T) {
 	second, err := coordinator.Allow(ctx, request)
 	if err != nil || second.Allowed {
 		t.Fatalf("a second ambiguous response exceeded the shared fallback burst: %+v err=%v", second, err)
+	}
+}
+
+func TestCoordinatorReplaysAdmissionAfterLostPostgresResponse(t *testing.T) {
+	appDB, _, rateControl := openDegradedTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	region := "test-" + uuid.NewString()[:8]
+	tenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	route := "safe.read"
+	policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: route, Capacity: 1, RefillPerSec: 1, Enabled: true}
+	policy.Digest = TenantPolicyDigest(policy)
+	fleet := FleetPolicy{Region: region, Capacity: 1, RefillPerSec: 1, Enabled: true}
+	fleet.Digest = FleetPolicyDigest(fleet)
+	control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetTenantPolicy(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	limiter, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := &responseLosingFallback{fallback: limiter, loseNext: true}
+	coordinator, err := NewCoordinator(stubPrimaryAdmission{err: ErrUnavailable}, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{TenantID: string(tenant), RouteID: route, RequestID: uuid.NewString(),
+		Policy: Policy{Digest: policy.Digest, CapacityUnits: policy.Capacity, RefillUnitsPerSecond: policy.RefillPerSec, CostUnits: 1}}
+	if _, err := coordinator.Allow(ctx, request); !errors.Is(err, ErrDegradedUnavailable) {
+		t.Fatalf("simulated lost PostgreSQL response unexpectedly returned success: %v", err)
+	}
+
+	// A new limiter models a restarted process. The database receipt must be
+	// sufficient to return the exact admitted decision without another token.
+	restartedLimiter, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedCoordinator, err := NewCoordinator(stubPrimaryAdmission{err: ErrUnavailable}, restartedLimiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := restartedCoordinator.Allow(ctx, request)
+	if err != nil || !replay.Allowed || !replay.Replayed || replay.Remaining != 0 {
+		t.Fatalf("new process did not recover committed admission receipt: %+v err=%v", replay, err)
+	}
+	request.RequestID = uuid.NewString()
+	second, err := restartedCoordinator.Allow(ctx, request)
+	if err != nil || second.Allowed {
+		t.Fatalf("lost response caused fallback capacity to be spent more than once: %+v err=%v", second, err)
 	}
 }
 
