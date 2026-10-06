@@ -25,5 +25,11 @@ bounded retry scheduling, and durable blocked/completed outcomes for those reque
 provide query suppression and cleanup orchestration state only: source-object deletion, physical index
 compaction, backup expiry, and an end-to-end cleanup processor require separately qualified adapters
 and runbooks.
+Migration `0028_rate_limit_degraded_fallback` adds the disabled-by-default PostgreSQL safe-read
+degraded limiter: control-plane-owned policies, shared regional fleet and tenant/route buckets,
+expiring idempotency receipts, a 60-second outage fence, and recovery fencing through a separately
+credentialed rate-control role. It does not enable fallback on any production route or qualify
+managed Redis/PostgreSQL failover.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
