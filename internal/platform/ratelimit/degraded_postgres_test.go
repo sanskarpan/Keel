@@ -566,6 +566,67 @@ func TestPostgresDegradedAdmissionIsFleetBoundRestartSafeAndTenantScoped(t *test
 	}
 }
 
+func TestPostgresDegradedReceiptReplaysAfterWindowExpiryWithoutSpendingAgain(t *testing.T) {
+	appDB, admin, rateControl := openDegradedTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	region := "test-" + uuid.NewString()[:8]
+	tenant, err := tenancy.ParseTenantID(uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := "safe.read"
+	fleet := FleetPolicy{Region: region, Capacity: 1, RefillPerSec: 1, Enabled: true}
+	fleet.Digest = FleetPolicyDigest(fleet)
+	policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: route, Capacity: 1, RefillPerSec: 1, Enabled: true}
+	policy.Digest = TenantPolicyDigest(policy)
+	control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetTenantPolicy(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	limiter, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := uuid.NewString()
+	request := DegradedRequest{TenantID: string(tenant), RouteID: route, RequestID: requestID, PolicyDigest: policy.Digest}
+	first, err := limiter.Allow(ctx, request)
+	if err != nil || !first.Allowed || first.Replayed || first.Remaining != 0 || first.OutageID == "" {
+		t.Fatalf("initial request did not consume the single token: %+v err=%v", first, err)
+	}
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.rate_limit_degraded_windows
+		SET started_at=clock_timestamp()-interval '61 seconds',expires_at=clock_timestamp()-interval '2 seconds'
+		WHERE home_region=$1`, region); err != nil {
+		t.Fatal(err)
+	}
+
+	// A recorded admission is idempotent for its receipt lifetime, even after
+	// the outage admission window expires. Replaying returns the original result
+	// without granting a second token or extending the window.
+	replay, err := limiter.Allow(ctx, request)
+	if err != nil || !replay.Allowed || !replay.Replayed || replay.Remaining != first.Remaining || replay.OutageID != first.OutageID {
+		t.Fatalf("exact receipt changed after window expiry: first=%+v replay=%+v err=%v", first, replay, err)
+	}
+	newRequest := request
+	newRequest.RequestID = uuid.NewString()
+	if decision, err := limiter.Allow(ctx, newRequest); err != ErrDegradedWindowExpired || decision.Allowed {
+		t.Fatalf("new request was admitted after the window expired: decision=%+v err=%v", decision, err)
+	}
+	var receipts int
+	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.rate_limit_degraded_receipts WHERE home_region=$1`, region).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 1 {
+		t.Fatalf("replay or expired-window denial wrote a second receipt: count=%d want=1", receipts)
+	}
+}
+
 func TestPostgresDegradedWindowDeadlineUsesPostLockDatabaseTime(t *testing.T) {
 	appDB, admin, rateControl := openDegradedTestDatabases(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
