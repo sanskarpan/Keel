@@ -817,6 +817,55 @@ func TestCoordinatorUsesPostgresFallbackOnlyForApprovedSafeRead(t *testing.T) {
 	}
 }
 
+func TestCoordinatorBoundsFallbackAfterAmbiguousRedisSuccess(t *testing.T) {
+	appDB, _, rateControl := openDegradedTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	region := "test-" + uuid.NewString()[:8]
+	tenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	route := "safe.read"
+	policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: route, Capacity: 1, RefillPerSec: 1, Enabled: true}
+	policy.Digest = TenantPolicyDigest(policy)
+	fleet := FleetPolicy{Region: region, Capacity: 1, RefillPerSec: 1, Enabled: true}
+	fleet.Digest = FleetPolicyDigest(fleet)
+	control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetTenantPolicy(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	degraded, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a Redis script that may have consumed an allowance before its
+	// response was lost. The fallback must apply its independent shared cap.
+	primary := stubPrimaryAdmission{decision: Decision{Allowed: true}, err: ErrUnavailable}
+	coordinator, err := NewCoordinator(primary, degraded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{TenantID: string(tenant), RouteID: route, RequestID: uuid.NewString(),
+		Policy: Policy{Digest: policy.Digest, CapacityUnits: policy.Capacity, RefillUnitsPerSecond: policy.RefillPerSec, CostUnits: 1}}
+	first, err := coordinator.Allow(ctx, request)
+	if err != nil || !first.Allowed || first.Replayed {
+		t.Fatalf("first ambiguous Redis response was not bounded by fallback policy: %+v err=%v", first, err)
+	}
+	replay, err := coordinator.Allow(ctx, request)
+	if err != nil || !replay.Allowed || !replay.Replayed || replay.Remaining != first.Remaining {
+		t.Fatalf("same logical request did not replay its durable fallback receipt: first=%+v replay=%+v err=%v", first, replay, err)
+	}
+	request.RequestID = uuid.NewString()
+	second, err := coordinator.Allow(ctx, request)
+	if err != nil || second.Allowed {
+		t.Fatalf("a second ambiguous response exceeded the shared fallback burst: %+v err=%v", second, err)
+	}
+}
+
 func openDegradedTestDatabases(t *testing.T) (app, admin, control *sql.DB) {
 	t.Helper()
 	appDSN := os.Getenv("KEEL_TEST_DATABASE_URL")
