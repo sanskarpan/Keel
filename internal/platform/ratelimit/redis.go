@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"regexp"
 	"strconv"
@@ -24,6 +25,7 @@ import (
 var (
 	ErrInvalidConfig       = errors.New("Redis rate limiter configuration is invalid")
 	ErrUnavailable         = errors.New("Redis rate limiter is unavailable")
+	ErrRedisFailure        = errors.New("Redis rate limiter returned a permanent command or protocol failure")
 	ErrIdempotencyConflict = errors.New("rate limit request ID was reused with different policy or cost")
 	idPattern              = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 	uuidPattern            = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -136,7 +138,7 @@ func New(client redis.UniversalClient, cfg Config) (*Limiter, error) {
 }
 
 func (l *Limiter) Allow(ctx context.Context, request Request) (Decision, error) {
-	if l == nil || l.client == nil || !uuidPattern.MatchString(request.TenantID) ||
+	if ctx == nil || l == nil || l.client == nil || !uuidPattern.MatchString(request.TenantID) ||
 		!uuidPattern.MatchString(request.RequestID) || !validIdentifier(request.RouteID, maxRouteLength) ||
 		!digestPattern.MatchString(request.Policy.Digest) || request.Policy.CapacityUnits <= 0 ||
 		request.Policy.CapacityUnits > maxCapacityUnits || request.Policy.RefillUnitsPerSecond <= 0 ||
@@ -157,22 +159,51 @@ func (l *Limiter) Allow(ctx context.Context, request Request) (Decision, error) 
 		request.Policy.CapacityUnits, request.Policy.RefillUnitsPerSecond, request.Policy.CostUnits,
 		bucketTTL.Milliseconds(), l.replayTTL.Milliseconds(), fingerprint).Slice()
 	if err != nil {
-		return Decision{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return Decision{}, classifyRedisError(err)
 	}
 	if len(values) != 4 {
-		return Decision{}, ErrUnavailable
+		return Decision{}, ErrRedisFailure
 	}
 	code, ok1 := redisInt(values[0])
 	remaining, ok2 := redisInt(values[1])
 	retryMS, ok3 := redisInt(values[2])
 	replayed, ok4 := redisInt(values[3])
 	if !ok1 || !ok2 || !ok3 || !ok4 || code < -1 || code > 1 || remaining < 0 || retryMS < 0 || replayed < 0 || replayed > 1 {
-		return Decision{}, ErrUnavailable
+		return Decision{}, ErrRedisFailure
 	}
 	if code == -1 {
 		return Decision{}, ErrIdempotencyConflict
 	}
 	return Decision{Allowed: code == 1, Remaining: remaining, RetryAfter: time.Duration(retryMS) * time.Millisecond, Replayed: replayed == 1}, nil
+}
+
+func classifyRedisError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
+	var serverError redis.Error
+	if errors.As(err, &serverError) {
+		switch {
+		case redis.HasErrorPrefix(err, "CLUSTERDOWN "),
+			redis.HasErrorPrefix(err, "LOADING "),
+			redis.HasErrorPrefix(err, "MASTERDOWN "),
+			redis.HasErrorPrefix(err, "READONLY "),
+			redis.HasErrorPrefix(err, "TRYAGAIN "),
+			strings.HasPrefix(err.Error(), "ERR max number of clients reached"):
+			return fmt.Errorf("%w: %w", ErrUnavailable, err)
+		default:
+			return fmt.Errorf("%w: %w", ErrRedisFailure, err)
+		}
+	}
+	return fmt.Errorf("%w: %w", ErrRedisFailure, err)
 }
 
 func validIdentifier(value string, maxLength int) bool {
