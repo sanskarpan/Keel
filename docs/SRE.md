@@ -55,7 +55,31 @@ Config/secrets are validated at startup. Provider, OIDC and webhook keys rotate 
 
 ### Safe-read degraded admission runbook status
 
-K4.7.2 provides the shared PostgreSQL admission and recovery-fence primitives plus a low-cardinality metrics extension, but no runtime role attaches it to a scrape endpoint yet. Window/recovery metrics, alerts and production enablement procedures remain incomplete. Keep all fleet and tenant policies disabled and the application fallback switch off. If a future pilot enables it, the on-call must first verify the tenant-home-region Redis incident, current policy digests/caps, PostgreSQL health and pool headroom, and the isolated `keel_rate_control` observer identity. Do not manually mark Redis healthy or reset the outage window. Let the observer establish five consecutive successful home-region PINGs; verify that new admissions receive a new outage ID only after recovery. If PostgreSQL is unhealthy, policy state is uncertain, the 60-second window expires, or telemetry is missing, keep the feature closed and restore the primary Redis authority. A runbook with deployment-specific dashboards, alerts and operator commands remains a prerequisite tracked by issue #198; no production traffic is authorized by this provisional guidance.
+K4.7.2 provides shared PostgreSQL admission and recovery-fence primitives plus fixed-label counters/duration metrics. No runtime role attaches the extension to a scrape endpoint; window/recovery state metrics and deployed alerts remain incomplete. This procedure is a code-level operational contract, not production qualification. Keep all fleet and tenant policies disabled and the application fallback switch off until issues #198 and #199 pass.
+
+#### Before any future pilot
+
+1. Confirm the exact home-region Redis endpoint, DNS/TLS identity, PostgreSQL single-writer region, and the approved API/runtime version. Do not enable during active Redis failover or a PostgreSQL role/region transition.
+2. Require an approved control-plane implementation of `PolicyAuthorizer`, an isolated rate-control workload identity, and an audited policy change. Do not use direct SQL or an operator shell to edit policy tables; PostgreSQL can validate the role and policy constraints but cannot prove the service authorization ran.
+3. Record the fleet cap/refill, each tenant/route cap/refill, safe-read classification owner, fixed one-unit request cost, rollback owner, and incident contact. Verify model/write routes have no enabled fallback policy.
+4. Confirm the runtime scrape path exports the `keel_rate_limit_degraded_*` series and alert delivery works. Do not enable if telemetry is absent. Candidate alerts: page when `increase(keel_rate_limit_degraded_admissions_total{result="db_error"}[5m]) > 0` or `increase(keel_rate_limit_degraded_admissions_total{result="window_expired"}[5m]) > 0`; notify on any `allowed` fallback during a Redis incident; do not page on `limited` alone. Tune thresholds against observed traffic before a paid pilot.
+5. Enable the application fallback switch and explicitly approved policy as a coordinated change. Observe the pilot at the approved traffic ceiling; rollback immediately on unexpected routes, DB pool pressure, error growth, or missing metrics.
+
+#### During a Redis outage
+
+- Keep model, budgeted, sensitive-write, and unclassified routes fail-closed. Do not raise policy caps to compensate for a Redis incident.
+- The shared PostgreSQL fleet and tenant/route buckets bound admitted requests. An outage window admits new safe reads for at most 60 seconds; requests after expiry fail closed. Redis and PostgreSQL cannot coordinate ambiguous Redis responses atomically, so bounded additive admission is possible and is not exactly-once across both authorities.
+- If PostgreSQL is unavailable, policy state cannot be read, or the app connection pool is exhausted, fallback rejects. Treat fallback `db_error` and `window_expired` as incidents; do not bypass with process-local counters.
+- Disable fallback first through the application kill switch. Then use the authorized control plane to disable fleet and tenant policies. Do not share `keel_rate_control` credentials with API, workers, or human shells.
+
+#### Recovery and rollback
+
+- Do not clear the regional outage window manually. Elapsed time, restarting pods, or a Redis health flap cannot reopen it.
+- The isolated recovery observer must use the configured primary home-region limiter and `keel_rate_control` connection. It records recovery only after five consecutive seconds of successful PINGs; any failed probe restarts that interval. Verify recovered Redis health and DB writer identity before restoring the application switch and policy.
+- If the window has expired, new safe-read admissions remain denied until the observer records recovery. Exact request replays may return their stored decision for up to ten minutes; they do not consume another token.
+- Keep the additive migration in place during application rollback. It is not safe to remove admission state while any app instance may still call the fallback function.
+
+No production traffic is authorized by this procedure. Deployment-specific dashboards, tested role-recovery exercises, production-small load/lock results and named on-call ownership remain prerequisites tracked by #198 and #199.
 
 ## 6. Backup and disaster recovery
 
