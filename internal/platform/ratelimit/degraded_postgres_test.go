@@ -26,6 +26,27 @@ type allowRatePolicyChanges struct{}
 func (allowRatePolicyChanges) AuthorizeFleetPolicy(context.Context, FleetPolicy) error   { return nil }
 func (allowRatePolicyChanges) AuthorizeTenantPolicy(context.Context, TenantPolicy) error { return nil }
 
+type scriptedPingClient struct {
+	redis.UniversalClient
+	mu     sync.Mutex
+	calls  int
+	failAt int
+}
+
+func (c *scriptedPingClient) Ping(ctx context.Context) *redis.StatusCmd {
+	c.mu.Lock()
+	c.calls++
+	fail := c.calls == c.failAt
+	c.mu.Unlock()
+	cmd := redis.NewStatusCmd(ctx)
+	if fail {
+		cmd.SetErr(errors.New("synthetic transient Redis probe failure"))
+	} else {
+		cmd.SetVal("PONG")
+	}
+	return cmd
+}
+
 type stubPrimaryAdmission struct {
 	decision Decision
 	err      error
@@ -449,6 +470,87 @@ func TestPostgresDegradedRecoveryRequiresRateControlRoleAndHealthyRedis(t *testi
 	second, err := limiter.Allow(ctx, DegradedRequest{TenantID: string(tenant), RouteID: route, RequestID: uuid.NewString(), PolicyDigest: policy.Digest})
 	if err != nil || !second.Allowed || second.OutageID == first.OutageID {
 		t.Fatalf("verified recovery did not fence a subsequent outage: first=%+v second=%+v err=%v", first, second, err)
+	}
+}
+
+func TestPostgresDegradedRecoveryProbeFlapRestartsHealthInterval(t *testing.T) {
+	_, admin, rateControl := openDegradedTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	region := "test-" + uuid.NewString()[:8]
+	if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.rate_limit_degraded_windows(home_region,outage_id,started_at,expires_at,active)
+		VALUES($1,gen_random_uuid(),clock_timestamp(),clock_timestamp()+interval '30 seconds',true)`, region); err != nil {
+		t.Fatal(err)
+	}
+	client := &scriptedPingClient{failAt: 3}
+	primary, err := New(client, Config{Region: region, HomeRegion: region, KeyID: "flap-test",
+		Secret: []byte("safe-read-flapping-test-secret-material-01"), ReplayTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := ObserveRedisRecovery(ctx, primary, rateControl); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(started)
+	client.mu.Lock()
+	calls := client.calls
+	client.mu.Unlock()
+	if calls < 8 || elapsed < 7*time.Second {
+		t.Fatalf("a failed probe did not restart the five-second health interval: calls=%d elapsed=%s", calls, elapsed)
+	}
+	var active bool
+	if err := admin.QueryRowContext(ctx, `SELECT active FROM keel_meta.rate_limit_degraded_windows WHERE home_region=$1`, region).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Fatal("verified recovery did not close the degraded window after consecutive healthy probes")
+	}
+}
+
+func TestPostgresDegradedAppPoolExhaustionFailsBeforeAdmission(t *testing.T) {
+	appDB, admin, rateControl := openDegradedTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	region := "test-" + uuid.NewString()[:8]
+	tenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	route := "safe.read"
+	fleet := FleetPolicy{Region: region, Capacity: 2, RefillPerSec: 1, Enabled: true}
+	fleet.Digest = FleetPolicyDigest(fleet)
+	policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: route, Capacity: 2, RefillPerSec: 1, Enabled: true}
+	policy.Digest = TenantPolicyDigest(policy)
+	control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetTenantPolicy(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	appDB.SetMaxOpenConns(1)
+	heldTx, err := appDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer heldTx.Rollback()
+	limiter, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortCtx, stop := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer stop()
+	_, err = limiter.Allow(shortCtx, DegradedRequest{TenantID: string(tenant), RouteID: route, RequestID: uuid.NewString(), PolicyDigest: policy.Digest})
+	if !errors.Is(err, ErrDegradedUnavailable) {
+		t.Fatalf("connection-pool exhaustion did not fail closed: %v", err)
+	}
+	var windows int
+	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.rate_limit_degraded_windows WHERE home_region=$1`, region).Scan(&windows); err != nil {
+		t.Fatal(err)
+	}
+	if windows != 0 {
+		t.Fatalf("pool exhaustion opened an outage window without an admission attempt reaching SQL: %d", windows)
 	}
 }
 
