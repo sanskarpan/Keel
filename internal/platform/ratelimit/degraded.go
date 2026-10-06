@@ -70,8 +70,9 @@ type DegradedLimiter struct {
 // is a fixed outcome enum; tenant, route, request, region and outage IDs are
 // intentionally excluded.
 type DegradedMetrics struct {
-	mu      sync.Mutex
-	samples map[string]degradedMetricSample
+	mu             sync.Mutex
+	samples        map[string]degradedMetricSample
+	primarySamples map[string]degradedMetricSample
 }
 
 type degradedMetricSample struct {
@@ -84,12 +85,20 @@ var degradedMetricOutcomes = []string{
 	"idempotency_conflict", "invalid_request", "db_error",
 }
 
+var primaryMetricOutcomes = []string{
+	"allowed", "limited", "unavailable", "redis_failure", "idempotency_conflict", "error",
+}
+
 func NewDegradedMetrics() *DegradedMetrics {
 	samples := make(map[string]degradedMetricSample, len(degradedMetricOutcomes))
 	for _, outcome := range degradedMetricOutcomes {
 		samples[outcome] = degradedMetricSample{}
 	}
-	return &DegradedMetrics{samples: samples}
+	primarySamples := make(map[string]degradedMetricSample, len(primaryMetricOutcomes))
+	for _, outcome := range primaryMetricOutcomes {
+		primarySamples[outcome] = degradedMetricSample{}
+	}
+	return &DegradedMetrics{samples: samples, primarySamples: primarySamples}
 }
 
 func (m *DegradedMetrics) record(outcome string, duration time.Duration) {
@@ -107,6 +116,21 @@ func (m *DegradedMetrics) record(outcome string, duration time.Duration) {
 	m.mu.Unlock()
 }
 
+func (m *DegradedMetrics) recordPrimary(outcome string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	if _, ok := m.primarySamples[outcome]; !ok {
+		outcome = "error"
+	}
+	sample := m.primarySamples[outcome]
+	sample.count++
+	sample.duration += duration
+	m.primarySamples[outcome] = sample
+	m.mu.Unlock()
+}
+
 // PrometheusMetrics implements the health endpoint's structural
 // MetricsExtension contract with a fixed set of outcome labels.
 func (m *DegradedMetrics) PrometheusMetrics() string {
@@ -115,8 +139,12 @@ func (m *DegradedMetrics) PrometheusMetrics() string {
 	}
 	m.mu.Lock()
 	samples := make(map[string]degradedMetricSample, len(m.samples))
+	primarySamples := make(map[string]degradedMetricSample, len(m.primarySamples))
 	for outcome, sample := range m.samples {
 		samples[outcome] = sample
+	}
+	for outcome, sample := range m.primarySamples {
+		primarySamples[outcome] = sample
 	}
 	m.mu.Unlock()
 	outcomes := make([]string, 0, len(samples))
@@ -137,6 +165,23 @@ func (m *DegradedMetrics) PrometheusMetrics() string {
 		fmt.Fprintf(&b, "keel_rate_limit_degraded_admission_duration_seconds_sum{result=%q} %.6f\n", outcome, sample.duration.Seconds())
 		fmt.Fprintf(&b, "keel_rate_limit_degraded_admission_duration_seconds_count{result=%q} %d\n", outcome, sample.count)
 	}
+	primaryOutcomes := make([]string, 0, len(primarySamples))
+	for outcome := range primarySamples {
+		primaryOutcomes = append(primaryOutcomes, outcome)
+	}
+	sort.Strings(primaryOutcomes)
+	b.WriteString("# HELP keel_rate_limit_primary_admissions_total Home-region Redis admission outcomes.\n")
+	b.WriteString("# TYPE keel_rate_limit_primary_admissions_total counter\n")
+	b.WriteString("# HELP keel_rate_limit_primary_admission_duration_seconds_sum Cumulative home-region Redis admission duration.\n")
+	b.WriteString("# TYPE keel_rate_limit_primary_admission_duration_seconds_sum counter\n")
+	b.WriteString("# HELP keel_rate_limit_primary_admission_duration_seconds_count Home-region Redis admission observations.\n")
+	b.WriteString("# TYPE keel_rate_limit_primary_admission_duration_seconds_count counter\n")
+	for _, outcome := range primaryOutcomes {
+		sample := primarySamples[outcome]
+		fmt.Fprintf(&b, "keel_rate_limit_primary_admissions_total{result=%q} %d\n", outcome, sample.count)
+		fmt.Fprintf(&b, "keel_rate_limit_primary_admission_duration_seconds_sum{result=%q} %.6f\n", outcome, sample.duration.Seconds())
+		fmt.Fprintf(&b, "keel_rate_limit_primary_admission_duration_seconds_count{result=%q} %d\n", outcome, sample.count)
+	}
 	return b.String()
 }
 
@@ -155,6 +200,7 @@ type SafeReadFallback interface {
 type Coordinator struct {
 	primary  PrimaryAdmission
 	fallback SafeReadFallback
+	metrics  *DegradedMetrics
 }
 
 // isDegradedSafeReadRoute is a source-controlled allowlist. The SQL policy
@@ -174,14 +220,33 @@ func NewCoordinator(primary PrimaryAdmission, fallback SafeReadFallback) (*Coord
 	if primary == nil || fallback == nil {
 		return nil, ErrInvalidConfig
 	}
-	return &Coordinator{primary: primary, fallback: fallback}, nil
+	coordinator := &Coordinator{primary: primary, fallback: fallback}
+	if observable, ok := fallback.(interface{ Metrics() *DegradedMetrics }); ok {
+		coordinator.metrics = observable.Metrics()
+	}
+	return coordinator, nil
 }
 
 func (c *Coordinator) Allow(ctx context.Context, request Request) (Decision, error) {
 	if c == nil || c.primary == nil || c.fallback == nil || ctx == nil {
 		return Decision{}, ErrInvalidConfig
 	}
+	started := time.Now()
 	decision, err := c.primary.Allow(ctx, request)
+	primaryOutcome := "error"
+	switch {
+	case err == nil && decision.Allowed:
+		primaryOutcome = "allowed"
+	case err == nil:
+		primaryOutcome = "limited"
+	case errors.Is(err, ErrUnavailable):
+		primaryOutcome = "unavailable"
+	case errors.Is(err, ErrRedisFailure):
+		primaryOutcome = "redis_failure"
+	case errors.Is(err, ErrIdempotencyConflict):
+		primaryOutcome = "idempotency_conflict"
+	}
+	c.metrics.recordPrimary(primaryOutcome, time.Since(started))
 	if err == nil || !errors.Is(err, ErrUnavailable) || ctx == nil || ctx.Err() != nil {
 		return decision, err
 	}
