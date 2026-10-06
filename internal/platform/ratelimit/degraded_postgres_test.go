@@ -214,6 +214,35 @@ func TestDegradedPostgresUnavailableFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDegradedKillSwitchStopsFallbackBeforePostgres(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	metrics := NewDegradedMetrics()
+	fallback, err := NewDegradedLimiterWithMetrics(db,
+		DegradedConfig{Region: "test-local", HomeRegion: "test-local", Enabled: false}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCoordinator(stubPrimaryAdmission{err: ErrUnavailable}, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{TenantID: "00000000-0000-4000-8000-000000000001", RouteID: "safe.read",
+		RequestID: "00000000-0000-4000-8000-000000000002",
+		Policy:    Policy{Digest: strings.Repeat("0", 64), CostUnits: 1}}
+	decision, err := coordinator.Allow(context.Background(), request)
+	if !errors.Is(err, ErrUnavailable) || decision.Allowed || errors.Is(err, ErrDegradedUnavailable) {
+		t.Fatalf("disabled fallback did not fail closed before PostgreSQL: decision=%+v err=%v", decision, err)
+	}
+	content := metrics.PrometheusMetrics()
+	if !strings.Contains(content, `result="disabled"} 1`) || !strings.Contains(content, `result="db_error"} 0`) {
+		t.Fatalf("kill switch outcome is not recorded without a PostgreSQL attempt: %s", content)
+	}
+}
+
 func TestDegradedLimiterRejectsUnclassifiedRouteBeforeDatabase(t *testing.T) {
 	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
 	if err != nil {
