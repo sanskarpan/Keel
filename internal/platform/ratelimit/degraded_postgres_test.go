@@ -243,6 +243,29 @@ func TestDegradedKillSwitchStopsFallbackBeforePostgres(t *testing.T) {
 	}
 }
 
+
+func TestDegradedLimiterRejectsNilContextBeforeDatabase(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	metrics := NewDegradedMetrics()
+	limiter, err := NewDegradedLimiterWithMetrics(db, DegradedConfig{Region: "test-local", HomeRegion: "test-local", Enabled: true}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = limiter.Allow(nil, DegradedRequest{TenantID: "00000000-0000-4000-8000-000000000001",
+		RouteID: "safe.read", RequestID: "00000000-0000-4000-8000-000000000002", PolicyDigest: strings.Repeat("a", 64)})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("nil context did not fail closed as invalid configuration: %v", err)
+	}
+	content := metrics.PrometheusMetrics()
+	if !strings.Contains(content, `result="invalid_request"} 1`) || !strings.Contains(content, `result="db_error"} 0`) {
+		t.Fatalf("nil context was not rejected before database access: %s", content)
+	}
+}
+
 func TestDegradedLimiterRejectsUnclassifiedRouteBeforeDatabase(t *testing.T) {
 	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
 	if err != nil {
