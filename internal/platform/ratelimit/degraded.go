@@ -240,6 +240,10 @@ func (l *DegradedLimiter) Allow(ctx context.Context, request DegradedRequest) (D
 	if l == nil || l.db == nil {
 		return DegradedDecision{}, ErrDegradedUnavailable
 	}
+	if ctx == nil {
+		outcome = "invalid_request"
+		return DegradedDecision{}, ErrInvalidConfig
+	}
 	if !l.enabled {
 		outcome = "disabled"
 		return DegradedDecision{}, ErrDegradedDisabled
