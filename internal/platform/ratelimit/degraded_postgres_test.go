@@ -117,6 +117,16 @@ func TestAdmissionCoordinatorFallsBackOnlyOnRedisAvailability(t *testing.T) {
 		t.Fatalf("safe-read fallback decision=%+v err=%v calls=%d", decision, err, fallback.calls)
 	}
 
+	for _, routeID := range []string{"model.generate", "unclassified.route"} {
+		fallback.calls = 0
+		request.RouteID = routeID
+		coordinator, _ = NewCoordinator(stubPrimaryAdmission{err: ErrUnavailable}, fallback)
+		if _, err := coordinator.Allow(context.Background(), request); !errors.Is(err, ErrUnavailable) || fallback.calls != 0 {
+			t.Fatalf("unclassified route %q entered safe-read fallback: err=%v calls=%d", routeID, err, fallback.calls)
+		}
+	}
+	request.RouteID = "safe.read"
+
 	fallback.calls = 0
 	coordinator, _ = NewCoordinator(stubPrimaryAdmission{err: ErrIdempotencyConflict}, fallback)
 	if _, err := coordinator.Allow(context.Background(), request); !errors.Is(err, ErrIdempotencyConflict) || fallback.calls != 0 {
@@ -188,6 +198,24 @@ func TestDegradedPostgresUnavailableFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDegradedLimiterRejectsUnclassifiedRouteBeforeDatabase(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	metrics := NewDegradedMetrics()
+	limiter, err := NewDegradedLimiterWithMetrics(db, DegradedConfig{Region: "test-local", HomeRegion: "test-local", Enabled: true}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = limiter.Allow(context.Background(), DegradedRequest{TenantID: "00000000-0000-4000-8000-000000000001",
+		RouteID: "unclassified.route", RequestID: "00000000-0000-4000-8000-000000000002", PolicyDigest: strings.Repeat("a", 64)})
+	if !errors.Is(err, ErrDegradedPolicyRejected) || !strings.Contains(metrics.PrometheusMetrics(), `result="policy_rejected"} 1`) {
+		t.Fatalf("unclassified direct fallback was not rejected before SQL: err=%v metrics=%s", err, metrics.PrometheusMetrics())
+	}
+}
+
 func TestCoordinatorFailsClosedWhenRedisAndPostgresAreUnavailable(t *testing.T) {
 	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
 	if err != nil {
@@ -228,7 +256,7 @@ func TestPostgresDegradedAdmissionRemainsFleetBoundAcrossProcesses(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const route = "safe.process"
+	const route = "safe.read"
 	const capacity int64 = 5
 	fleet := FleetPolicy{Region: region, Capacity: capacity, RefillPerSec: 1, Enabled: true}
 	fleet.Digest = FleetPolicyDigest(fleet)
@@ -793,6 +821,12 @@ func TestCoordinatorUsesPostgresFallbackOnlyForApprovedSafeRead(t *testing.T) {
 	if err := control.SetTenantPolicy(ctx, policy); err != nil {
 		t.Fatal(err)
 	}
+	modelPolicy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: "model.generate",
+		Capacity: 1, RefillPerSec: 1, Enabled: true}
+	modelPolicy.Digest = TenantPolicyDigest(modelPolicy)
+	if err := control.SetTenantPolicy(ctx, modelPolicy); err != nil {
+		t.Fatal(err)
+	}
 	redisClient, err := NewRedisClient(ClientConfig{Addr: "127.0.0.1:1", Region: region, HomeRegion: region,
 		AllowSyntheticLoopback: true, DialTimeout: 50 * time.Millisecond, ReadTimeout: 50 * time.Millisecond,
 		WriteTimeout: 50 * time.Millisecond, PoolSize: 2})
@@ -828,6 +862,7 @@ func TestCoordinatorUsesPostgresFallbackOnlyForApprovedSafeRead(t *testing.T) {
 		t.Fatalf("tenant fallback policy cap was exceeded: %+v err=%v", decision, err)
 	}
 	request.RouteID = "model.generate"
+	request.Policy.Digest = modelPolicy.Digest
 	request.RequestID = uuid.NewString()
 	if _, err := coordinator.Allow(ctx, request); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("model route did not fail closed when Redis was unavailable: %v", err)
