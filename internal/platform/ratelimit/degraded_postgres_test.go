@@ -65,6 +65,14 @@ type stubSafeReadFallback struct {
 	decision DegradedDecision
 	err      error
 	calls    int
+	metrics  *DegradedMetrics
+}
+
+func (s *stubSafeReadFallback) Metrics() *DegradedMetrics {
+	if s.metrics == nil {
+		s.metrics = NewDegradedMetrics()
+	}
+	return s.metrics
 }
 
 type responseLosingFallback struct {
@@ -103,6 +111,8 @@ func TestDegradedMetricsAreLowCardinalityAndScrapedByHealthHandler(t *testing.T)
 	metrics.record("allowed", 25*time.Millisecond)
 	metrics.record("db_error", 5*time.Millisecond)
 	metrics.record("tenant-private-123", time.Second)
+	metrics.recordPrimary("unavailable", 8*time.Millisecond)
+	metrics.recordPrimary("tenant-private-123", time.Second)
 	handler := health.NewHandlerWithMetrics(buildinfo.Info{}, metrics)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
@@ -110,6 +120,8 @@ func TestDegradedMetricsAreLowCardinalityAndScrapedByHealthHandler(t *testing.T)
 	if response.Code != 200 || !strings.Contains(content, `keel_rate_limit_degraded_admissions_total{result="allowed"} 1`) ||
 		!strings.Contains(content, `keel_rate_limit_degraded_admissions_total{result="db_error"} 1`) ||
 		!strings.Contains(content, `keel_rate_limit_degraded_admission_duration_seconds_sum{result="allowed"} 0.025000`) ||
+		!strings.Contains(content, `keel_rate_limit_primary_admissions_total{result="unavailable"} 1`) ||
+		!strings.Contains(content, `keel_rate_limit_primary_admissions_total{result="error"} 1`) ||
 		!strings.Contains(content, `result="invalid_request"`) || strings.Contains(content, "tenant-private-123") {
 		t.Fatalf("health metrics missing fixed low-cardinality degraded series or exposed input: %s", content)
 	}
@@ -131,6 +143,9 @@ func TestAdmissionCoordinatorFallsBackOnlyOnRedisAvailability(t *testing.T) {
 	decision, err := coordinator.Allow(context.Background(), request)
 	if err != nil || !decision.Allowed || !decision.Replayed || decision.Remaining != 3 || fallback.calls != 1 {
 		t.Fatalf("safe-read fallback decision=%+v err=%v calls=%d", decision, err, fallback.calls)
+	}
+	if got := fallback.Metrics().PrometheusMetrics(); !strings.Contains(got, `keel_rate_limit_primary_admissions_total{result="unavailable"} 1`) {
+		t.Fatalf("Redis availability failure was not measured on the coordinator path: %s", got)
 	}
 
 	for _, routeID := range []string{"model.generate", "unclassified.route"} {
@@ -189,6 +204,13 @@ func TestAdmissionCoordinatorNeverBypassesHealthyRedisDecision(t *testing.T) {
 			t.Fatalf("healthy Redis decision was changed or bypassed: primary=%+v got=%+v err=%v fallback_calls=%d",
 				primaryDecision, decision, err, fallback.calls)
 		}
+		outcome := "allowed"
+		if !primaryDecision.Allowed {
+			outcome = "limited"
+		}
+		if got := fallback.Metrics().PrometheusMetrics(); !strings.Contains(got, `keel_rate_limit_primary_admissions_total{result="`+outcome+`"} 1`) {
+			t.Fatalf("healthy Redis %s decision was not measured: %s", outcome, got)
+		}
 	}
 }
 
@@ -242,7 +264,6 @@ func TestDegradedKillSwitchStopsFallbackBeforePostgres(t *testing.T) {
 		t.Fatalf("kill switch outcome is not recorded without a PostgreSQL attempt: %s", content)
 	}
 }
-
 
 func TestDegradedLimiterRejectsNilContextBeforeDatabase(t *testing.T) {
 	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
@@ -313,7 +334,6 @@ func TestCoordinatorFailsClosedWhenRedisAndPostgresAreUnavailable(t *testing.T) 
 		t.Fatal("combined authority failure was not recorded as a bounded db_error metric")
 	}
 }
-
 
 func TestPostgresDegradedFleetPolicyKillSwitchTakesEffectImmediately(t *testing.T) {
 	appDB, adminDB, rateControlDB := openDegradedTestDatabases(t)
