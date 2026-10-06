@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -176,6 +179,155 @@ func TestCoordinatorFailsClosedWhenRedisAndPostgresAreUnavailable(t *testing.T) 
 	if !strings.Contains(metrics.PrometheusMetrics(), `result="db_error"`) {
 		t.Fatal("combined authority failure was not recorded as a bounded db_error metric")
 	}
+}
+
+func TestPostgresDegradedAdmissionRemainsFleetBoundAcrossProcesses(t *testing.T) {
+	_, _, rateControl := openDegradedTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	region := "test-" + uuid.NewString()[:8]
+	tenant, err := tenancy.ParseTenantID(uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const route = "safe.process"
+	const capacity int64 = 5
+	fleet := FleetPolicy{Region: region, Capacity: capacity, RefillPerSec: 1, Enabled: true}
+	fleet.Digest = FleetPolicyDigest(fleet)
+	policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: route,
+		Capacity: capacity, RefillPerSec: 1, Enabled: true}
+	policy.Digest = TenantPolicyDigest(policy)
+	control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetTenantPolicy(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+
+	type processResult struct {
+		requestID string
+		decision  DegradedDecision
+		err       error
+	}
+	const processCount = 12
+	started := time.Now()
+	results := make(chan processResult, processCount)
+	var workers sync.WaitGroup
+	for range processCount {
+		requestID := uuid.NewString()
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			decision, err := runDegradedAdmissionProcess(ctx, region, string(tenant), route, requestID, policy.Digest)
+			results <- processResult{requestID: requestID, decision: decision, err: err}
+		}()
+	}
+	workers.Wait()
+	close(results)
+
+	allowed := 0
+	var replayRequestID string
+	var replayRemaining int64
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("separate process admission failed: %v", result.err)
+		}
+		if result.decision.Allowed {
+			allowed++
+			if replayRequestID == "" {
+				replayRequestID = result.requestID
+				replayRemaining = result.decision.Remaining
+			}
+		}
+	}
+	elapsed := time.Since(started)
+	allowedCeiling := capacity + int64(elapsed/time.Second) + 1
+	if int64(allowed) > allowedCeiling {
+		t.Fatalf("independent processes exceeded shared fleet allowance: allowed=%d ceiling=%d elapsed=%s", allowed, allowedCeiling, elapsed)
+	}
+	if replayRequestID == "" {
+		t.Fatal("all independent processes were denied despite unused initial capacity")
+	}
+
+	replay, err := runDegradedAdmissionProcess(ctx, region, string(tenant), route, replayRequestID, policy.Digest)
+	if err != nil || !replay.Allowed || !replay.Replayed || replay.Remaining != replayRemaining {
+		t.Fatalf("fresh process did not replay the durable receipt: decision=%+v err=%v", replay, err)
+	}
+	newRequest, err := runDegradedAdmissionProcess(ctx, region, string(tenant), route, uuid.NewString(), policy.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	totalAllowed := allowed
+	if newRequest.Allowed {
+		totalAllowed++
+	}
+	allowedCeiling = capacity + int64(time.Since(started)/time.Second) + 1
+	if int64(totalAllowed) > allowedCeiling {
+		t.Fatalf("fresh processes exceeded shared burst plus refill envelope: allowed=%d ceiling=%d elapsed=%s", totalAllowed, allowedCeiling, time.Since(started))
+	}
+}
+
+func TestDegradedAdmissionProcessChild(t *testing.T) {
+	if os.Getenv("KEEL_DEGRADED_PROCESS_CHILD") != "1" {
+		return
+	}
+	db, err := sql.Open("pgx", os.Getenv("KEEL_TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	region := os.Getenv("KEEL_DEGRADED_REGION")
+	limiter, err := NewDegradedLimiter(db, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	decision, err := limiter.Allow(ctx, DegradedRequest{
+		TenantID: os.Getenv("KEEL_DEGRADED_TENANT"), RouteID: os.Getenv("KEEL_DEGRADED_ROUTE"),
+		RequestID: os.Getenv("KEEL_DEGRADED_REQUEST_ID"), PolicyDigest: os.Getenv("KEEL_DEGRADED_POLICY_DIGEST"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("DECISION %t %t %d\n", decision.Allowed, decision.Replayed, decision.Remaining)
+}
+
+func runDegradedAdmissionProcess(ctx context.Context, region, tenant, route, requestID, digest string) (DegradedDecision, error) {
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDegradedAdmissionProcessChild$")
+	command.Env = append(os.Environ(),
+		"KEEL_DEGRADED_PROCESS_CHILD=1",
+		"KEEL_DEGRADED_REGION="+region,
+		"KEEL_DEGRADED_TENANT="+tenant,
+		"KEEL_DEGRADED_ROUTE="+route,
+		"KEEL_DEGRADED_REQUEST_ID="+requestID,
+		"KEEL_DEGRADED_POLICY_DIGEST="+digest,
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return DegradedDecision{}, fmt.Errorf("run separate admission process: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if !strings.HasPrefix(line, "DECISION ") {
+			continue
+		}
+		var decision DegradedDecision
+		var allowed, replayed bool
+		if _, err := fmt.Sscanf(strings.TrimPrefix(line, "DECISION "), "%t %t %d", &allowed, &replayed, &decision.Remaining); err != nil {
+			return DegradedDecision{}, fmt.Errorf("parse separate admission process result: %w", err)
+		}
+		decision.Allowed = allowed
+		decision.Replayed = replayed
+		return decision, nil
+	}
+	return DegradedDecision{}, fmt.Errorf("separate admission process returned no decision: %s", strconv.Quote(strings.TrimSpace(string(output))))
 }
 
 func TestPostgresDegradedAdmissionIsFleetBoundRestartSafeAndTenantScoped(t *testing.T) {
