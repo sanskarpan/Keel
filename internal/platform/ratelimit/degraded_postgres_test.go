@@ -148,6 +148,36 @@ func TestDegradedPostgresUnavailableFailsClosed(t *testing.T) {
 	}
 }
 
+func TestCoordinatorFailsClosedWhenRedisAndPostgresAreUnavailable(t *testing.T) {
+	db, err := sql.Open("pgx", "postgres://keel_local_app:local-only@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	metrics := NewDegradedMetrics()
+	fallback, err := NewDegradedLimiterWithMetrics(db,
+		DegradedConfig{Region: "test-local", HomeRegion: "test-local", Enabled: true}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCoordinator(stubPrimaryAdmission{err: ErrUnavailable}, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	request := Request{TenantID: "00000000-0000-4000-8000-000000000001", RouteID: "safe.read",
+		RequestID: "00000000-0000-4000-8000-000000000002",
+		Policy:    Policy{Digest: strings.Repeat("0", 64), CostUnits: 1}}
+	if decision, err := coordinator.Allow(ctx, request); !errors.Is(err, ErrDegradedUnavailable) || decision.Allowed {
+		t.Fatalf("request was not rejected when both admission authorities were unavailable: decision=%+v err=%v", decision, err)
+	}
+	if !strings.Contains(metrics.PrometheusMetrics(), `result="db_error"`) {
+		t.Fatal("combined authority failure was not recorded as a bounded db_error metric")
+	}
+}
+
 func TestPostgresDegradedAdmissionIsFleetBoundRestartSafeAndTenantScoped(t *testing.T) {
 	appDB, admin, rateControl := openDegradedTestDatabases(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
