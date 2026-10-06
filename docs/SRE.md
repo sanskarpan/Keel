@@ -46,12 +46,16 @@ Config/secrets are validated at startup. Provider, OIDC and webhook keys rotate 
 |---|---|
 | PostgreSQL unavailable | Reject new commands/admissions; no blind cached authorization of writes; preserve in-flight unknown outcomes for retry by same key |
 | Kafka unavailable | Commit to outbox within bounded backlog; projections lag visibly; reduce/stop nonessential writes when safe buffer budget is reached |
-| Redis unavailable | Model/budgeted/sensitive admission fails closed; no local quota expansion; streams degrade to durable status/final result. A restart-safe safe-read fallback is not yet enabled. |
+| Redis unavailable | Model/budgeted/sensitive admission fails closed; streams degrade to durable status/final result. Approved safe reads may use the optional PostgreSQL fallback only when separately enabled and provisioned. It is shared across replicas, has fleet and tenant/route caps, and rejects new admissions after 60 seconds until a separately credentialed observer verifies home-region Redis health for five consecutive seconds. Redis failover ambiguity can add bounded fallback admissions; the two authorities are not atomic. No production route currently enables this fallback. |
 | Temporal unavailable | Case/approval intents persist; UI shows pending synchronization; deadline decision records remain authoritative |
 | Provider unavailable | Bounded pre-stream fallback; reservations/accounting per attempt; interrupted streams show explicit state |
 | Webhook outage | Per-endpoint circuit breaker, jitter retry and durable exhaustion; no core order outage |
 | Extraction sandbox failure | Quarantine document and retry safely; never publish unscanned content |
 | Worker loss | Lease expires/reclaim; stale commit rejected; external unknown charges reconciled |
+
+### Safe-read degraded admission runbook status
+
+K4.7.2 provides the shared PostgreSQL admission and recovery-fence primitives, but does not yet provide fallback metrics, alerts, or a production enablement procedure. Keep all fleet and tenant policies disabled and the application fallback switch off. If a future pilot enables it, the on-call must first verify the tenant-home-region Redis incident, current policy digests/caps, PostgreSQL health and pool headroom, and the isolated `keel_rate_control` observer identity. Do not manually mark Redis healthy or reset the outage window. Let the observer establish five consecutive successful home-region PINGs; verify that new admissions receive a new outage ID only after recovery. If PostgreSQL is unhealthy, policy state is uncertain, the 60-second window expires, or telemetry is missing, keep the feature closed and restore the primary Redis authority. A runbook with deployment-specific dashboards, alerts and operator commands remains a prerequisite tracked by issue #198; no production traffic is authorized by this provisional guidance.
 
 ## 6. Backup and disaster recovery
 
