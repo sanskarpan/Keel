@@ -70,6 +70,20 @@ type responseLosingFallback struct {
 	loseNext bool
 }
 
+type appliedThenLostRedisResponse struct {
+	primary PrimaryAdmission
+}
+
+func (p appliedThenLostRedisResponse) Allow(ctx context.Context, request Request) (Decision, error) {
+	decision, err := p.primary.Allow(ctx, request)
+	if err != nil || !decision.Allowed {
+		return decision, err
+	}
+	// The Redis operation has committed, but its response is lost before the
+	// coordinator can observe the decision.
+	return Decision{}, ErrUnavailable
+}
+
 func (f *responseLosingFallback) Allow(ctx context.Context, request DegradedRequest) (DegradedDecision, error) {
 	decision, err := f.fallback.Allow(ctx, request)
 	if err != nil {
@@ -866,6 +880,91 @@ func TestCoordinatorUsesPostgresFallbackOnlyForApprovedSafeRead(t *testing.T) {
 	request.RequestID = uuid.NewString()
 	if _, err := coordinator.Allow(ctx, request); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("model route did not fail closed when Redis was unavailable: %v", err)
+	}
+}
+
+func TestPostgresFallbackBoundsAfterExecutedRedisAdmissionReplyIsLost(t *testing.T) {
+	appDB, _, rateControl := openDegradedTestDatabases(t)
+	redisURL := os.Getenv("KEEL_TEST_REDIS_URL")
+	if redisURL == "" {
+		t.Skip("set KEEL_TEST_REDIS_URL to qualify ambiguous home-region Redis responses")
+	}
+	options, err := redis.ParseURL(redisURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.MaxRetries = -1
+	redisClient := redis.NewClient(options)
+	t.Cleanup(func() { _ = redisClient.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	region := "test-" + uuid.NewString()[:8]
+	tenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	route := "safe.read"
+	fleet := FleetPolicy{Region: region, Capacity: 1, RefillPerSec: 1, Enabled: true}
+	fleet.Digest = FleetPolicyDigest(fleet)
+	policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: route,
+		Capacity: 1, RefillPerSec: 1, Enabled: true}
+	policy.Digest = TenantPolicyDigest(policy)
+	control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetTenantPolicy(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+
+	redisLimiter, err := New(redisClient, Config{Region: region, HomeRegion: region, KeyID: "lost-reply-test",
+		Secret: []byte("lost-redis-reply-test-secret-material-012345"), ReplayTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	degraded, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := &responseLosingFallback{fallback: degraded, loseNext: true}
+	coordinator, err := NewCoordinator(appliedThenLostRedisResponse{primary: redisLimiter}, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{TenantID: string(tenant), RouteID: route, RequestID: uuid.NewString(),
+		Policy: Policy{Digest: policy.Digest, CapacityUnits: policy.Capacity,
+			RefillUnitsPerSecond: policy.RefillPerSec, CostUnits: 1}}
+	if _, err := coordinator.Allow(ctx, request); !errors.Is(err, ErrDegradedUnavailable) {
+		t.Fatalf("lost PostgreSQL response was not surfaced after Redis execution: %v", err)
+	}
+
+	// The Redis call really consumed its only token even though the coordinator
+	// observed an availability error and then lost the fallback response.
+	redisSecond, err := redisLimiter.Allow(ctx, Request{TenantID: string(tenant), RouteID: route,
+		RequestID: uuid.NewString(), Policy: request.Policy})
+	if err != nil || redisSecond.Allowed {
+		t.Fatalf("lost Redis reply did not leave the original bucket charged: %+v err=%v", redisSecond, err)
+	}
+
+	// Model the continuing Redis outage with a newly constructed coordinator.
+	// PostgreSQL must return the exact receipt without charging its cap again.
+	restartedLimiter, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedCoordinator, err := NewCoordinator(stubPrimaryAdmission{err: ErrUnavailable}, restartedLimiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := restartedCoordinator.Allow(ctx, request)
+	if err != nil || !replay.Allowed || !replay.Replayed || replay.Remaining != 0 {
+		t.Fatalf("fallback receipt was not replayed exactly after both responses were lost: %+v err=%v", replay, err)
+	}
+	postgresSecond, err := restartedCoordinator.Allow(ctx, Request{TenantID: string(tenant), RouteID: route,
+		RequestID: uuid.NewString(), Policy: request.Policy})
+	if err != nil || postgresSecond.Allowed {
+		t.Fatalf("ambiguous Redis and PostgreSQL responses exceeded the independent fallback cap: %+v err=%v", postgresSecond, err)
 	}
 }
 
