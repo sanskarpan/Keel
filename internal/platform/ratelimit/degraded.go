@@ -149,12 +149,25 @@ type SafeReadFallback interface {
 }
 
 // Coordinator tries Redis first. It offers a durable fallback only after an
-// availability failure; the database's control-plane policy table is the
-// authoritative safe-read allowlist, so callers cannot classify model/write
-// work as safe by setting a request flag.
+// availability failure; source code classifies eligible safe-read routes, and
+// the database control-plane policy enforces each tenant's approved limits.
+// Callers cannot classify model/write work as safe by setting a request flag.
 type Coordinator struct {
 	primary  PrimaryAdmission
 	fallback SafeReadFallback
+}
+
+// isDegradedSafeReadRoute is a source-controlled allowlist. The SQL policy
+// tables add tenant-specific limits only for routes explicitly classified
+// here; a control-plane row alone cannot turn an arbitrary route into a
+// degraded safe read. Add routes only with an explicit safety review.
+func isDegradedSafeReadRoute(routeID string) bool {
+	switch routeID {
+	case "safe.read":
+		return true
+	default:
+		return false
+	}
 }
 
 func NewCoordinator(primary PrimaryAdmission, fallback SafeReadFallback) (*Coordinator, error) {
@@ -171,6 +184,9 @@ func (c *Coordinator) Allow(ctx context.Context, request Request) (Decision, err
 	decision, err := c.primary.Allow(ctx, request)
 	if err == nil || !errors.Is(err, ErrUnavailable) || ctx == nil || ctx.Err() != nil {
 		return decision, err
+	}
+	if !isDegradedSafeReadRoute(request.RouteID) {
+		return Decision{}, fmt.Errorf("%w: route is not classified for safe-read degradation", ErrUnavailable)
 	}
 	// Degraded SQL admission currently has a fixed one-unit request cost. Do not
 	// silently change a caller's more expensive Redis policy into a one-unit
@@ -233,6 +249,10 @@ func (l *DegradedLimiter) Allow(ctx context.Context, request DegradedRequest) (D
 		!validIdentifier(request.RouteID, maxRouteLength) || !degradedDigestPattern.MatchString(request.PolicyDigest) {
 		outcome = "invalid_request"
 		return DegradedDecision{}, ErrInvalidConfig
+	}
+	if !isDegradedSafeReadRoute(request.RouteID) {
+		outcome = "policy_rejected"
+		return DegradedDecision{}, ErrDegradedPolicyRejected
 	}
 	digest, _ := hex.DecodeString(request.PolicyDigest)
 	var result DegradedDecision
