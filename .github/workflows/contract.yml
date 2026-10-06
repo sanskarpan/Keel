@@ -18,6 +18,8 @@ jobs:
     name: Go and contract validation
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      KEEL_TEST_REDIS_URL: redis://127.0.0.1:6379/0
     services:
       postgres:
         image: pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
@@ -59,6 +61,15 @@ jobs:
           --health-timeout 5s
           --health-retries 20
           --health-start-period 20s
+      redis:
+        image: redis:8.2.3@sha256:0908d9af26bf9b985e984a40a5eb82eed229b07a3317eee6843832c3cc3a9619
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 release line, immutable commit

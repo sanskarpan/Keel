@@ -108,6 +108,8 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K4.7` | task | K4.7 Add global home-region Redis rate limiting and bounded degradation policies. | [Open issue](https://github.com/sanskarpan/Keel/issues/37) |
 
+| `K4.7-redis-core` | task | Add atomic home-region Redis token-bucket admission with idempotent replay and fail-closed budgeted routes. Partial implementation for parent [issue #37](https://github.com/sanskarpan/Keel/issues/37), tracked by [issue #196](https://github.com/sanskarpan/Keel/issues/196). Follow-up [issue #198](https://github.com/sanskarpan/Keel/issues/198) tracks restart-safe bounded safe-read degradation; [issue #199](https://github.com/sanskarpan/Keel/issues/199) tracks managed deployment/failover qualification. |
+
 | `K4-GATE` | gate | K4 gate: budget races and provider uncertainty remain bounded; no tool writes; cache near-neighbor/privacy failures rejected. | [Open issue](https://github.com/sanskarpan/Keel/issues/38) |
 
 

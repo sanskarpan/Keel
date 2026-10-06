@@ -98,6 +98,8 @@ Lua operations use Redis server time and scoped tenant/route keys. Home-region R
 
 Expensive model work and sensitive write routes fail closed if the mandatory limiter/budget authority is unavailable. Safe reads may use a local fallback bucket with static fleet-wide allowance allocations and at most 60 seconds of degraded operation. No auto-expanding fallback quota is permitted as replicas increase. Financial hard limits are PostgreSQL reservations and remain independent of Redis availability.
 
+K4.7.1 implements the Redis authority as an atomic token bucket using Redis server time, HMAC-scoped tenant/route keys, and request-ID idempotency. Current behavior fails closed on Redis errors for every route; the optional bounded safe-read local allowance above is not implemented because process restart/replica churn must not multiply a fleet quota. Parent issue #37 remains open until managed home-region deployment, failover overshoot qualification, and a restart-safe degraded mode are proven.
+
 ## 10. Webhooks and reconciliation
 
 Inbound callbacks require adapter-specific verified signatures/timestamps, a stable provider event ID and payload bounds. Persist inbox before returning 202. Apply allowed state transitions in a transaction with event-id and aggregate-version deduplication. An authentic but impossible/late callback is quarantined for reconciliation, not force-applied.
