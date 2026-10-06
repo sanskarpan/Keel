@@ -314,6 +314,71 @@ func TestCoordinatorFailsClosedWhenRedisAndPostgresAreUnavailable(t *testing.T) 
 	}
 }
 
+
+func TestPostgresDegradedFleetPolicyKillSwitchTakesEffectImmediately(t *testing.T) {
+	appDB, adminDB, rateControlDB := openDegradedTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	region := "test-" + uuid.NewString()[:8]
+	tenant, err := tenancy.ParseTenantID(uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const route = "safe.read"
+	fleet := FleetPolicy{Region: region, Capacity: 4, RefillPerSec: 1, Enabled: true}
+	fleet.Digest = FleetPolicyDigest(fleet)
+	tenantPolicy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: route,
+		Capacity: 4, RefillPerSec: 1, Enabled: true}
+	tenantPolicy.Digest = TenantPolicyDigest(tenantPolicy)
+
+	policies, err := NewPolicyRepository(rateControlDB, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := policies.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := policies.SetTenantPolicy(ctx, tenantPolicy); err != nil {
+		t.Fatal(err)
+	}
+	metrics := NewDegradedMetrics()
+	limiter, err := NewDegradedLimiterWithMetrics(appDB,
+		DegradedConfig{Region: region, HomeRegion: region, Enabled: true}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := limiter.Allow(ctx, DegradedRequest{TenantID: string(tenant), RouteID: route,
+		RequestID: uuid.NewString(), PolicyDigest: tenantPolicy.Digest})
+	if err != nil || !first.Allowed {
+		t.Fatalf("enabled fleet policy did not admit the initial request: decision=%+v err=%v", first, err)
+	}
+
+	fleet.Enabled = false
+	fleet.Digest = FleetPolicyDigest(fleet)
+	if err := policies.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatal(err)
+	}
+	disabledRequestID := uuid.NewString()
+	decision, err := limiter.Allow(ctx, DegradedRequest{TenantID: string(tenant), RouteID: route,
+		RequestID: disabledRequestID, PolicyDigest: tenantPolicy.Digest})
+	if !errors.Is(err, ErrDegradedPolicyRejected) || decision.Allowed {
+		t.Fatalf("disabled fleet policy did not immediately reject fallback: decision=%+v err=%v", decision, err)
+	}
+	if !strings.Contains(metrics.PrometheusMetrics(), `result="policy_rejected"} 1`) {
+		t.Fatal("dynamic kill-switch rejection was not recorded as a bounded policy outcome")
+	}
+	var receipts int
+	if err := adminDB.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.rate_limit_degraded_receipts
+		WHERE tenant_id=$1 AND home_region=$2 AND route_id=$3 AND request_id=$4`,
+		string(tenant), region, route, disabledRequestID).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 0 {
+		t.Fatalf("disabled fleet policy wrote an admission receipt: count=%d", receipts)
+	}
+}
+
 func TestPostgresDegradedAdmissionRemainsFleetBoundAcrossProcesses(t *testing.T) {
 	_, _, rateControl := openDegradedTestDatabases(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
