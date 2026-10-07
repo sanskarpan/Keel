@@ -55,5 +55,11 @@ disposition receipts bind an attempt, outcome ordinal, source, worker, and epoch
 also records the settled amount. This remains a database contract: no provider adapter, transport
 dispatch, or production charge qualification is provided by the migration.
 
+Migration `0033_context_vault_records` stores bounded encrypted context envelopes as immutable
+tenant/record/version rows. Only the dedicated `keel_context_vault` role can insert and read
+unexpired rows under forced RLS; local bootstrap provides a separate test login. It stores no
+plaintext and does not add expiry deletion, legal-hold processing, replay authorization, KMS
+integration, or Langfuse delivery.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
