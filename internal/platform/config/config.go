@@ -23,6 +23,7 @@ const (
 	RoleWebhookWorker      Role = "webhook-worker"
 	RoleBillingWorker      Role = "billing-worker"
 	RoleNotificationWorker Role = "notification-worker"
+	RoleRateLimitObserver  Role = "rate-limit-observer"
 )
 
 const (
