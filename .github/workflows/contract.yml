@@ -179,6 +179,7 @@ jobs:
           KEEL_TEST_CONTEXT_ERASURE_DATABASE_URL: postgres://keel_local_context_erasure:keel-context-erasure-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_CONTEXT_ERASURE_WORKER_DATABASE_URL: postgres://keel_local_context_erasure_worker:keel-context-erasure-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_CONTEXT_LEGAL_HOLD_DATABASE_URL: postgres://keel_local_context_legal_hold:keel-context-legal-hold-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_CONTEXT_REPLAY_DATABASE_URL: postgres://keel_local_context_replay:keel-context-replay-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_ADMIN_DATABASE_URL: postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_KAFKA_BROKERS: localhost:19092
           KEEL_TEST_KAFKA_TOPIC: keel.test.orders.v1
@@ -221,6 +222,7 @@ jobs:
           KEEL_TEST_CONTEXT_ERASURE_DATABASE_URL: postgres://keel_local_context_erasure:keel-context-erasure-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_CONTEXT_ERASURE_WORKER_DATABASE_URL: postgres://keel_local_context_erasure_worker:keel-context-erasure-worker-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_CONTEXT_LEGAL_HOLD_DATABASE_URL: postgres://keel_local_context_legal_hold:keel-context-legal-hold-local-only@127.0.0.1:5432/postgres?sslmode=disable
+          KEEL_TEST_CONTEXT_REPLAY_DATABASE_URL: postgres://keel_local_context_replay:keel-context-replay-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_ADMIN_DATABASE_URL: postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable
           KEEL_TEST_KAFKA_BROKERS: localhost:19092
           KEEL_TEST_KAFKA_TOPIC: keel.test.orders.v1

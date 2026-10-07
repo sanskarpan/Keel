@@ -95,5 +95,13 @@ policies, hold tables, or erasure receipts directly. This is a database lifecycl
 legal workflow endpoint or actor-identity provider is wired, and hosted backup/restore qualification
 remains unclaimed.
 
+Migration `0038_context_vault_replay_audit` adds a dedicated `keel_context_replay` capability and
+one-use, content-free replay audit state/events. Its begin function can read only one exact,
+unexpired context version and denies records with an active hold. Before plaintext delivery, a
+second function rechecks expiry/hold state while holding a shared lock on the record; hold placement
+and deletion take the conflicting lock. The service has no model/tool/business mutation port and
+requires a five-second caller deadline. The local capability is synthetic, the public replay route
+stays unmounted, and production identity/KMS/deployment qualification remains outstanding.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
