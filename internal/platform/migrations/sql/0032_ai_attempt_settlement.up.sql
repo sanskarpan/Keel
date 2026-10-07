@@ -59,9 +59,9 @@ BEGIN
         RAISE EXCEPTION 'AI provider attempt settlement is missing its durable plan or outcome';
     END IF;
 
-    SELECT * INTO prior FROM keel_meta.ai_provider_attempt_settlements
-     WHERE tenant_id=p_tenant AND inference_id=p_inference AND attempt_id=p_attempt
-       AND disposition='fallback_ready' FOR UPDATE;
+    SELECT * INTO prior FROM keel_meta.ai_provider_attempt_settlements s
+     WHERE s.tenant_id=p_tenant AND s.inference_id=p_inference AND s.attempt_id=p_attempt
+       AND s.disposition='fallback_ready' FOR UPDATE;
     IF FOUND THEN
         IF (prior.attempt_ordinal,prior.source_ref,prior.worker_id,prior.lease_epoch)
            IS DISTINCT FROM (observed.attempt_ordinal,p_source,p_worker,p_epoch) THEN
@@ -74,8 +74,8 @@ BEGIN
            AND plan.deadline_at>clock_timestamp() THEN
             RETURN 'fallback_ready';
         END IF;
-        SELECT * INTO terminal_prior FROM keel_meta.ai_provider_attempt_settlements
-         WHERE tenant_id=p_tenant AND inference_id=p_inference AND disposition<>'fallback_ready';
+        SELECT * INTO terminal_prior FROM keel_meta.ai_provider_attempt_settlements s
+         WHERE s.tenant_id=p_tenant AND s.inference_id=p_inference AND s.disposition<>'fallback_ready';
         IF FOUND THEN RETURN 'fallback_consumed'; END IF;
     END IF;
 
@@ -102,8 +102,8 @@ BEGIN
         budget_kind:='no_charge'; amount:=0; disposition:='settled_no_charge';
     END IF;
 
-    SELECT * INTO prior FROM keel_meta.ai_provider_attempt_settlements
-     WHERE tenant_id=p_tenant AND inference_id=p_inference AND disposition<>'fallback_ready' FOR UPDATE;
+    SELECT * INTO prior FROM keel_meta.ai_provider_attempt_settlements s
+     WHERE s.tenant_id=p_tenant AND s.inference_id=p_inference AND s.disposition<>'fallback_ready' FOR UPDATE;
     IF FOUND THEN
         IF (prior.attempt_id,prior.attempt_ordinal,prior.disposition,prior.amount_micro_usd,
             prior.source_ref,prior.worker_id,prior.lease_epoch)
