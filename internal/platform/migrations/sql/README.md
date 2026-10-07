@@ -45,8 +45,15 @@ the snapshot, but a deployment profile still needs to launch it and configure sc
 Migration `0031_ai_provider_attempt_ledger` adds immutable, content-free provider attempt plans and
 append-only outcome evidence. Queue admission can persist the plan in the same transaction as the
 K4.3 reserve and K4.4 job. Outcome recording requires the current AI worker lease owner and epoch.
-The ledger does not dispatch provider requests, retry a fallback, or settle/release budget liability;
-those remain separate qualification gates.
+The ledger does not dispatch provider requests or retry a fallback.
+
+Migration `0032_ai_attempt_settlement` adds a worker-only transaction that records an attempt outcome
+and applies terminal K4.3 budget settlement/unknown retention plus the K4.4 queue transition as one
+unit. A proven primary no-charge failure keeps the existing reservation and lease only while the
+preplanned fallback is still eligible; otherwise the reservation settles as no-charge. Immutable
+disposition receipts bind an attempt, outcome ordinal, source, worker, and epoch; a terminal receipt
+also records the settled amount. This remains a database contract: no provider adapter, transport
+dispatch, or production charge qualification is provided by the migration.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

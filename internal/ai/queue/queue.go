@@ -238,6 +238,16 @@ type Lease struct {
 	AttemptDeadline time.Time
 }
 
+type AttemptDisposition string
+
+const (
+	AttemptFallbackReady    AttemptDisposition = "fallback_ready"
+	AttemptFallbackConsumed AttemptDisposition = "fallback_consumed"
+	AttemptSettledConfirmed AttemptDisposition = "settled_confirmed"
+	AttemptSettledNoCharge AttemptDisposition = "settled_no_charge"
+	AttemptRetainedUnknown AttemptDisposition = "retained_unknown"
+)
+
 // ClaimNext performs a fair principal-level round-robin among due jobs for the
 // selected provider/model. An expired provider lease is never silently replayed:
 // it may represent an accepted billable request and remains concurrency-held
@@ -363,6 +373,33 @@ func (r *Repository) RecordAttemptOutcome(ctx context.Context, lease Lease, outc
 	}))
 }
 
+// SettleAttemptOutcome writes outcome evidence and, when terminal, applies the
+// matching K4.3 budget and K4.4 job transition in one transaction. A
+// fallback-ready primary no-charge result keeps the reserve and lease active.
+func (r *Repository) SettleAttemptOutcome(ctx context.Context, lease Lease, outcome attempt.Outcome, source string) (AttemptDisposition, error) {
+	if !validLease(lease) || outcome.Validate() != nil || !queueOutcomeSource.MatchString(source) {
+		return "", ErrQueueConflict
+	}
+	var disposition string
+	err := tenancy.WithTenantTx(ctx, r.workerDB, lease.Tenant, nil, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.settle_ai_provider_attempt(
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, string(lease.Tenant), lease.InferenceID,
+			lease.WorkerID, lease.Epoch, outcome.AttemptID, string(outcome.Acceptance), string(outcome.Charge),
+			string(outcome.Failure), outcome.ProviderOutputSeen, outcome.ClientTokenBytes, outcome.UsageMicroUSD,
+			outcome.FinishedAt.UTC().Truncate(time.Microsecond), source).Scan(&disposition)
+	})
+	if err != nil {
+		return "", mapQueueError(err)
+	}
+	result := AttemptDisposition(disposition)
+	switch result {
+	case AttemptFallbackReady, AttemptFallbackConsumed, AttemptSettledConfirmed, AttemptSettledNoCharge, AttemptRetainedUnknown:
+		return result, nil
+	default:
+		return "", ErrQueueConflict
+	}
+}
+
 // ReconcileUnknown applies an authorized K4.3 resolution and the matching queue
 // terminal transition in one transaction. Nil/zero actual means no charge.
 func (r *Repository) ReconcileUnknown(ctx context.Context, tenant tenancy.TenantID, inferenceID, actor, reason string, actual *int64, source string) error {
@@ -486,7 +523,8 @@ func mapQueueError(err error) error {
 		return ErrLeaseLost
 	case strings.Contains(strings.ToLower(err.Error()), "outcome conflicts with existing disposition"),
 		strings.Contains(strings.ToLower(err.Error()), "requires matching durable budget disposition"),
-		strings.Contains(strings.ToLower(err.Error()), "conflicting ai provider attempt"):
+		strings.Contains(strings.ToLower(err.Error()), "conflicting ai provider attempt"),
+		strings.Contains(strings.ToLower(err.Error()), "conflicting ai provider fallback disposition"):
 		return ErrQueueConflict
 	default:
 		return fmt.Errorf("AI queue transaction: %w", err)
