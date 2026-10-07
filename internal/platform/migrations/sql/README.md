@@ -71,7 +71,8 @@ Migration `0035_context_vault_expiry_erasure` adds immutable content-free erasur
 bounded `erase_expired_context_vault` database function. The dedicated `keel_context_erasure`
 capability can invoke it, but cannot read or directly delete vault rows or receipts. Each call derives
 tenant scope from the authenticated database session, deletes at most 100 expired rows, and inserts a
-SHA-256 envelope receipt in the same transaction as each deletion. Durable worker leases/retries,
+SHA-256 receipt over a versioned, length-prefixed binary envelope serialization in the same transaction
+as each deletion. Durable worker leases/retries,
 legal holds, and backup/PITR/replica/restore erasure qualification remain separate K5.4 work.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
