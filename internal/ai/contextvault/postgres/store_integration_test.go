@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,14 +20,22 @@ import (
 func TestPostgreSQLContextVaultTenantScopedImmutableAndAtomic(t *testing.T) {
 	vaultDSN := os.Getenv("KEEL_TEST_CONTEXT_VAULT_DATABASE_URL")
 	policyDSN := os.Getenv("KEEL_TEST_CONTEXT_POLICY_DATABASE_URL")
+	erasureDSN := os.Getenv("KEEL_TEST_CONTEXT_ERASURE_DATABASE_URL")
 	appDSN := os.Getenv("KEEL_TEST_DATABASE_URL")
-	if vaultDSN == "" || policyDSN == "" || appDSN == "" {
-		t.Skip("set context-vault, context-policy, and app database URLs for PostgreSQL/RLS integration coverage")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if vaultDSN == "" || policyDSN == "" || erasureDSN == "" || appDSN == "" || adminDSN == "" {
+		t.Skip("set context-vault, context-policy, context-erasure, app, and admin database URLs for PostgreSQL/RLS integration coverage")
 	}
 	vaultDB := openTestDB(t, vaultDSN)
 	policyDB := openTestDB(t, policyDSN)
+	erasureDB := openTestDB(t, erasureDSN)
 	appDB := openTestDB(t, appDSN)
+	adminDB := openTestDB(t, adminDSN)
 	store, err := NewStore(vaultDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	erasureStore, err := NewErasureStore(erasureDB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +134,14 @@ func TestPostgreSQLContextVaultTenantScopedImmutableAndAtomic(t *testing.T) {
 	if vaultErr == nil {
 		t.Fatal("context-vault role could mutate an immutable record version")
 	}
+	vaultDeleteErr := tenancy.WithTenantTx(ctx, vaultDB, tenantA, nil, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM keel_meta.context_vault_records
+			WHERE tenant_id=$1 AND record_id=$2 AND version=$3`, string(tenantA), scope.RecordID, scope.Version)
+		return err
+	})
+	if vaultDeleteErr == nil {
+		t.Fatal("context-vault role could directly delete an immutable record")
+	}
 
 	rollbackScope := testScope(string(tenantA), uuid.NewString(), 1)
 	rollbackErr := errors.New("force rollback")
@@ -156,6 +173,80 @@ func TestPostgreSQLContextVaultTenantScopedImmutableAndAtomic(t *testing.T) {
 	time.Sleep(2200 * time.Millisecond)
 	if _, err := store.Get(ctx, tenantA, expiringScope.RecordID, expiringScope.Version); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired context record error=%v, want not found", err)
+	}
+	if count, err := erasureStore.DeleteExpiredBatch(ctx, tenantB, 10); err != nil || count != 0 {
+		t.Fatalf("cross-tenant erasure count=%d err=%v, want zero", count, err)
+	}
+	if _, err := erasureStore.DeleteExpiredBatch(ctx, tenantA, maxErasureBatch+1); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unbounded erasure batch error=%v, want invalid", err)
+	}
+	directErasureReadErr := tenancy.WithTenantTx(ctx, erasureDB, tenantA, nil, func(tx *sql.Tx) error {
+		var count int
+		return tx.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.context_vault_records`).Scan(&count)
+	})
+	if directErasureReadErr == nil {
+		t.Fatal("erasure role directly read live vault records")
+	}
+	directErasureDeleteErr := tenancy.WithTenantTx(ctx, erasureDB, tenantA, nil, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM keel_meta.context_vault_records WHERE tenant_id=$1`, string(tenantA))
+		return err
+	})
+	if directErasureDeleteErr == nil {
+		t.Fatal("erasure role directly deleted vault records")
+	}
+	directReceiptReadErr := tenancy.WithTenantTx(ctx, erasureDB, tenantA, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
+		var count int
+		return tx.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.context_vault_erasure_receipts`).Scan(&count)
+	})
+	if directReceiptReadErr == nil {
+		t.Fatal("erasure role directly read tombstones")
+	}
+	databaseBatchErr := tenancy.WithTenantTx(ctx, erasureDB, tenantA, nil, func(tx *sql.Tx) error {
+		var count int
+		return tx.QueryRowContext(ctx, `SELECT keel_meta.erase_expired_context_vault($1)`, maxErasureBatch+1).Scan(&count)
+	})
+	if databaseBatchErr == nil {
+		t.Fatal("database erasure function accepted an oversized batch")
+	}
+	erasureRollbackErr := errors.New("force erasure rollback")
+	err = tenancy.WithTenantTx(ctx, erasureDB, tenantA, nil, func(tx *sql.Tx) error {
+		deleted, err := erasureStore.DeleteExpiredBatchTx(ctx, tx, 1)
+		if err != nil {
+			return err
+		}
+		if deleted != 1 {
+			return errors.New("erasure rollback test did not claim its expired record")
+		}
+		return erasureRollbackErr
+	})
+	if !errors.Is(err, erasureRollbackErr) {
+		t.Fatalf("erasure rollback cause=%v", err)
+	}
+	var receiptCount int
+	if err := adminDB.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.context_vault_erasure_receipts
+		WHERE tenant_id=$1 AND record_id=$2 AND version=$3`, string(tenantA), expiringScope.RecordID, expiringScope.Version).Scan(&receiptCount); err != nil {
+		t.Fatal(err)
+	}
+	if receiptCount != 0 {
+		t.Fatalf("rollback left %d erasure receipts", receiptCount)
+	}
+	if deleted, err := erasureStore.DeleteExpiredBatch(ctx, tenantA, 1); err != nil || deleted != 1 {
+		t.Fatalf("erase expired context record count=%d err=%v", deleted, err)
+	}
+	if deleted, err := erasureStore.DeleteExpiredBatch(ctx, tenantA, 1); err != nil || deleted != 0 {
+		t.Fatalf("erasure retry count=%d err=%v, want idempotent zero", deleted, err)
+	}
+	var purpose, digest string
+	var policyVersion int64
+	var expiry, deletedAt time.Time
+	if err := adminDB.QueryRowContext(ctx, `SELECT purpose,retention_policy_version,envelope_sha256,expires_at,deleted_at
+		FROM keel_meta.context_vault_erasure_receipts WHERE tenant_id=$1 AND record_id=$2 AND version=$3`,
+		string(tenantA), expiringScope.RecordID, expiringScope.Version).Scan(&purpose, &policyVersion, &digest, &expiry, &deletedAt); err != nil {
+		t.Fatal(err)
+	}
+	if purpose != retention.Purpose || policyVersion != 3 || len(digest) != len("sha256:")+64 || !strings.HasPrefix(digest, "sha256:") ||
+		!expiry.Before(deletedAt) {
+		t.Fatalf("invalid content-free erasure receipt: purpose=%q version=%d digest=%q expiry=%s deleted=%s", purpose, policyVersion, digest, expiry, deletedAt)
 	}
 }
 
