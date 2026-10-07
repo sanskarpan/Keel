@@ -46,6 +46,7 @@ Workers may call shared domain command libraries with a scoped database transact
 | `webhook-worker` | Endpoint-safe delivery, attempt recording, reconciliation and replay | Leased delivery claims; per-tenant/endpoint concurrency caps |
 | `billing-worker` | Subscription inbox/reconciliation, entitlement and invoice/meter observations | Own SaaS processor identity; bounded queue/provider calls; never procurement payment authority |
 | `notification-worker` | Resource-authorized in-app/email/chat intent delivery | Separate mail/chat secrets and quotas; no business approval rights |
+| `rate-limit-observer` | Read current home-region degraded-window status and expose management metrics | Separate `keel_rate_status` database identity; read-only function permission; one region per process |
 | `procurement-worker` (1.5) | Sourcing/PO/receipt/invoice/contract scheduled jobs and qualified ERP handoff | Scoped domain/connector roles; financial transitions remain transactional commands |
 
 State broadcasting is part of API instances: short polling of durable `state_updates` plus Redis notification hints wakes local subscribers. Notifications can be lost; the database sequence cursor is authoritative. API replicas do not hold a complete tenant history in RAM.
