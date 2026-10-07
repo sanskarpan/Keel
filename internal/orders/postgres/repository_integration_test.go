@@ -316,7 +316,9 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 	command := testCreate(secretCanary)
 	command.LineItems[0].Description = "DESCRIPTION-CANARY-" + nextUUID()
 	key := "outbox-atomicity-key-0001"
-	created, err := repo.Create(ctx, tenant, command, testMetadata(string(tenant), nextUUID()), key, principal)
+	metadata := testMetadata(string(tenant), nextUUID())
+	metadata.Traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	created, err := repo.Create(ctx, tenant, command, metadata, key, principal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,6 +345,9 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventID := eventsInStream[0].Metadata.EventID
+	if eventsInStream[0].Metadata.Traceparent != metadata.Traceparent {
+		t.Fatalf("protected event history traceparent=%q, want %q", eventsInStream[0].Metadata.Traceparent, metadata.Traceparent)
+	}
 	if err := admin.QueryRowContext(ctx, `SELECT safe_envelope FROM keel_meta.event_outbox WHERE tenant_id=$1 AND event_id=$2`, string(tenant), eventID).Scan(&envelopeRaw); err != nil {
 		t.Fatal(err)
 	}
@@ -351,6 +356,9 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 	}
 	if strings.Contains(string(envelopeRaw), secretCanary) || strings.Contains(string(envelopeRaw), command.LineItems[0].Description) || strings.Contains(string(stateRaw), secretCanary) || strings.Contains(string(stateRaw), command.LineItems[0].Description) {
 		t.Fatal("safe outbox/state-feed payload leaked private order fields")
+	}
+	if strings.Contains(string(envelopeRaw), "traceparent") || strings.Contains(string(stateRaw), "traceparent") {
+		t.Fatal("trace context escaped protected event history into public outbox/state-feed payloads")
 	}
 	var envelopeFields, stateFields map[string]json.RawMessage
 	if err := json.Unmarshal(envelopeRaw, &envelopeFields); err != nil {
