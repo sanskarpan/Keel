@@ -115,6 +115,18 @@ func (m *DegradedMetrics) recordWindowStatusRefreshError() {
 	m.mu.Unlock()
 }
 
+// WindowStatusObserved reports whether a successful database-backed snapshot
+// is available for readiness checks. It does not imply that the snapshot is
+// fresh; the exported database timestamp is the staleness signal.
+func (m *DegradedMetrics) WindowStatusObserved() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.windowStatus != nil
+}
+
 func writeDegradedWindowMetrics(b *strings.Builder, status *DegradedWindowStatus) {
 	b.WriteString("# HELP keel_rate_limit_degraded_window_status_observed Whether a database-backed window status snapshot has been observed.\n")
 	b.WriteString("# TYPE keel_rate_limit_degraded_window_status_observed gauge\n")
