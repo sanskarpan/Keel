@@ -95,10 +95,8 @@ func Encrypt(ctx context.Context, wrapper KeyWrapper, keyID string, scope Scope,
 
 // Decrypt authenticates the caller's requested scope before returning plaintext.
 func Decrypt(ctx context.Context, wrapper KeyWrapper, scope Scope, envelope Envelope) ([]byte, error) {
-	aad, err := validateScope(scope, envelope.KeyID)
-	if err != nil || wrapper == nil || ctx == nil || envelope.Algorithm != Algorithm ||
-		len(envelope.WrappedDEK) == 0 || len(envelope.WrappedDEK) > maxWrappedKeyBytes ||
-		len(envelope.Nonce) != 12 || len(envelope.Ciphertext) < 16 || len(envelope.Ciphertext) > MaxPlaintextBytes+16 {
+	aad, err := validateEnvelope(scope, envelope)
+	if err != nil || wrapper == nil || ctx == nil {
 		return nil, ErrInvalidInput
 	}
 	if err := ctx.Err(); err != nil {
@@ -123,6 +121,23 @@ func Decrypt(ctx context.Context, wrapper KeyWrapper, scope Scope, envelope Enve
 		return nil, ErrAuthentication
 	}
 	return plaintext, nil
+}
+
+// ValidateEnvelope checks the bounded ciphertext shape and scope binding without unwrapping
+// the data key. Storage adapters use it before persisting an envelope.
+func ValidateEnvelope(scope Scope, envelope Envelope) error {
+	_, err := validateEnvelope(scope, envelope)
+	return err
+}
+
+func validateEnvelope(scope Scope, envelope Envelope) ([]byte, error) {
+	aad, err := validateScope(scope, envelope.KeyID)
+	if err != nil || envelope.Algorithm != Algorithm || len(envelope.WrappedDEK) == 0 ||
+		len(envelope.WrappedDEK) > maxWrappedKeyBytes || len(envelope.Nonce) != 12 ||
+		len(envelope.Ciphertext) < 16 || len(envelope.Ciphertext) > MaxPlaintextBytes+16 {
+		return nil, ErrInvalidInput
+	}
+	return aad, nil
 }
 
 func validateScope(scope Scope, keyID string) ([]byte, error) {
