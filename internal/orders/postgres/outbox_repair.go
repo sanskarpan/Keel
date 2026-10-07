@@ -13,6 +13,7 @@ import (
 	"github.com/sanskarpan/keel/internal/orders"
 	"github.com/sanskarpan/keel/internal/orders/outbox"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
+	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
 
 const maxOutboxRepairHistory = 10_000
@@ -25,6 +26,7 @@ type repairEnvelope struct {
 	AggregateVersion uint64           `json:"aggregate_version"`
 	EventType        orders.EventType `json:"event_type"`
 	OccurredAt       time.Time        `json:"occurred_at"`
+	Traceparent      string           `json:"traceparent,omitempty"`
 }
 
 func (r *Repository) ListBlocked(ctx context.Context, tenant tenancy.TenantID, aggregateID string) ([]outbox.BlockedEvent, error) {
@@ -94,7 +96,7 @@ func (r *Repository) RepairBlocked(ctx context.Context, tenant tenancy.TenantID,
 			indexedAggregateID != aggregateID || indexedEventType != eventType || claimOwner.Valid || leaseExpires.Valid {
 			return outbox.ErrRepairStale
 		}
-		if schemaVersion != 1 {
+		if schemaVersion != 1 && schemaVersion != 2 {
 			return fmt.Errorf("%w: unsupported canonical outbox schema", ErrCorruptState)
 		}
 		if err := validateRepairStream(tenant, aggregateID, request.ExpectedVersion, eventID, eventType,
@@ -204,7 +206,16 @@ func validateRepairStream(tenant tenancy.TenantID, aggregateID string, version i
 		int64(event.Version) != version || string(event.Type) != eventType || !event.Metadata.OccurredAt.Equal(occurredAt) {
 		return fmt.Errorf("%w: blocked source event does not match immutable event identity", ErrCorruptState)
 	}
-	expectedBytes, err := json.Marshal(repairEnvelope{1, eventID, string(tenant), aggregateID, event.Version, event.Type, event.Metadata.OccurredAt})
+	schemaVersion := 1
+	if event.Metadata.Traceparent != "" {
+		if _, ok := tracecontext.Parse(event.Metadata.Traceparent); !ok {
+			return fmt.Errorf("%w: protected event trace context is invalid", ErrCorruptState)
+		}
+		schemaVersion = 2
+	}
+	expectedBytes, err := json.Marshal(repairEnvelope{SchemaVersion: schemaVersion, EventID: eventID, TenantID: string(tenant),
+		AggregateID: aggregateID, AggregateVersion: event.Version, EventType: event.Type, OccurredAt: event.Metadata.OccurredAt,
+		Traceparent: event.Metadata.Traceparent})
 	if err != nil {
 		return err
 	}
@@ -219,7 +230,8 @@ func validateRepairStream(tenant tenancy.TenantID, aggregateID string, version i
 	}
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) || actual.SchemaVersion != expected.SchemaVersion ||
 		actual.EventID != expected.EventID || actual.TenantID != expected.TenantID || actual.AggregateID != expected.AggregateID ||
-		actual.AggregateVersion != expected.AggregateVersion || actual.EventType != expected.EventType || !actual.OccurredAt.Equal(expected.OccurredAt) {
+		actual.AggregateVersion != expected.AggregateVersion || actual.EventType != expected.EventType || !actual.OccurredAt.Equal(expected.OccurredAt) ||
+		actual.Traceparent != expected.Traceparent {
 		return fmt.Errorf("%w: blocked safe envelope does not match canonical event", ErrCorruptState)
 	}
 	return nil
