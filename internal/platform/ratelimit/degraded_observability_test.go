@@ -141,6 +141,17 @@ func TestDegradedWindowStatusObservedReadinessSignal(t *testing.T) {
 	}
 }
 
+func TestDegradedWindowStatusRefreshAgeMetric(t *testing.T) {
+	metrics := NewDegradedMetrics()
+	if got := metrics.PrometheusMetrics(); !strings.Contains(got, "keel_rate_limit_degraded_window_status_refresh_age_seconds -1\n") {
+		t.Fatalf("missing no-snapshot refresh age sentinel: %s", got)
+	}
+	metrics.setWindowStatus(DegradedWindowStatus{ObservedAt: time.Now().UTC()})
+	if got := metrics.PrometheusMetrics(); !strings.Contains(got, "keel_rate_limit_degraded_window_status_refresh_age_seconds 0.") {
+		t.Fatalf("missing refresh age gauge after a successful snapshot: %s", got)
+	}
+}
+
 func TestDegradedWindowStatusRefreshRejectsInvalidConfiguration(t *testing.T) {
 	for name, args := range map[string]struct {
 		ctx          context.Context

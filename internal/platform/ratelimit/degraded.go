@@ -150,6 +150,7 @@ func (m *DegradedMetrics) PrometheusMetrics() string {
 		primarySamples[outcome] = sample
 	}
 	var windowStatus *DegradedWindowStatus
+	windowStatusRefreshedAt := m.windowStatusRefreshedAt
 	if m.windowStatus != nil {
 		status := *m.windowStatus
 		if m.windowStatus.LastRecoveredAt != nil {
@@ -160,6 +161,13 @@ func (m *DegradedMetrics) PrometheusMetrics() string {
 	}
 	windowStatusRefreshErrors := m.windowStatusRefreshErrors
 	m.mu.Unlock()
+	windowStatusRefreshAgeSeconds := -1.0
+	if windowStatus != nil {
+		age := time.Since(windowStatusRefreshedAt).Seconds()
+		if age >= 0 {
+			windowStatusRefreshAgeSeconds = age
+		}
+	}
 	outcomes := make([]string, 0, len(samples))
 	for outcome := range samples {
 		outcomes = append(outcomes, outcome)
@@ -195,7 +203,7 @@ func (m *DegradedMetrics) PrometheusMetrics() string {
 		fmt.Fprintf(&b, "keel_rate_limit_primary_admission_duration_seconds_sum{result=%q} %.6f\n", outcome, sample.duration.Seconds())
 		fmt.Fprintf(&b, "keel_rate_limit_primary_admission_duration_seconds_count{result=%q} %d\n", outcome, sample.count)
 	}
-	writeDegradedWindowMetrics(&b, windowStatus)
+	writeDegradedWindowMetrics(&b, windowStatus, windowStatusRefreshAgeSeconds)
 	b.WriteString("# HELP keel_rate_limit_degraded_window_status_refresh_errors_total Failed refreshes of the protected degraded-window status snapshot.\n")
 	b.WriteString("# TYPE keel_rate_limit_degraded_window_status_refresh_errors_total counter\n")
 	fmt.Fprintf(&b, "keel_rate_limit_degraded_window_status_refresh_errors_total %d\n", windowStatusRefreshErrors)

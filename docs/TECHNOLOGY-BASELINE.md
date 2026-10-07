@@ -12,6 +12,7 @@
 | Kafka | `apache/kafka:4.3.1`, OCI index `sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | Apache Kafka release and official container. Single combined KRaft broker/controller only. No managed-service compatibility asserted. |
 | Redis | `redis:8.2.3`, OCI index `sha256:0908d9af26bf9b985e984a40a5eb82eed229b07a3317eee6843832c3cc3a9619` | Official Docker image and immutable manifest. Local cache/rate-limit development only. |
 | Temporal | `temporalio/auto-setup:1.29.7`, OCI index `sha256:f14912b699cf73015ad5c4fc18d522d4b014db90e794039214dfb7c022c2644f` | Official local auto-setup image. 1.29.7 is not the current Temporal server release; chosen to match an available, documented local bootstrap image. Not Temporal Cloud or production compatibility evidence. |
+| Prometheus | `prom/prometheus:v3.13.4`, OCI index `sha256:87861b8cf91579109319ebc300f3f1060e6da9c05d6ae8ad15a20c879e84e32e` | Optional Linux Docker Engine local monitoring profile for the rate-limit observer. Its two-hour TSDB uses bounded tmpfs; host networking scrapes the observer's loopback endpoint, while the UI binds to loopback. No Alertmanager, notification delivery, hosted monitoring, or production qualification. Docker registry manifest and upstream release checksums verified 2026-10-07 UTC. |
 | Temporal Go SDK | `go.temporal.io/sdk v1.49.0`, `go.temporal.io/api v1.63.5` | Version-pinned SDK/API pair validated against the pinned Temporal 1.29.7 local service for signal-with-start, duplicate signal delivery and worker restart/replay. No managed Temporal compatibility claim. |
 | Malware scan contract | `clamav/clamav:1.5.4`, OCI index `sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0` | Official ClamAV image with a preloaded signature database. Contract CI runs it without egress and verifies clean/EICAR verdicts. This does not qualify signature freshness, update operations, production capacity, or an SLA. |
 | Document extraction contract | `apache/tika:3.3.1.0-full`, OCI index `sha256:d8e6ed96260ad89307a93195a1b856102987a818ac648502f8efbaf313d32470` | Official Apache Tika full image. Contract CI runs with no egress, read-only root, bounded tmpfs, CPU, memory and PID limits. This is parser contract evidence, not production capacity or high-availability qualification. |
@@ -24,7 +25,7 @@ Every image in `deploy/compose/compose.yaml` and `scripts/test-intake-sandbox.sh
 
 ## Provider capability decision
 
-The only enabled profile is `local-synthetic`. PostgreSQL/pgvector, Kafka, Redis and Temporal run as single local containers on an internal-only Compose network. Host ports bind to loopback. There is no externally hosted pilot profile, production region, backup/restore commitment, or customer-data path. AWS MSK's published supported-version list checked for this decision did not list Kafka 4.3.1; therefore MSK compatibility is explicitly unqualified. No other managed service is selected by inference from a compatible local image.
+The enabled product profile is `local-synthetic`. PostgreSQL/pgvector, Kafka, Redis and Temporal run as single local containers on an internal-only Compose network. Host ports bind to loopback. An optional Linux-only Prometheus profile uses host networking to scrape the observer on loopback and binds its UI to loopback; it contains no customer data or remote alert delivery. There is no externally hosted pilot profile, production region, backup/restore commitment, or customer-data path. AWS MSK's published supported-version list checked for this decision did not list Kafka 4.3.1; therefore MSK compatibility is explicitly unqualified. No other managed service is selected by inference from a compatible local image.
 
 | Open research question | Local profile disposition | Accountable workstream | Evidence/exit condition |
 |---|---|---|---|
@@ -43,6 +44,7 @@ Workstream accountability is not an assigned person. No customer/pilot owner or 
 - Kafka release and Docker docs: <https://kafka.apache.org/community/downloads/> and <https://hub.docker.com/r/apache/kafka>
 - Redis tags: <https://hub.docker.com/_/redis/tags>
 - Temporal Docker builds and auto-setup: <https://github.com/temporalio/docker-builds/blob/main/docker/auto-setup.sh> and <https://github.com/temporalio/docker-builds/blob/main/docker-compose.yml>
+- Prometheus release artifacts and checksums: <https://github.com/prometheus/prometheus/releases/tag/v3.13.4>; Docker image manifest: <https://hub.docker.com/layers/prom/prometheus/v3.13.4/images/sha256-87861b8cf91579109319ebc300f3f1060e6da9c05d6ae8ad15a20c879e84e32e>
 - ClamAV official Docker image behavior and preloaded-database guidance: <https://github.com/Cisco-Talos/clamav-docker/blob/main/clamav/README-alpine.md>
 - Apache Tika Server: <https://cwiki.apache.org/confluence/display/TIKA/TikaServer>
 - ClamAV image manifest: <https://hub.docker.com/v2/repositories/clamav/clamav/tags/1.5.4>

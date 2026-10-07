@@ -1,0 +1,41 @@
+groups:
+  - name: keel.rate-limit-observer
+    rules:
+      - alert: KeelRateLimitObserverDown
+        expr: up{job="keel-rate-limit-observer"} == 0
+        for: 15s
+        labels:
+          severity: warning
+          service: keel
+        annotations:
+          summary: Keel rate-limit observer is not reachable
+          description: The local Prometheus scrape target has been unavailable for 15 seconds. Check the observer process and its management endpoint.
+
+      - alert: KeelRateLimitStatusSnapshotMissing
+        expr: keel_rate_limit_degraded_window_status_observed == 0
+        for: 10s
+        labels:
+          severity: warning
+          service: keel
+        annotations:
+          summary: Keel rate-limit observer has no successful status snapshot
+          description: The observer has not completed an authorized read of the home-region degraded-window status function.
+
+      - alert: KeelRateLimitStatusSnapshotStale
+        expr: keel_rate_limit_degraded_window_status_refresh_age_seconds > 15
+        for: 5s
+        labels:
+          severity: warning
+          service: keel
+        annotations:
+          summary: Keel rate-limit status snapshot is stale
+          description: The local observer has not refreshed its status snapshot within the default three refresh intervals.
+
+      - alert: KeelRateLimitStatusRefreshFailed
+        expr: increase(keel_rate_limit_degraded_window_status_refresh_errors_total[5m]) > 0
+        labels:
+          severity: warning
+          service: keel
+        annotations:
+          summary: Keel rate-limit status refresh failed
+          description: The observer could not refresh its database-backed home-region snapshot. Check the read-only role credential and database reachability.
