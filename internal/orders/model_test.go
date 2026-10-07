@@ -90,6 +90,27 @@ func TestOrderLifecycleReplaysToTheCommandSnapshot(t *testing.T) {
 	}
 }
 
+func TestEventMetadataUsesStrictTraceparentValidation(t *testing.T) {
+	valid := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	metadata := testMetadata(1, "principal:requester")
+	metadata.Traceparent = valid
+	if normalized, err := validateMetadata(metadata); err != nil || normalized.Traceparent != valid {
+		t.Fatalf("valid traceparent metadata=%+v err=%v", normalized, err)
+	}
+	for _, invalid := range []string{
+		"ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+		"00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0g",
+	} {
+		metadata.Traceparent = invalid
+		if _, err := validateMetadata(metadata); !errors.Is(err, ErrInvalidCommand) {
+			t.Errorf("invalid traceparent %q was accepted: err=%v", invalid, err)
+		}
+	}
+}
+
 func TestOrderCancellationAndRejectedDecision(t *testing.T) {
 	for _, cancelAt := range []Status{Draft, Submitted, Verifying} {
 		t.Run(string(cancelAt), func(t *testing.T) {
