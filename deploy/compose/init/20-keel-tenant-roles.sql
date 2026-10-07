@@ -50,6 +50,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_rate_control') THEN
         CREATE ROLE keel_local_rate_control LOGIN PASSWORD 'keel-rate-control-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_rate_status') THEN
+        CREATE ROLE keel_local_rate_status LOGIN PASSWORD 'keel-rate-status-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_ai_worker') THEN
         CREATE ROLE keel_local_ai_worker LOGIN PASSWORD 'keel-ai-worker-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
     END IF;
