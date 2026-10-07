@@ -53,7 +53,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 
 ## K5 — Live operations and correlated diagnostics
 
-- [ ] K5.1 Build multiplexed SSE state/token transport, durable cursors and transient token sequencing.
+- [ ] K5.1 Build multiplexed SSE state/token transport, durable cursors and transient token sequencing. Initial order-authorized durable state replay is tracked by issue #270 and documented in `docs/K5.1-STATE-STREAM.md`; token delivery and production runtime wiring remain open.
 - [ ] K5.2 Add per-client queue/write-timeout limits, reconnect snapshots and interrupted-result handling.
 - [ ] K5.3 Trace HTTP/query/event/workflow/model/delivery boundaries with links and safe attributes.
 - [ ] K5.4 Add encrypted context-vault retention, authorized read-only replay and Langfuse adapter.
