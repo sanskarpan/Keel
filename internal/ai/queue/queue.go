@@ -523,7 +523,8 @@ func mapQueueError(err error) error {
 		return ErrLeaseLost
 	case strings.Contains(strings.ToLower(err.Error()), "outcome conflicts with existing disposition"),
 		strings.Contains(strings.ToLower(err.Error()), "requires matching durable budget disposition"),
-		strings.Contains(strings.ToLower(err.Error()), "conflicting ai provider attempt"):
+		strings.Contains(strings.ToLower(err.Error()), "conflicting ai provider attempt"),
+		strings.Contains(strings.ToLower(err.Error()), "conflicting ai provider fallback disposition"):
 		return ErrQueueConflict
 	default:
 		return fmt.Errorf("AI queue transaction: %w", err)
