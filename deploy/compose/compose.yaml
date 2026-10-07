@@ -101,6 +101,29 @@ services:
     networks: [keel-local]
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:v3.13.4@sha256:87861b8cf91579109319ebc300f3f1060e6da9c05d6ae8ad15a20c879e84e32e
+    profiles: [monitoring]
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2h
+      - --web.listen-address=127.0.0.1:19090
+    volumes:
+      - ../monitoring/prometheus/keel-local-prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/prometheus/keel-rate-limit-observer-alerts.yaml:/etc/prometheus/keel-rate-limit-observer-alerts.yaml:ro
+    read_only: true
+    tmpfs:
+      - /prometheus:size=128m,mode=1777
+      - /tmp:size=16m,mode=1777
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    restart: unless-stopped
+
 networks:
   keel-local:
     name: keel-local
