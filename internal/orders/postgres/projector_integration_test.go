@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"github.com/sanskarpan/keel/internal/orders/projector"
 	"github.com/sanskarpan/keel/internal/platform/kafkarelay"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
+	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 	kafka "github.com/segmentio/kafka-go"
 )
 
@@ -41,6 +43,7 @@ func TestPostgreSQLProjectorDefersReplaysAndDeduplicates(t *testing.T) {
 	}
 	metadata := testMetadata(string(tenant), created.Snapshot.OrderID)
 	metadata.ActorRef = "principal:requester-1"
+	ctx, _ = testTraceContext(t, ctx)
 	if _, err := appRepo.Submit(ctx, tenant, created.Snapshot.OrderID, 1, testSubmit(), metadata, "projector-submit-"+nextUUID(), "principal:requester-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -445,6 +448,106 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	}
 }
 
+func TestPostgreSQLKafkaConsumerQuarantinesInvalidTraceMetadata(t *testing.T) {
+	_, tenant, appRepo := repositoryTestDB(t)
+	projectorDSN := os.Getenv("KEEL_TEST_PROJECTOR_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	brokers := strings.Split(os.Getenv("KEEL_TEST_KAFKA_BROKERS"), ",")
+	if projectorDSN == "" || adminDSN == "" || strings.TrimSpace(brokers[0]) == "" {
+		t.Skip("set projector, test-admin, and Kafka endpoints for trace quarantine integration coverage")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	ctx, _ = testTraceContext(t, ctx)
+	created, err := appRepo.Create(ctx, tenant, testCreate("trace-quarantine-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "trace-quarantine-"+nextUUID(), "principal:requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := appRepo.Events(ctx, tenant, created.Snapshot.OrderID)
+	if err != nil || len(events) != 1 || events[0].Metadata.Traceparent == "" {
+		t.Fatalf("trusted source event=%+v err=%v", events, err)
+	}
+	validRaw, err := json.Marshal(projector.Envelope{SchemaVersion: 2, EventID: events[0].Metadata.EventID, TenantID: string(tenant),
+		AggregateID: created.Snapshot.OrderID, AggregateVersion: int64(events[0].Version), EventType: events[0].Type,
+		OccurredAt: events[0].Metadata.OccurredAt, Traceparent: events[0].Metadata.Traceparent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validParent := events[0].Metadata.Traceparent
+	_, parsed := tracecontext.Parse(validParent)
+	if !parsed {
+		t.Fatal("persisted traceparent failed strict validation")
+	}
+	malformedRaw := bytes.Replace(validRaw, []byte(validParent), []byte("bad"), 1)
+	baseHeaders := []kafka.Header{
+		{Key: "event_id", Value: []byte(events[0].Metadata.EventID)},
+		{Key: "schema_version", Value: []byte("2")},
+		{Key: "aggregate_version", Value: []byte("1")},
+	}
+	wrongParent := "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+	messages := []kafka.Message{
+		{Key: []byte(string(tenant) + "/" + created.Snapshot.OrderID), Value: validRaw, Headers: append(append([]kafka.Header(nil), baseHeaders...), kafka.Header{Key: "traceparent", Value: []byte(wrongParent)})},
+		{Key: []byte(string(tenant) + "/" + created.Snapshot.OrderID), Value: validRaw, Headers: append(append(append([]kafka.Header(nil), baseHeaders...), kafka.Header{Key: "traceparent", Value: []byte(validParent)}), kafka.Header{Key: "traceparent", Value: []byte(validParent)})},
+		{Key: []byte(string(tenant) + "/" + created.Snapshot.OrderID), Value: malformedRaw, Headers: append(append([]kafka.Header(nil), baseHeaders...), kafka.Header{Key: "traceparent", Value: []byte("bad")})},
+	}
+	writer := &kafka.Writer{Addr: kafka.TCP(brokers...), Topic: k17ConsumerTopic, Balancer: &kafka.Hash{}, MaxAttempts: 1, RequiredAcks: kafka.RequireAll, Async: false, AllowAutoTopicCreation: false}
+	if err := writer.WriteMessages(ctx, messages...); err != nil {
+		_ = writer.Close()
+		t.Fatalf("publish malformed trace test records: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	projectorDB := integrationDB(t, projectorDSN, 3)
+	adminDB := integrationDB(t, adminDSN, 2)
+	projectorRepo, err := NewRepository(projectorDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor, err := projector.New(projectorRepo, projector.DefaultConsumerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := &targetDeliveryProcessor{RecordProcessor: processor, eventID: events[0].Metadata.EventID}
+	reader := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: k17ConsumerTopic, GroupID: "keel-trace-invalid-" + nextUUID(),
+		MinBytes: 1, MaxBytes: 1 << 20, MaxWait: 100 * time.Millisecond, CommitInterval: 0, StartOffset: kafka.FirstOffset})
+	consumer, err := kafkarelay.NewConsumerWithReader(reader, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Close()
+	for attempts := 0; attempts < 500 && len(target.results) < len(messages); attempts++ {
+		if _, err := consumer.RunOnce(ctx); err != nil {
+			t.Fatalf("consume trace quarantine record: %v", err)
+		}
+	}
+	if len(target.results) != len(messages) {
+		t.Fatalf("consumed target records=%d, want %d", len(target.results), len(messages))
+	}
+	for i, disposition := range target.results {
+		if disposition != projector.Quarantined {
+			t.Fatalf("record %d disposition=%q, want quarantined", i, disposition)
+		}
+	}
+	for _, coordinate := range target.coords {
+		var count int
+		if err := adminDB.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.transport_quarantine WHERE source_topic=$1 AND partition_id=$2 AND message_offset=$3 AND reason_code='invalid_record'`,
+			k17ConsumerTopic, coordinate.partition, coordinate.offset).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("transport quarantine rows at %d/%d=%d, want one", coordinate.partition, coordinate.offset, count)
+		}
+	}
+	var inboxRows int
+	if err := adminDB.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.event_inbox WHERE tenant_id=$1 AND event_id=$2`, string(tenant), events[0].Metadata.EventID).Scan(&inboxRows); err != nil {
+		t.Fatal(err)
+	}
+	if inboxRows != 0 {
+		t.Fatalf("invalid trace records created %d inbox rows before quarantine", inboxRows)
+	}
+}
+
 func assertProjectionVersion(t *testing.T, db *sql.DB, tenant, orderID string, wantVersion int, wantStatus string) {
 	t.Helper()
 	version, status := readProjectionVersion(t, db, tenant, orderID)
@@ -475,10 +578,15 @@ func projectionRecord(t *testing.T, raw []byte, offset int64) projector.Record {
 	return projector.Record{
 		Topic: "keel.test.orders.v1", Partition: 0, Offset: offset,
 		Key: []byte(envelope.TenantID + "/" + envelope.AggregateID), Value: raw,
-		Headers: []projector.Header{
+		Headers: append([]projector.Header{
 			{Key: "event_id", Value: []byte(envelope.EventID)},
-			{Key: "schema_version", Value: []byte("1")},
+			{Key: "schema_version", Value: []byte(strconv.Itoa(envelope.SchemaVersion))},
 			{Key: "aggregate_version", Value: []byte(strconv.FormatInt(envelope.AggregateVersion, 10))},
-		},
+		}, func() []projector.Header {
+			if envelope.Traceparent == "" {
+				return nil
+			}
+			return []projector.Header{{Key: "traceparent", Value: []byte(envelope.Traceparent)}}
+		}()...),
 	}
 }
