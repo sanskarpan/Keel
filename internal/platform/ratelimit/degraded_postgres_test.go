@@ -1278,6 +1278,118 @@ func TestPostgresFallbackBoundsAfterExecutedRedisAdmissionReplyIsLost(t *testing
 	}
 }
 
+func TestCoordinatorBoundsCrossAuthorityRetryAfterRedisRecovery(t *testing.T) {
+	appDB, _, rateControl := openDegradedTestDatabases(t)
+	redisURL := strings.TrimSpace(os.Getenv("KEEL_TEST_REDIS_URL"))
+	if redisURL == "" {
+		t.Skip("set KEEL_TEST_REDIS_URL to qualify PostgreSQL fallback recovery against Redis")
+	}
+	options, err := redis.ParseURL(redisURL)
+	if err != nil {
+		t.Fatal("parse Redis integration URL")
+	}
+	if options.TLSConfig != nil {
+		t.Skip("TCP-level RESP fault proxy requires a plaintext disposable Redis fixture")
+	}
+	options.MaxRetries = -1
+	directClient := redis.NewClient(options)
+	t.Cleanup(func() { _ = directClient.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := directClient.Ping(ctx).Err(); err != nil {
+		t.Fatalf("connect to disposable Redis service: %v", err)
+	}
+
+	region := "test-" + uuid.NewString()[:8]
+	tenant, _ := tenancy.ParseTenantID(uuid.NewString())
+	route := "safe.read"
+	fleet := FleetPolicy{Region: region, Capacity: 1, RefillPerSec: 1, Enabled: true}
+	fleet.Digest = FleetPolicyDigest(fleet)
+	policy := TenantPolicy{TenantID: string(tenant), Region: region, RouteID: route,
+		Capacity: 1, RefillPerSec: 1, Enabled: true}
+	policy.Digest = TenantPolicyDigest(policy)
+	control, err := NewPolicyRepository(rateControl, allowRatePolicyChanges{})
+	if err != nil {
+		t.Fatal("create rate policy repository")
+	}
+	if err := control.SetFleetPolicy(ctx, fleet); err != nil {
+		t.Fatalf("set fleet policy: %v", err)
+	}
+	if err := control.SetTenantPolicy(ctx, policy); err != nil {
+		t.Fatalf("set tenant policy: %v", err)
+	}
+
+	redisConfig := Config{Region: region, HomeRegion: region, KeyID: "recovery-replay-test",
+		Secret: []byte("recovery-cross-authority-test-secret-012345"), ReplayTTL: time.Minute}
+	directLimiter, err := New(directClient, redisConfig)
+	if err != nil {
+		t.Fatal("create recovered Redis limiter")
+	}
+	// Prime the script cache so the proxy can intercept the EVALSHA request.
+	warmRequest := Request{TenantID: uuid.NewString(), RouteID: route, RequestID: uuid.NewString(),
+		Policy: Policy{Digest: strings.Repeat("a", 64), CapacityUnits: 1, RefillUnitsPerSecond: 1, CostUnits: 1}}
+	if decision, err := directLimiter.Allow(ctx, warmRequest); err != nil || !decision.Allowed {
+		t.Fatalf("warm Redis Lua script cache = %+v, err=%v", decision, err)
+	}
+	proxy := newRedisEVALSHADropRequestProxy(t, options.Addr)
+	proxyOptions := *options
+	proxyOptions.Addr = proxy.addr
+	proxyOptions.MaxRetries = -1
+	proxyClient := redis.NewClient(&proxyOptions)
+	t.Cleanup(func() { _ = proxyClient.Close() })
+	if err := proxyClient.Ping(ctx).Err(); err != nil {
+		t.Fatalf("connect through Redis TCP proxy: %v", err)
+	}
+	proxyLimiter, err := New(proxyClient, redisConfig)
+	if err != nil {
+		t.Fatal("create fault-proxied Redis limiter")
+	}
+	degraded, err := NewDegradedLimiter(appDB, DegradedConfig{Region: region, HomeRegion: region, Enabled: true})
+	if err != nil {
+		t.Fatal("create PostgreSQL degraded limiter")
+	}
+	request := Request{TenantID: string(tenant), RouteID: route, RequestID: uuid.NewString(),
+		Policy: Policy{Digest: policy.Digest, CapacityUnits: policy.Capacity,
+			RefillUnitsPerSecond: policy.RefillPerSec, CostUnits: 1}}
+
+	outageCoordinator, err := NewCoordinator(proxyLimiter, degraded)
+	if err != nil {
+		t.Fatal("create outage coordinator")
+	}
+	fallbackDecision, err := outageCoordinator.Allow(ctx, request)
+	if err != nil || !fallbackDecision.Allowed || fallbackDecision.Replayed {
+		t.Fatalf("PostgreSQL did not admit the request after Redis dropped it before execution: %+v, err=%v", fallbackDecision, err)
+	}
+	select {
+	case <-proxy.requestDropped:
+	case <-ctx.Done():
+		t.Fatal("Redis proxy did not drop the request before execution")
+	}
+
+	recoveredCoordinator, err := NewCoordinator(directLimiter, degraded)
+	if err != nil {
+		t.Fatal("create recovered coordinator")
+	}
+	recoveredDecision, err := recoveredCoordinator.Allow(ctx, request)
+	if err != nil || !recoveredDecision.Allowed || recoveredDecision.Replayed {
+		t.Fatalf("Redis recovery did not expose the separately bounded cross-authority admission: %+v, err=%v", recoveredDecision, err)
+	}
+	distinct := request
+	distinct.RequestID = uuid.NewString()
+	redisDenied, err := directLimiter.Allow(ctx, distinct)
+	if err != nil || redisDenied.Allowed {
+		t.Fatalf("Redis admitted a distinct request beyond its one-token capacity: %+v, err=%v", redisDenied, err)
+	}
+	unavailableCoordinator, err := NewCoordinator(stubPrimaryAdmission{err: ErrUnavailable}, degraded)
+	if err != nil {
+		t.Fatal("create unavailable coordinator")
+	}
+	postgresDenied, err := unavailableCoordinator.Allow(ctx, distinct)
+	if err != nil || postgresDenied.Allowed {
+		t.Fatalf("PostgreSQL admitted a distinct request beyond its one-token capacity: %+v, err=%v", postgresDenied, err)
+	}
+}
+
 func TestCoordinatorFailsClosedWhenAmbiguousRedisAdmissionCannotReachPostgres(t *testing.T) {
 	_, _, rateControl := openDegradedTestDatabases(t)
 	redisURL := os.Getenv("KEEL_TEST_REDIS_URL")
