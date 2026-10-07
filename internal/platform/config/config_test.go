@@ -33,6 +33,21 @@ func TestLoadFromValidConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadFromRateLimitObserverRole(t *testing.T) {
+	cfg, err := LoadFrom(func(key string) string {
+		if key == "KEEL_ROLE" {
+			return "rate-limit-observer"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Role != RoleRateLimitObserver {
+		t.Fatalf("unexpected role: %q", cfg.Role)
+	}
+}
+
 func TestLoadFromRejectsInvalidValuesWithoutEchoingThem(t *testing.T) {
 	cases := []struct {
 		name   string
