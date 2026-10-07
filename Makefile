@@ -1,4 +1,4 @@
-.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
+.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-rate-limit-observer local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
 
 COMPOSE_FILE := deploy/compose/compose.yaml
 
@@ -71,6 +71,16 @@ local-migrate: local-up local-roles
 	docker compose -f $(COMPOSE_FILE) exec -T postgres env \
 	  KEEL_MIGRATION_DATABASE_URL='postgres://keel_local_migrator:keel-migrate-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	  /tmp/keel-migrate migrate
+
+local-rate-limit-observer: local-migrate
+	KEEL_ROLE=rate-limit-observer \
+	KEEL_ENVIRONMENT=development \
+	KEEL_LISTEN_ADDRESS=127.0.0.1:18081 \
+	KEEL_RATE_STATUS_DATABASE_URL='postgres://keel_local_rate_status:keel-rate-status-local-only@127.0.0.1:54329/postgres?sslmode=disable' \
+	KEEL_RATE_LIMIT_HOME_REGION=local-dev \
+	KEEL_RATE_LIMIT_STATUS_REFRESH_INTERVAL=5s \
+	KEEL_RATE_LIMIT_STATUS_QUERY_TIMEOUT=1s \
+	GOTOOLCHAIN=local go run ./cmd/keel
 
 local-orders-test: local-migrate
 	@set -eu; \
