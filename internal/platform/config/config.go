@@ -95,7 +95,7 @@ func valueOrDefault(value, fallback string) string {
 
 func supportedRole(role Role) bool {
 	switch role {
-	case RoleAPI, RoleRelay, RoleProjector, RoleAIExecutor, RoleTemporalWorker, RoleWebhookWorker, RoleBillingWorker, RoleNotificationWorker:
+	case RoleAPI, RoleRelay, RoleProjector, RoleAIExecutor, RoleTemporalWorker, RoleWebhookWorker, RoleBillingWorker, RoleNotificationWorker, RoleRateLimitObserver:
 		return true
 	default:
 		return false
