@@ -85,6 +85,30 @@ func TestDegradedWindowStatusRefreshBoundsEachQuery(t *testing.T) {
 	}
 }
 
+func TestDegradedWindowStatusRefreshDoesNotCountShutdownCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	metrics := NewDegradedMetrics()
+	done := make(chan error, 1)
+	go func() {
+		done <- runDegradedWindowStatusRefresh(ctx, time.Second, time.Second, func(callCtx context.Context) error {
+			cancel()
+			<-callCtx.Done()
+			return callCtx.Err()
+		}, metrics.recordWindowStatusRefreshError)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("refresh loop returned an error on cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("refresh loop did not stop after cancellation")
+	}
+	if got := metrics.PrometheusMetrics(); !strings.Contains(got, "keel_rate_limit_degraded_window_status_refresh_errors_total 0\n") {
+		t.Fatalf("expected graceful cancellation to avoid incrementing refresh errors: %s", got)
+	}
+}
+
 func TestDegradedWindowStatusRefreshRejectsInvalidConfiguration(t *testing.T) {
 	for name, args := range map[string]struct {
 		ctx          context.Context
