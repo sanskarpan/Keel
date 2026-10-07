@@ -48,7 +48,6 @@ func ObserveDegradedWindowStatus(ctx context.Context, rateControlDB *sql.DB, reg
 	return nil
 }
 
-
 // RunDegradedWindowStatusRefresh periodically refreshes the process-local
 // status snapshot using the restricted rate-control database function. It
 // performs an initial read before waiting for the first tick. Transient read
@@ -92,6 +91,10 @@ func runDegradedWindowStatusRefresh(ctx context.Context, interval, queryTimeout 
 }
 
 func (m *DegradedMetrics) setWindowStatus(status DegradedWindowStatus) {
+	m.setWindowStatusAt(status, time.Now())
+}
+
+func (m *DegradedMetrics) setWindowStatusAt(status DegradedWindowStatus, refreshedAt time.Time) {
 	if m == nil {
 		return
 	}
@@ -102,9 +105,9 @@ func (m *DegradedMetrics) setWindowStatus(status DegradedWindowStatus) {
 		statusCopy.LastRecoveredAt = &recoveredAt
 	}
 	m.windowStatus = &statusCopy
+	m.windowStatusRefreshedAt = refreshedAt
 	m.mu.Unlock()
 }
-
 
 func (m *DegradedMetrics) recordWindowStatusRefreshError() {
 	if m == nil {
@@ -125,6 +128,21 @@ func (m *DegradedMetrics) WindowStatusObserved() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.windowStatus != nil
+}
+
+// WindowStatusFresh reports whether a successful snapshot is recent according
+// to the observer process clock. The database timestamp remains available as
+// an exported gauge, but readiness must not depend on cross-host clock sync.
+func (m *DegradedMetrics) WindowStatusFresh(now time.Time, maxAge time.Duration) bool {
+	if m == nil || maxAge <= 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.windowStatus == nil || m.windowStatusRefreshedAt.IsZero() || now.Before(m.windowStatusRefreshedAt) {
+		return false
+	}
+	return now.Sub(m.windowStatusRefreshedAt) <= maxAge
 }
 
 func writeDegradedWindowMetrics(b *strings.Builder, status *DegradedWindowStatus) {
