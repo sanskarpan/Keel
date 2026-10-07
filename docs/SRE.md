@@ -75,7 +75,7 @@ K4.7.2 provides shared PostgreSQL admission and recovery-fence primitives, fixed
 #### Recovery and rollback
 
 - Do not clear the regional outage window manually. Elapsed time, restarting pods, or a Redis health flap cannot reopen it.
-- The isolated recovery observer must use the configured primary home-region limiter and `keel_rate_control` connection. It records recovery only after five consecutive seconds of successful PINGs; any failed probe restarts that interval. Verify recovered Redis health and DB writer identity before restoring the application switch and policy.
+- The Redis recovery observer must use the configured primary home-region limiter and the `keel_rate_control` connection. It records recovery only after five consecutive seconds of successful PINGs; any failed probe restarts that interval. The separate `rate-limit-observer` uses only `keel_rate_status`; it reads state and exports metrics but cannot clear the recovery fence. Verify recovered Redis health and DB writer identity before restoring the application switch and policy.
 - If the window has expired, new safe-read admissions remain denied until the observer records recovery. Exact request replays may return their stored decision for up to ten minutes; they do not consume another token.
 - Keep the additive migration in place during application rollback. It is not safe to remove admission state while any app instance may still call the fallback function.
 
