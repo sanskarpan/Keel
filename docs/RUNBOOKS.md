@@ -12,7 +12,7 @@ If a migration fails, stop rollout and preserve logs/checksums. Its transaction 
 
 ## KB-01: Outbox lag or broker outage
 
-Inspect broker health, outbox oldest age/bytes, publish-head leases and disk forecast. Confirm accepted commands remain durable. Reduce nonessential admissions before reaching the buffer cap. Restore broker/credentials/network and let normal relay retry with original event IDs. Repair a stranded lease only after its worker is terminated/expiry confirmed; never mark rows published to clear a graph. Verify contiguous projection versions, deduplication and declining backlog. Exit when age is normal and no gap/conflicting digest remains.
+Inspect broker health, outbox oldest age/bytes, publish-head leases and disk forecast. Confirm accepted commands remain durable. Reduce nonessential admissions before reaching the buffer cap. Restore broker/credentials/network and let normal relay retry with original event IDs. Repair a stranded lease only after its worker is terminated/expiry confirmed; never mark rows published to clear a graph. For a trace-metadata quarantine, compare only the schema version and redacted reason through the restricted diagnostic path; never copy raw envelope values into general logs or tickets. Confirm v2 envelope/header agreement in the canonical protected record before repairing source data. Verify contiguous projection versions, deduplication and declining backlog. Exit when age is normal and no gap/conflicting digest remains.
 
 ## KB-02: Missing or duplicated order projection
 
