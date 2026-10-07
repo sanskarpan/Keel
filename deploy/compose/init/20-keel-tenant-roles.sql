@@ -20,6 +20,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_context_erasure_worker') THEN
         CREATE ROLE keel_context_erasure_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_context_legal_hold') THEN
+        CREATE ROLE keel_context_legal_hold NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_app') THEN
         CREATE ROLE keel_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
     END IF;
@@ -95,6 +98,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_context_erasure_worker') THEN
         CREATE ROLE keel_local_context_erasure_worker LOGIN PASSWORD 'keel-context-erasure-worker-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_context_legal_hold') THEN
+        CREATE ROLE keel_local_context_legal_hold LOGIN PASSWORD 'keel-context-legal-hold-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_agent_alpha') THEN
         CREATE ROLE keel_local_agent_alpha LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
     END IF;
@@ -113,6 +119,7 @@ ALTER ROLE keel_context_vault NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHE
 ALTER ROLE keel_context_policy NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_context_erasure NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_context_erasure_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+ALTER ROLE keel_context_legal_hold NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_budget_control NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_rate_control NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
@@ -138,6 +145,7 @@ ALTER ROLE keel_local_context_vault LOGIN PASSWORD 'keel-context-vault-local-onl
 ALTER ROLE keel_local_context_policy LOGIN PASSWORD 'keel-context-policy-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_context_erasure LOGIN PASSWORD 'keel-context-erasure-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_context_erasure_worker LOGIN PASSWORD 'keel-context-erasure-worker-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+ALTER ROLE keel_local_context_legal_hold LOGIN PASSWORD 'keel-context-legal-hold-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_agent_alpha LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_agent_beta LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_migrator LOGIN PASSWORD 'keel-migrate-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
@@ -156,6 +164,7 @@ GRANT keel_context_vault TO keel_local_context_vault;
 GRANT keel_context_policy TO keel_local_context_policy;
 GRANT keel_context_erasure TO keel_local_context_erasure;
 GRANT keel_context_erasure_worker TO keel_local_context_erasure_worker;
+GRANT keel_context_legal_hold TO keel_local_context_legal_hold;
 GRANT keel_agent TO keel_local_agent_alpha;
 GRANT keel_agent TO keel_local_agent_beta;
 GRANT keel_schema_owner TO keel_local_migrator;
@@ -168,7 +177,7 @@ ALTER SCHEMA keel_private OWNER TO keel_context_owner;
 ALTER SCHEMA tenant_data OWNER TO keel_schema_owner;
 ALTER SCHEMA keel_meta OWNER TO keel_schema_owner;
 REVOKE ALL ON SCHEMA keel_meta FROM PUBLIC;
-GRANT USAGE ON SCHEMA keel_private TO keel_app, keel_budget_control, keel_rate_control, keel_ai_worker, keel_worker, keel_projector, keel_operator, keel_file_processor, keel_retrieval_indexer, keel_context_vault, keel_context_policy, keel_context_erasure, keel_context_erasure_worker, keel_agent;
+GRANT USAGE ON SCHEMA keel_private TO keel_app, keel_budget_control, keel_rate_control, keel_ai_worker, keel_worker, keel_projector, keel_operator, keel_file_processor, keel_retrieval_indexer, keel_context_vault, keel_context_policy, keel_context_erasure, keel_context_erasure_worker, keel_context_legal_hold, keel_agent;
 GRANT USAGE ON SCHEMA tenant_data TO keel_app, keel_worker, keel_agent;
 
 SET ROLE keel_context_owner;
@@ -195,7 +204,7 @@ AS $$
     END
 $$;
 REVOKE ALL ON FUNCTION keel_private.current_tenant_id() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION keel_private.current_tenant_id() TO keel_app, keel_budget_control, keel_rate_control, keel_ai_worker, keel_worker, keel_projector, keel_operator, keel_file_processor, keel_retrieval_indexer, keel_context_vault, keel_context_policy, keel_context_erasure, keel_context_erasure_worker, keel_agent;
+GRANT EXECUTE ON FUNCTION keel_private.current_tenant_id() TO keel_app, keel_budget_control, keel_rate_control, keel_ai_worker, keel_worker, keel_projector, keel_operator, keel_file_processor, keel_retrieval_indexer, keel_context_vault, keel_context_policy, keel_context_erasure, keel_context_erasure_worker, keel_context_legal_hold, keel_agent;
 RESET ROLE;
 GRANT USAGE ON SCHEMA keel_private TO keel_schema_owner;
 GRANT EXECUTE ON FUNCTION keel_private.current_tenant_id() TO keel_schema_owner;

@@ -27,6 +27,7 @@ type ProcessorAPI interface {
 type Observation struct {
 	Claimed   int
 	Completed int
+	Held      int
 	Blocked   int
 	Pending   int
 	Errors    int
@@ -69,6 +70,8 @@ func (r *Runtime) PollOnce(ctx context.Context) (Observation, error) {
 		switch job.State {
 		case "complete":
 			observation.Completed++
+		case "held":
+			observation.Held++
 		case "blocked":
 			observation.Blocked++
 		case "pending", "leased":

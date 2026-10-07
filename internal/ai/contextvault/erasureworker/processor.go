@@ -20,7 +20,7 @@ var (
 // Repository is the lease-fenced database boundary used by Processor.
 type Repository interface {
 	Claim(context.Context, tenancy.TenantID, string, time.Duration) (postgres.ErasureJob, bool, error)
-	Process(context.Context, tenancy.TenantID, postgres.ErasureJob) (bool, error)
+	Process(context.Context, tenancy.TenantID, postgres.ErasureJob) (postgres.ErasureProcessResult, error)
 	Retry(context.Context, tenancy.TenantID, postgres.ErasureJob, string, time.Duration) (string, error)
 }
 
@@ -52,9 +52,16 @@ func (p *Processor) ProcessOne(ctx context.Context, tenant tenancy.TenantID) (po
 		return job, claimed, err
 	}
 	job.WorkerID = p.workerID
-	_, err = p.repository.Process(ctx, tenant, job)
+	result, err := p.repository.Process(ctx, tenant, job)
 	if err == nil {
-		job.State = "complete"
+		switch result {
+		case postgres.ErasureProcessDeleted, postgres.ErasureProcessAlreadyDone:
+			job.State = "complete"
+		case postgres.ErasureProcessHeld:
+			job.State = "held"
+		default:
+			return job, true, errors.New("context erasure processor received an invalid process outcome")
+		}
 		return job, true, nil
 	}
 	if errors.Is(err, postgres.ErrErasureJobLeaseLost) {

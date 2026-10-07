@@ -71,19 +71,19 @@ func TestPostgreSQLContextErasureJobTenantScopeFencingRetryAndAtomicCompletion(t
 		t.Fatalf("stale worker process error=%v, want lease lost", err)
 	}
 	jobA2.WorkerID = "worker-b"
-	if deleted, err := worker.Process(ctx, tenantA, jobA2); err != nil || !deleted {
-		t.Fatalf("fenced worker deletion deleted=%v err=%v", deleted, err)
+	if outcome, err := worker.Process(ctx, tenantA, jobA2); err != nil || outcome != ErasureProcessDeleted {
+		t.Fatalf("fenced worker deletion outcome=%q err=%v", outcome, err)
 	}
 	assertErasureJobTerminalState(t, adminDB, tenantA, scopeA.RecordID, "complete")
 
 	jobB.WorkerID = "worker-b"
 	rollbackCause := errors.New("force erasure job rollback")
 	err = tenancy.WithTenantTx(ctx, workerDB, tenantB, nil, func(tx *sql.Tx) error {
-		deleted, err := worker.ProcessTx(ctx, tx, tenantB, jobB)
+		outcome, err := worker.ProcessTx(ctx, tx, tenantB, jobB)
 		if err != nil {
 			return err
 		}
-		if !deleted {
+		if outcome != ErasureProcessDeleted {
 			t.Fatal("job reported an already-deleted record before rollback")
 		}
 		return rollbackCause
@@ -100,8 +100,8 @@ func TestPostgreSQLContextErasureJobTenantScopeFencingRetryAndAtomicCompletion(t
 		WHERE tenant_id=$1 AND record_id=$2 AND version=1`, string(tenantB), scopeB.RecordID).Scan(&liveCount); err != nil || liveCount != 1 {
 		t.Fatalf("rolled-back job removed ciphertext: live_count=%d err=%v", liveCount, err)
 	}
-	if deleted, err := worker.Process(ctx, tenantB, jobB); err != nil || !deleted {
-		t.Fatalf("retry job deletion deleted=%v err=%v", deleted, err)
+	if outcome, err := worker.Process(ctx, tenantB, jobB); err != nil || outcome != ErasureProcessDeleted {
+		t.Fatalf("retry job deletion outcome=%q err=%v", outcome, err)
 	}
 	assertErasureJobTerminalState(t, adminDB, tenantB, scopeB.RecordID, "complete")
 
