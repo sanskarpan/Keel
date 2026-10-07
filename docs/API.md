@@ -73,14 +73,14 @@ An inference references allowed operation `policy.explain`, prompt version, immu
 
 Order detail reads always take `status` and `version` from the command snapshot. `projection_watermark` and `projection_lag_versions` describe the independent read projection only; an absent projection has watermark zero. Its strong `ETag` includes both command version and projection watermark because both affect the representation; `X-Order-Version` carries the authoritative command version. Order snapshot and first timeline page are read from one repeatable-read transaction. History responses expose only event ID, aggregate version, event type and occurrence time; raw event data, actor references, evidence digests and internal trace/correlation IDs remain private. Neither the API handler nor order UI accepts a tenant selector from request input. The handler requires trusted authentication context and an authorization policy; OIDC/session middleware and API runtime deployment remain gated by K0.
 
-Response to accepted async work is `{operation_id,status_url,stream_subscription,result_state:"queued"}`. Return a durable operation before the client attaches SSE; execution is not dependent on the connection staying open.
+Response to accepted async work is `{operation_id,status_url,stream_subscription,result_state:"queued"}`. Return a durable operation before the client attaches SSE; execution is not dependent on the connection staying open. The current state feed is available at `GET /v1/orders/{order_id}/stream`; each order path is authorized independently. This implementation streams durable order state only. A production model-token source is not yet wired.
 
 ## 4. SSE messages
 
 ```text
 event: state
-id: state:<tenant-sequence>
-data: {"kind":"order.updated","aggregate_id":"<uuid>","version":4,"request_id":"..."}
+id: state:<order-id>:<tenant-sequence>
+data: {"sequence":18,"event_id":"<uuid>","aggregate_id":"<uuid>","version":4,"kind":"order.changed","status":"submitted"}
 
 event: model.token
 data: {"inference_id":"<uuid>","attempt":1,"sequence":18,"text":"..."}
@@ -89,7 +89,7 @@ event: model.completed
 data: {"inference_id":"<uuid>","result_url":"...","usage_status":"confirmed"}
 ```
 
-Token messages do not assign durable SSE event IDs. A durable state cursor survives mixed token messages. Clients deduplicate aggregate versions and token `(inference,attempt,sequence)`. Heartbeats are SSE comments. CORS/origin checks use an explicit allowlist. Authentication uses cookies with CSRF/origin protections or a fetch streaming client with Bearer header; tokens must not appear in query strings.
+Token messages do not assign durable SSE event IDs. A durable order-bound state cursor survives mixed token messages and cannot be reused across order streams. `Last-Event-ID` takes precedence over the optional `cursor` query value; when both are supplied they must match. Cursor-only checkpoints advance the tenant sequence across updates for other orders without disclosing those aggregate IDs. Clients deduplicate aggregate versions and token `(inference,attempt,sequence)`. Heartbeats are SSE comments. Cross-origin CORS is disabled by default; any future browser cross-origin access requires an explicit origin allowlist. Authentication uses cookies with CSRF/origin protections or a fetch streaming client with Bearer header; tokens must not appear in query strings.
 
 If replay retention is exceeded, emit `resync_required` and close. If provider content is interrupted, emit `model.interrupted` with result status and retry policy; a fresh generation requires a new logical request or an explicitly bounded recovery action. Slow consumers close without abandoning the durable job.
 

@@ -24,6 +24,74 @@ func (r *Repository) ReadOrder(ctx context.Context, tenant tenancy.TenantID, ord
 	return view, err
 }
 
+// ReadStateUpdates returns a bounded tenant sequence page and retention bounds from one
+// repeatable-read snapshot. The caller receives typed allowlisted fields, never raw JSON.
+func (r *Repository) ReadStateUpdates(ctx context.Context, tenant tenancy.TenantID, after uint64, limit int) (batch orders.StateFeedBatch, err error) {
+	if limit < 1 || limit > 100 {
+		return orders.StateFeedBatch{}, errors.New("state feed page limit must be in [1,100]")
+	}
+	if after > uint64(^uint64(0)>>1) {
+		return orders.StateFeedBatch{}, errors.New("state feed cursor exceeds database sequence range")
+	}
+	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
+		var oldest sql.NullInt64
+		var latest int64
+		if err := tx.QueryRowContext(ctx, `SELECT
+			(SELECT min(sequence) FROM keel_meta.state_updates WHERE tenant_id=$1),
+			COALESCE((SELECT last_sequence FROM keel_meta.state_feed_counters WHERE tenant_id=$1),0)`, string(tenant)).Scan(&oldest, &latest); err != nil {
+			return err
+		}
+		if latest < 0 || oldest.Valid && oldest.Int64 <= 0 {
+			return ErrCorruptState
+		}
+		batch.Latest = uint64(latest)
+		if oldest.Valid {
+			batch.Oldest = uint64(oldest.Int64)
+			if batch.Oldest > batch.Latest {
+				return ErrCorruptState
+			}
+		} else if latest > 0 {
+			// All entries may have expired; expose the first missing sequence so the
+			// stream can request a snapshot instead of silently appearing current.
+			batch.Oldest = batch.Latest + 1
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT sequence,event_id,aggregate_id,aggregate_version,update_kind,safe_payload->>'status'
+			FROM keel_meta.state_updates WHERE tenant_id=$1 AND sequence>$2
+			ORDER BY sequence LIMIT $3`, string(tenant), int64(after), limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		batch.Updates = make([]orders.StateFeedUpdate, 0, limit)
+		for rows.Next() {
+			var sequence, version int64
+			var update orders.StateFeedUpdate
+			var status string
+			if err := rows.Scan(&sequence, &update.EventID, &update.AggregateID, &version, &update.Kind, &status); err != nil {
+				return err
+			}
+			if sequence <= 0 || uint64(sequence) > batch.Latest || version <= 0 || update.Kind != "order.changed" || !validFeedStatus(orders.Status(status)) {
+				return ErrCorruptState
+			}
+			update.Sequence = uint64(sequence)
+			update.Version = uint64(version)
+			update.Status = orders.Status(status)
+			batch.Updates = append(batch.Updates, update)
+		}
+		return rows.Err()
+	})
+	return batch, err
+}
+
+func validFeedStatus(status orders.Status) bool {
+	switch status {
+	case orders.Draft, orders.Submitted, orders.Verifying, orders.Approved, orders.Rejected, orders.Canceled:
+		return true
+	default:
+		return false
+	}
+}
+
 // ReadOrderWithHistory returns the detail view and its first history page from one database
 // snapshot, so concurrent commands cannot produce a timeline newer than its displayed head.
 func (r *Repository) ReadOrderWithHistory(ctx context.Context, tenant tenancy.TenantID, orderID string, beforeVersion uint64, limit int) (view orders.ReadView, page orders.HistoryPage, err error) {
