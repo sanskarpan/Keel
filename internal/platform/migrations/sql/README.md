@@ -65,8 +65,15 @@ Migration `0034_context_retention_policy` adds immutable tenant/purpose retentio
 monotonic current-policy pointer. Context writes require the current enabled snapshot and explicit
 consent reference; PostgreSQL derives expiry from its own clock and the approved retention interval.
 The separate `keel_context_policy` capability can author snapshots but cannot read vault records;
-the vault role can read policy metadata but cannot author policy. Expired-record deletion, legal holds,
-and backup/replica erasure remain separate K5.4 work.
+the vault role can read policy metadata but cannot author policy.
+
+Migration `0035_context_vault_expiry_erasure` adds immutable content-free erasure receipts and a
+bounded `erase_expired_context_vault` database function. The dedicated `keel_context_erasure`
+capability can invoke it, but cannot read or directly delete vault rows or receipts. Each call derives
+tenant scope from the authenticated database session, deletes at most 100 expired rows, and inserts a
+SHA-256 receipt over a versioned, length-prefixed binary envelope serialization in the same transaction
+as each deletion. Durable worker leases/retries,
+legal holds, and backup/PITR/replica/restore erasure qualification remain separate K5.4 work.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
