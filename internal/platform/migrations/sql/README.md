@@ -72,8 +72,9 @@ bounded `erase_expired_context_vault` database function. The dedicated `keel_con
 capability can invoke it, but cannot read or directly delete vault rows or receipts. Each call derives
 tenant scope from the authenticated database session, deletes at most 100 expired rows, and inserts a
 SHA-256 receipt over a versioned, length-prefixed binary envelope serialization in the same transaction
-as each deletion. Migration `0036` adds the durable worker lease and retry queue; legal holds and
-backup/PITR/replica/restore erasure qualification remain separate K5.4 work.
+as each deletion. Migration `0036` adds the durable worker lease and retry queue; migration `0037`
+adds a dedicated legal-hold lifecycle and serializes it with every supported erasure path.
+Backup/PITR/replica/restore erasure qualification remains separate K5.4 work.
 
 Migration `0036_context_vault_erasure_jobs` creates one content-free durable job for each context
 record, scheduled from its database-derived expiry. The `keel_context_erasure_worker` capability has
@@ -81,7 +82,18 @@ no direct table access; security-definer functions provide tenant-scoped one-at-
 lease-epoch fencing, bounded retry/backoff and terminal blocking. Processing atomically inserts the
 0035 receipt, deletes the expired envelope, and completes its current job lease. The Go polling
 runtime accepts one explicitly authorized tenant and is injectable/local only; no deployable worker
-profile, legal-hold lifecycle, or hosted backup/restore guarantee is provided.
+profile or hosted backup/restore guarantee is provided.
+
+Migration `0037_context_vault_legal_holds` stores content-free hold state and immutable lifecycle
+events behind the separate `keel_context_legal_hold` capability. Holds are scoped to one exact record
+version. Database time controls event timestamps; a bounded review deadline does not automatically
+release a hold, so overdue unreviewed holds continue blocking erasure. The erasure batch function,
+queue processor, and record mutation guard all enforce active holds. Hold placement/review/release,
+queue lease takeover, and both deletion paths lock the same record first. Releasing the final active
+hold makes its expiry job claimable again. The authority role cannot read ciphertext, retention
+policies, hold tables, or erasure receipts directly. This is a database lifecycle only: no public
+legal workflow endpoint or actor-identity provider is wired, and hosted backup/restore qualification
+remains unclaimed.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
