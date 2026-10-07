@@ -1039,7 +1039,7 @@ func TestPostgresDegradedWindowStatusIsRateControlOnlyAndReflectsRecovery(t *tes
 	}
 
 	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.rate_limit_degraded_windows
-		SET started_at=clock_timestamp()-interval '60 seconds', expires_at=clock_timestamp()-interval '1 second'
+		SET started_at=clock_timestamp()-interval '120 seconds', expires_at=clock_timestamp()-interval '60 seconds'
 		WHERE home_region=$1`, region); err != nil {
 		t.Fatal(err)
 	}
