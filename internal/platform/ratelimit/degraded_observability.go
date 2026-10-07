@@ -48,6 +48,49 @@ func ObserveDegradedWindowStatus(ctx context.Context, rateControlDB *sql.DB, reg
 	return nil
 }
 
+
+// RunDegradedWindowStatusRefresh periodically refreshes the process-local
+// status snapshot using the restricted rate-control database function. It
+// performs an initial read before waiting for the first tick. Transient read
+// failures increment a fixed, unlabeled counter and leave the last successful
+// snapshot intact; the snapshot's database timestamp lets scrapers detect
+// staleness. Cancellation is a graceful stop.
+func RunDegradedWindowStatusRefresh(ctx context.Context, rateControlDB *sql.DB, region string, metrics *DegradedMetrics, interval, queryTimeout time.Duration) error {
+	if ctx == nil || rateControlDB == nil || metrics == nil || !validIdentifier(region, maxRegionLength) || interval <= 0 || queryTimeout <= 0 || queryTimeout > interval {
+		return ErrInvalidConfig
+	}
+	return runDegradedWindowStatusRefresh(ctx, interval, queryTimeout, func(callCtx context.Context) error {
+		return ObserveDegradedWindowStatus(callCtx, rateControlDB, region, metrics)
+	}, metrics.recordWindowStatusRefreshError)
+}
+
+func runDegradedWindowStatusRefresh(ctx context.Context, interval, queryTimeout time.Duration, observe func(context.Context) error, onError func()) error {
+	if ctx == nil || observe == nil || onError == nil || interval <= 0 || queryTimeout <= 0 || queryTimeout > interval {
+		return ErrInvalidConfig
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	refresh := func() {
+		callCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
+		if err := observe(callCtx); err != nil {
+			onError()
+		}
+	}
+	refresh()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			refresh()
+		}
+	}
+}
+
 func (m *DegradedMetrics) setWindowStatus(status DegradedWindowStatus) {
 	if m == nil {
 		return
@@ -59,6 +102,16 @@ func (m *DegradedMetrics) setWindowStatus(status DegradedWindowStatus) {
 		statusCopy.LastRecoveredAt = &recoveredAt
 	}
 	m.windowStatus = &statusCopy
+	m.mu.Unlock()
+}
+
+
+func (m *DegradedMetrics) recordWindowStatusRefreshError() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.windowStatusRefreshErrors++
 	m.mu.Unlock()
 }
 

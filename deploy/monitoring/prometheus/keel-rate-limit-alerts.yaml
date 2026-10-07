@@ -40,3 +40,13 @@ groups:
           summary: Keel admitted safe reads through PostgreSQL fallback
           description: Approved safe-read fallback admissions occurred during the last five minutes. Verify the Redis incident, configured limits and rollback posture; model and write routes must remain fail-closed.
           runbook_url: https://github.com/sanskarpan/Keel/blob/main/docs/SRE.md
+
+      - alert: KeelDegradedWindowStatusRefreshFailed
+        expr: increase(keel_rate_limit_degraded_window_status_refresh_errors_total[5m]) > 0
+        labels:
+          severity: warning
+          service: keel
+        annotations:
+          summary: Keel degraded-window status refresh failed
+          description: The rate-control status observer could not refresh its database-backed snapshot. Check role credentials, database reachability and the last-observed timestamp; a prior snapshot may now be stale.
+          runbook_url: https://github.com/sanskarpan/Keel/blob/main/docs/SRE.md

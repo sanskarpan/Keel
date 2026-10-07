@@ -1,0 +1,109 @@
+package ratelimit
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestDegradedWindowStatusRefreshContinuesAfterTransientError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	metrics := NewDegradedMetrics()
+	secondCall := make(chan struct{})
+	var calls atomic.Uint32
+	done := make(chan error, 1)
+	go func() {
+		done <- runDegradedWindowStatusRefresh(ctx, 5*time.Millisecond, 2*time.Millisecond, func(context.Context) error {
+			if calls.Add(1) == 1 {
+				return errors.New("synthetic database interruption")
+			}
+			select {
+			case <-secondCall:
+			default:
+				close(secondCall)
+			}
+			return nil
+		}, metrics.recordWindowStatusRefreshError)
+	}()
+
+	select {
+	case <-secondCall:
+	case <-time.After(time.Second):
+		t.Fatal("refresh loop did not retry after a transient error")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("refresh loop returned an error on cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("refresh loop did not stop after cancellation")
+	}
+	if calls.Load() < 2 {
+		t.Fatalf("refresh loop made %d calls, want at least two", calls.Load())
+	}
+	if got := metrics.PrometheusMetrics(); !strings.Contains(got, "keel_rate_limit_degraded_window_status_refresh_errors_total 1\n") {
+		t.Fatalf("refresh error counter missing or incorrect: %s", got)
+	}
+}
+
+func TestDegradedWindowStatusRefreshBoundsEachQuery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	metrics := NewDegradedMetrics()
+	queryCanceled := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runDegradedWindowStatusRefresh(ctx, 50*time.Millisecond, 5*time.Millisecond, func(callCtx context.Context) error {
+			<-callCtx.Done()
+			close(queryCanceled)
+			return callCtx.Err()
+		}, metrics.recordWindowStatusRefreshError)
+	}()
+
+	select {
+	case <-queryCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("refresh query context was not bounded by its timeout")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("refresh loop returned an error on cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("refresh loop did not stop after cancellation")
+	}
+	if got := metrics.PrometheusMetrics(); !strings.Contains(got, "keel_rate_limit_degraded_window_status_refresh_errors_total 1\n") {
+		t.Fatalf("timeout was not counted as a refresh error: %s", got)
+	}
+}
+
+func TestDegradedWindowStatusRefreshRejectsInvalidConfiguration(t *testing.T) {
+	for name, args := range map[string]struct {
+		ctx          context.Context
+		interval     time.Duration
+		queryTimeout time.Duration
+		observe      func(context.Context) error
+		onError      func()
+	}{
+		"nil context":                  {nil, time.Second, time.Second, func(context.Context) error { return nil }, func() {}},
+		"nil observer":                 {context.Background(), time.Second, time.Second, nil, func() {}},
+		"nil error callback":           {context.Background(), time.Second, time.Second, func(context.Context) error { return nil }, nil},
+		"nonpositive interval":         {context.Background(), 0, time.Second, func(context.Context) error { return nil }, func() {}},
+		"nonpositive timeout":          {context.Background(), time.Second, 0, func(context.Context) error { return nil }, func() {}},
+		"timeout longer than interval": {context.Background(), time.Second, 2 * time.Second, func(context.Context) error { return nil }, func() {}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := runDegradedWindowStatusRefresh(args.ctx, args.interval, args.queryTimeout, args.observe, args.onError); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("invalid refresh configuration returned %v, want ErrInvalidConfig", err)
+			}
+		})
+	}
+}

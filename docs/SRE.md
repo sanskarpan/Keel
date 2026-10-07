@@ -55,7 +55,7 @@ Config/secrets are validated at startup. Provider, OIDC and webhook keys rotate 
 
 ### Safe-read degraded admission runbook status
 
-K4.7.2 provides shared PostgreSQL admission and recovery-fence primitives, fixed-label admission counters/durations, and a rate-control-only window-status query with unlabeled gauges. No runtime role periodically refreshes this snapshot or attaches the extension to a scrape endpoint; deployed alerts remain incomplete. This procedure is a code-level operational contract, not production qualification. Keep all fleet and tenant policies disabled and the application fallback switch off until issues #198 and #199 pass.
+K4.7.2 provides shared PostgreSQL admission and recovery-fence primitives, fixed-label admission counters/durations, and a rate-control-only window-status query with unlabeled gauges. A cancelable periodic refresh helper applies per-query timeouts, continues after transient read failures, and counts refresh errors without labels. No runtime role starts the helper or attaches the extension to a scrape endpoint; deployed alerts remain incomplete. This procedure is a code-level operational contract, not production qualification. Keep all fleet and tenant policies disabled and the application fallback switch off until issues #198 and #199 pass.
 
 #### Before any future pilot
 
