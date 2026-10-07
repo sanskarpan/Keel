@@ -18,11 +18,11 @@ type requestContextKey struct{}
 
 // RequestContext carries server-generated correlation IDs and a validated inbound parent.
 type RequestContext struct {
-	RequestID     string
-	TraceID       string
-	SpanID        string
-	ParentSpanID  string
-	TraceFlags    uint8
+	RequestID    string
+	TraceID      string
+	SpanID       string
+	ParentSpanID string
+	TraceFlags   uint8
 }
 
 // RequestContextFromContext returns the typed correlation values for a request.
@@ -47,6 +47,22 @@ func TraceparentFromContext(ctx context.Context) (string, bool) {
 		return "", false
 	}
 	return tracecontext.Format(correlation.TraceID, correlation.SpanID, correlation.TraceFlags)
+}
+
+// WithRemoteTraceparent creates a child correlation context for a validated remote parent.
+// It generates a fresh local span ID while preserving only the W3C trace ID and flags.
+func WithRemoteTraceparent(ctx context.Context, value string) (context.Context, bool) {
+	parent, ok := tracecontext.Parse(value)
+	if !ok {
+		return ctx, false
+	}
+	spanID, err := randomHex(8)
+	if err != nil {
+		return ctx, false
+	}
+	return context.WithValue(ctx, requestContextKey{}, RequestContext{
+		TraceID: parent.TraceID, SpanID: spanID, ParentSpanID: parent.SpanID, TraceFlags: parent.Flags,
+	}), true
 }
 
 // HTTP assigns a request ID and a server span ID, stores validated correlation context,
