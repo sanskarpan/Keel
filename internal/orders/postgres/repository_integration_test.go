@@ -372,15 +372,16 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 	if strings.Contains(string(envelopeRaw), secretCanary) || strings.Contains(string(envelopeRaw), command.LineItems[0].Description) || strings.Contains(string(stateRaw), secretCanary) || strings.Contains(string(stateRaw), command.LineItems[0].Description) {
 		t.Fatal("safe outbox/state-feed payload leaked private order fields")
 	}
-	if !strings.Contains(string(envelopeRaw), `"traceparent":"`+expectedTraceparent+`"`) || strings.Contains(string(stateRaw), "traceparent") {
-		t.Fatal("validated trace context was not limited to the versioned relay envelope")
-	}
 	var envelopeFields, stateFields map[string]json.RawMessage
 	if err := json.Unmarshal(envelopeRaw, &envelopeFields); err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(stateRaw, &stateFields); err != nil {
 		t.Fatal(err)
+	}
+	var persistedTraceparent string
+	if err := json.Unmarshal(envelopeFields["traceparent"], &persistedTraceparent); err != nil || persistedTraceparent != expectedTraceparent || strings.Contains(string(stateRaw), "traceparent") {
+		t.Fatal("validated trace context was not limited to the versioned relay envelope")
 	}
 	requireJSONKeys(t, envelopeFields, "aggregate_id", "aggregate_version", "event_id", "event_type", "occurred_at", "schema_version", "tenant_id", "traceparent")
 	requireJSONKeys(t, stateFields, "aggregate_id", "aggregate_version", "event_id", "schema_version", "status")
