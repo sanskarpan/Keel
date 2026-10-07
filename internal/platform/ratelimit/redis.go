@@ -56,38 +56,91 @@ type ClientConfig struct {
 	ReadTimeout            time.Duration
 	WriteTimeout           time.Duration
 	PoolSize               int
+	// CredentialsProvider supplies dynamic remote credentials, including IAM-signed MemoryDB tokens.
+	CredentialsProvider func(context.Context) (username string, password string, err error)
 }
 
 func NewRedisClient(cfg ClientConfig) (*redis.Client, error) {
+	if err := validateRedisClientConfig(cfg); err != nil {
+		return nil, ErrInvalidConfig
+	}
+	options := &redis.Options{Addr: cfg.Addr, Username: cfg.Username, Password: cfg.Password,
+		DialTimeout: cfg.DialTimeout, ReadTimeout: cfg.ReadTimeout, WriteTimeout: cfg.WriteTimeout,
+		PoolSize: cfg.PoolSize, MaxRetries: -1, CredentialsProviderContext: cfg.CredentialsProvider}
+	tlsConfig, err := validatedRedisTLSConfig(cfg.TLSConfig)
+	if err != nil {
+		return nil, ErrInvalidConfig
+	}
+	options.TLSConfig = tlsConfig
+	if cfg.CredentialsProvider != nil {
+		// MemoryDB closes IAM-authenticated connections after 12 hours. Recycle
+		// pooled connections earlier so new connections receive fresh tokens.
+		options.ConnMaxLifetime = 10 * time.Hour
+	}
+	return redis.NewClient(options), nil
+}
+
+// NewRedisClusterClient creates the cluster-aware client required by managed
+// Redis-compatible endpoints that expose Redis Cluster topology discovery.
+func NewRedisClusterClient(cfg ClientConfig) (*redis.ClusterClient, error) {
+	if err := validateRedisClientConfig(cfg); err != nil {
+		return nil, ErrInvalidConfig
+	}
+	options := &redis.ClusterOptions{Addrs: []string{cfg.Addr}, Username: cfg.Username, Password: cfg.Password,
+		DialTimeout: cfg.DialTimeout, ReadTimeout: cfg.ReadTimeout, WriteTimeout: cfg.WriteTimeout,
+		PoolSize: cfg.PoolSize, MaxRetries: -1, CredentialsProviderContext: cfg.CredentialsProvider}
+	tlsConfig, err := validatedRedisTLSConfig(cfg.TLSConfig)
+	if err != nil {
+		return nil, ErrInvalidConfig
+	}
+	options.TLSConfig = tlsConfig
+	if cfg.CredentialsProvider != nil {
+		// Keep pooled IAM-authenticated connections below MemoryDB's 12-hour limit.
+		options.ConnMaxLifetime = 10 * time.Hour
+	}
+	return redis.NewClusterClient(options), nil
+}
+
+func validateRedisClientConfig(cfg ClientConfig) error {
 	host, _, err := net.SplitHostPort(cfg.Addr)
 	if err != nil || !validIdentifier(cfg.Region, maxRegionLength) || cfg.Region != cfg.HomeRegion ||
 		cfg.DialTimeout < 50*time.Millisecond || cfg.DialTimeout > 5*time.Second ||
 		cfg.ReadTimeout < 50*time.Millisecond || cfg.ReadTimeout > 5*time.Second ||
 		cfg.WriteTimeout < 50*time.Millisecond || cfg.WriteTimeout > 5*time.Second ||
-		cfg.PoolSize < 1 || cfg.PoolSize > 1000 {
+		cfg.PoolSize < 1 || cfg.PoolSize > 1000 ||
+		cfg.CredentialsProvider != nil && (cfg.Username == "" || cfg.Password != "") {
+		return ErrInvalidConfig
+	}
+	if cfg.TLSConfig != nil {
+		if _, err := validatedRedisTLSConfig(cfg.TLSConfig); err != nil {
+			return ErrInvalidConfig
+		}
+		if cfg.Password == "" && cfg.CredentialsProvider == nil &&
+			!(cfg.AllowSyntheticLoopback && (host == "localhost" || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())) {
+			return ErrInvalidConfig
+		}
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if !cfg.AllowSyntheticLoopback || (host != "localhost" && (ip == nil || !ip.IsLoopback())) ||
+		cfg.Password != "" || cfg.CredentialsProvider != nil {
+		return ErrInvalidConfig
+	}
+	return nil
+}
+
+func validatedRedisTLSConfig(config *tls.Config) (*tls.Config, error) {
+	if config == nil {
+		return nil, nil
+	}
+	validated := config.Clone()
+	if validated.InsecureSkipVerify || validated.MaxVersion != 0 && validated.MaxVersion < tls.VersionTLS12 {
 		return nil, ErrInvalidConfig
 	}
-	options := &redis.Options{Addr: cfg.Addr, Username: cfg.Username, Password: cfg.Password,
-		DialTimeout: cfg.DialTimeout, ReadTimeout: cfg.ReadTimeout, WriteTimeout: cfg.WriteTimeout,
-		PoolSize: cfg.PoolSize, MaxRetries: -1}
-	if cfg.TLSConfig != nil {
-		options.TLSConfig = cfg.TLSConfig.Clone()
-		if options.TLSConfig.InsecureSkipVerify || options.TLSConfig.MaxVersion != 0 && options.TLSConfig.MaxVersion < tls.VersionTLS12 {
-			return nil, ErrInvalidConfig
-		}
-		if options.TLSConfig.MinVersion < tls.VersionTLS12 {
-			options.TLSConfig.MinVersion = tls.VersionTLS12
-		}
-		if cfg.Password == "" && !(cfg.AllowSyntheticLoopback && (host == "localhost" || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback())) {
-			return nil, ErrInvalidConfig
-		}
-	} else {
-		ip := net.ParseIP(host)
-		if !cfg.AllowSyntheticLoopback || (host != "localhost" && (ip == nil || !ip.IsLoopback())) || cfg.Password != "" {
-			return nil, ErrInvalidConfig
-		}
+	if validated.MinVersion < tls.VersionTLS12 {
+		validated.MinVersion = tls.VersionTLS12
 	}
-	return redis.NewClient(options), nil
+	return validated, nil
 }
 
 type Config struct {
