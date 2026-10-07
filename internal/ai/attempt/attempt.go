@@ -1,5 +1,6 @@
-// Package attempt defines fail-closed provider attempt planning. It has no
-// network client or persistent ledger adapter.
+// Package attempt defines fail-closed provider attempt planning and
+// content-free outcomes. Queue persistence is implemented by the AI queue;
+// this package has no provider network client.
 package attempt
 
 import (
@@ -50,6 +51,10 @@ func (c Capability) digest() (string, error) {
 	d := sha256.Sum256(append([]byte("keel.ai.provider-capability.v1\x00"), b...))
 	return hex.EncodeToString(d[:]), nil
 }
+
+// Digest returns the stable, content-free fingerprint for a validated
+// provider capability snapshot.
+func (c Capability) Digest() (string, error) { return c.digest() }
 
 type Plan struct {
 	TenantID                  string
@@ -144,6 +149,14 @@ func (o Outcome) Validate() error {
 	}
 	if o.Charge == ChargeNone && o.UsageMicroUSD != 0 || o.Charge == ChargeUnknown && o.UsageMicroUSD != 0 {
 		return ErrInvalidPlan
+	}
+	if o.Charge == ChargeConfirmed && o.Acceptance != AcceptanceAccepted {
+		return ErrInvalidPlan
+	}
+	if o.Failure == FailureConnectBeforeSend || o.Failure == FailureRateLimited || o.Failure == FailureUnavailable {
+		if o.Acceptance != AcceptanceRejected || o.Charge != ChargeNone || o.ProviderOutputSeen || o.ClientTokenBytes != 0 {
+			return ErrInvalidPlan
+		}
 	}
 	return nil
 }
