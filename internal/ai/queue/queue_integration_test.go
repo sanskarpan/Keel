@@ -108,20 +108,26 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	policyHash, _ := hex.DecodeString(quote.PolicyDigest())
 	if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_execution_profiles
 		(tenant_id,provider_id,model_id,policy_sha256,max_concurrency,max_queue_depth,max_output_tokens,max_attempt_duration_ms)
-		VALUES($1,$2,$3,$4,2,8,128,10000)`, tenantID, provider, model, policyHash); err != nil {
+		VALUES($1,$2,$3,$4,2,8,128,60000)`, tenantID, provider, model, policyHash); err != nil {
 		t.Fatal(err)
 	}
 	fallbackProvider, fallbackModel := "offline-fallback", "model-fallback-v1"
 	if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_execution_profiles
 		(tenant_id,provider_id,model_id,policy_sha256,max_concurrency,max_queue_depth,max_output_tokens,max_attempt_duration_ms)
-		VALUES($1,$2,$3,$4,2,8,128,10000)`, tenantID, fallbackProvider, fallbackModel, policyHash); err != nil {
+		VALUES($1,$2,$3,$4,2,8,128,60000)`, tenantID, fallbackProvider, fallbackModel, policyHash); err != nil {
 		t.Fatal(err)
 	}
 	createAdmission := func(principal string) JobSpec {
 		t.Helper()
-		return JobSpec{Admission: budget.Admission{Tenant: tenant, PeriodID: periodID, InferenceID: uuid.NewString(), AttemptID: uuid.NewString(), ReservationID: uuid.NewString(),
+		spec := JobSpec{Admission: budget.Admission{Tenant: tenant, PeriodID: periodID, InferenceID: uuid.NewString(), AttemptID: uuid.NewString(), ReservationID: uuid.NewString(),
 			PeriodStart: periodStart, PeriodEnd: periodEnd, PrincipalBinding: "principal:" + principal, RequestDigest: hex.EncodeToString(make([]byte, 32)), Quote: quote},
 			ProviderID: provider, ModelID: model, MaxOutputTokens: 64}
+		spec.AttemptPlan = &attempt.Plan{TenantID: tenantID, InferenceID: spec.Admission.InferenceID,
+			PolicyDigest: quote.PolicyDigest(), PrimaryAttemptID: spec.Admission.AttemptID,
+			Primary: attempt.Capability{ProviderID: provider, ProviderVersion: "v1", ModelID: model,
+				ArtifactDigest: strings.Repeat("a", 64), MaximumAttemptLiabilityUSD: quote.MaximumLiabilityMicroUSD()},
+			ReservedLiabilityMicroUSD: quote.MaximumLiabilityMicroUSD(), Deadline: time.Now().Add(2 * time.Minute)}
+		return spec
 	}
 	firstSpec := createAdmission("member-a")
 	primaryLiability := quote.MaximumLiabilityMicroUSD() - 1
@@ -131,7 +137,7 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 			ArtifactDigest: strings.Repeat("a", 64), MaximumAttemptLiabilityUSD: primaryLiability},
 		FallbackAttemptID: uuid.NewString(), Fallback: &attempt.Capability{ProviderID: fallbackProvider, ProviderVersion: "v1",
 			ModelID: fallbackModel, ArtifactDigest: strings.Repeat("b", 64), MaximumAttemptLiabilityUSD: 1},
-		FallbackAllowanceMicroUSD: 1, ReservedLiabilityMicroUSD: quote.MaximumLiabilityMicroUSD(), Deadline: now.Add(30 * time.Second)}
+		FallbackAllowanceMicroUSD: 1, ReservedLiabilityMicroUSD: quote.MaximumLiabilityMicroUSD(), Deadline: now.Add(2 * time.Minute)}
 	secondSpec := createAdmission("member-a")
 	if result, err := repo.Enqueue(ctx, firstSpec); err != nil || result.Replayed {
 		t.Fatalf("enqueue first job result=%+v err=%v", result, err)
@@ -195,6 +201,16 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	outcomeWG.Wait()
 	if outcomeErrors[0] != nil || outcomeErrors[1] != nil {
 		t.Fatalf("concurrent exact provider outcome delivery: %v", outcomeErrors)
+	}
+	firstDisposition, err := repo.SettleAttemptOutcome(ctx, first, planOutcome, "provider-primary-rejected")
+	if err != nil || firstDisposition != AttemptFallbackReady {
+		t.Fatalf("eligible primary failure disposition=%q err=%v", firstDisposition, err)
+	}
+	if disposition, err := repo.SettleAttemptOutcome(ctx, first, planOutcome, "provider-primary-rejected"); err != nil || disposition != AttemptFallbackReady {
+		t.Fatalf("exact fallback-ready replay disposition=%q err=%v", disposition, err)
+	}
+	if _, err := repo.SettleAttemptOutcome(ctx, first, planOutcome, "provider-primary-rejected-conflict"); !errors.Is(err, ErrQueueConflict) {
+		t.Fatalf("conflicting fallback-ready source was accepted: %v", err)
 	}
 	if err := repo.RecordAttemptOutcome(ctx, first, fallbackOutcome); err != nil {
 		t.Fatalf("persist eligible fallback outcome: %v", err)
@@ -407,6 +423,10 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if _, err := appDB.ExecContext(ctx, `SELECT keel_meta.resolve_ai_job_outcome($1,$2,'no_charge','forged:no-charge')`, tenantID, expiredLease.InferenceID); err == nil {
 		t.Fatal("application role called the revoked outcome transition")
 	}
+	if _, err := appDB.ExecContext(ctx, `SELECT keel_meta.settle_ai_provider_attempt($1,$2,'worker-forge',1,$3,
+		'unknown','unknown','timeout',false,0,0,clock_timestamp(),'forged:attempt-settlement')`, tenantID, expiredLease.InferenceID, expiredLease.AttemptID); err == nil {
+		t.Fatal("application role called the AI attempt settlement function")
+	}
 	if _, err := workerDB.ExecContext(ctx, `UPDATE keel_meta.ai_budget_reservations SET liability_state='settled' WHERE tenant_id=$1 AND inference_id=$2`, tenantID, expiredLease.InferenceID); err == nil {
 		t.Fatal("AI worker role directly changed budget liability")
 	}
@@ -456,11 +476,16 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("claim ambiguous attempt: claimed=%t err=%v", claimed, err)
 	}
-	if err := repo.RecordUnknown(ctx, ambiguousLease, "provider-response-lost"); err != nil {
-		t.Fatal(err)
+	ambiguousOutcome := attempt.Outcome{AttemptID: ambiguousLease.AttemptID, Acceptance: attempt.AcceptanceUnknown,
+		Charge: attempt.ChargeUnknown, Failure: attempt.FailureTimeout, FinishedAt: time.Now().UTC()}
+	if disposition, err := repo.SettleAttemptOutcome(ctx, ambiguousLease, ambiguousOutcome, "provider-response-lost"); err != nil || disposition != AttemptRetainedUnknown {
+		t.Fatalf("ambiguous attempt disposition=%q err=%v", disposition, err)
 	}
-	if err := repo.RecordUnknown(ctx, ambiguousLease, "provider-response-lost"); err != nil {
-		t.Fatalf("replaying the identical unknown outcome: %v", err)
+	if disposition, err := repo.SettleAttemptOutcome(ctx, ambiguousLease, ambiguousOutcome, "provider-response-lost"); err != nil || disposition != AttemptRetainedUnknown {
+		t.Fatalf("replaying the identical unknown outcome disposition=%q err=%v", disposition, err)
+	}
+	if _, err := repo.SettleAttemptOutcome(ctx, ambiguousLease, ambiguousOutcome, "provider-response-lost-conflict"); !errors.Is(err, ErrQueueConflict) {
+		t.Fatalf("conflicting unknown settlement source was accepted: %v", err)
 	}
 	if _, err := repo.Renew(ctx, ambiguousLease, time.Second); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("ambiguous provider call renewed its lease: %v", err)
@@ -488,6 +513,9 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if ambiguousState != "succeeded" {
 		t.Fatalf("confirmed reconciliation left job in %s", ambiguousState)
 	}
+	if disposition, err := repo.SettleAttemptOutcome(ctx, ambiguousLease, ambiguousOutcome, "provider-response-lost"); err != nil || disposition != AttemptRetainedUnknown {
+		t.Fatalf("unknown evidence replay after authorized reconciliation disposition=%q err=%v", disposition, err)
+	}
 
 	// A direct definite provider response settles its charge and queue state in
 	// one transaction; delivery replay must be harmless.
@@ -499,6 +527,9 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("claim confirmed attempt: claimed=%t err=%v", claimed, err)
 	}
+	confirmedOutcome := attempt.Outcome{AttemptID: confirmedLease.AttemptID, Acceptance: attempt.AcceptanceAccepted,
+		Charge: attempt.ChargeConfirmed, Failure: attempt.FailureNone, UsageMicroUSD: confirmed.Admission.Quote.MaximumLiabilityMicroUSD(),
+		FinishedAt: time.Now().UTC()}
 	if _, err := admin.ExecContext(ctx, `CREATE FUNCTION keel_meta.test_fail_ai_outcome() RETURNS trigger LANGUAGE plpgsql AS $$
 		BEGIN IF NEW.state='succeeded' THEN RAISE EXCEPTION 'injected queue outcome failure'; END IF; RETURN NEW; END $$`); err != nil {
 		t.Fatal(err)
@@ -506,7 +537,7 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if _, err := admin.ExecContext(ctx, `CREATE TRIGGER test_fail_ai_outcome BEFORE UPDATE OF state ON keel_meta.ai_jobs FOR EACH ROW EXECUTE FUNCTION keel_meta.test_fail_ai_outcome()`); err != nil {
 		t.Fatal(err)
 	}
-	err = repo.SettleConfirmed(ctx, confirmedLease, confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:rollback")
+	_, err = repo.SettleAttemptOutcome(ctx, confirmedLease, confirmedOutcome, "provider-usage:rollback")
 	if err == nil {
 		t.Fatal("injected queue terminalization failure was accepted")
 	}
@@ -527,14 +558,31 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.ai_usage_ledger WHERE tenant_id=$1 AND inference_id=$2 AND entry_kind='confirmed'`, tenantID, confirmedLease.InferenceID).Scan(&rollbackRows); err != nil {
 		t.Fatal(err)
 	}
-	if rollbackJob != "leased" || rollbackLiability != "reserved" || rollbackRows != 0 {
-		t.Fatalf("queue transition error failed to roll back full outcome: job=%s liability=%s ledger=%d", rollbackJob, rollbackLiability, rollbackRows)
-	}
-	if err := repo.SettleConfirmed(ctx, confirmedLease, confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:confirmed"); err != nil {
+	var rollbackAttemptOutcomes, rollbackSettlements int
+	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.ai_provider_attempt_outcomes WHERE tenant_id=$1 AND inference_id=$2`, tenantID, confirmedLease.InferenceID).Scan(&rollbackAttemptOutcomes); err != nil {
 		t.Fatal(err)
 	}
+	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM keel_meta.ai_provider_attempt_settlements WHERE tenant_id=$1 AND inference_id=$2`, tenantID, confirmedLease.InferenceID).Scan(&rollbackSettlements); err != nil {
+		t.Fatal(err)
+	}
+	if rollbackJob != "leased" || rollbackLiability != "reserved" || rollbackRows != 0 || rollbackAttemptOutcomes != 0 || rollbackSettlements != 0 {
+		t.Fatalf("queue transition error failed to roll back full outcome: job=%s liability=%s usage=%d attempt_outcomes=%d settlements=%d", rollbackJob, rollbackLiability, rollbackRows, rollbackAttemptOutcomes, rollbackSettlements)
+	}
+	if disposition, err := repo.SettleAttemptOutcome(ctx, confirmedLease, confirmedOutcome, "provider-usage:confirmed"); err != nil || disposition != AttemptSettledConfirmed {
+		t.Fatalf("confirmed attempt disposition=%q err=%v", disposition, err)
+	}
+	if disposition, err := repo.SettleAttemptOutcome(ctx, confirmedLease, confirmedOutcome, "provider-usage:confirmed"); err != nil || disposition != AttemptSettledConfirmed {
+		t.Fatalf("replaying the identical confirmed result disposition=%q err=%v", disposition, err)
+	}
+	if _, err := repo.SettleAttemptOutcome(ctx, confirmedLease, confirmedOutcome, "provider-usage:conflicting"); !errors.Is(err, ErrQueueConflict) {
+		t.Fatalf("conflicting confirmed settlement source was accepted: %v", err)
+	}
 	if err := repo.SettleConfirmed(ctx, confirmedLease, confirmed.Admission.Quote.MaximumLiabilityMicroUSD(), "provider-usage:confirmed"); err != nil {
-		t.Fatalf("replaying the identical confirmed result: %v", err)
+		t.Fatalf("legacy exact charge settlement replay: %v", err)
+	}
+	if _, err := workerDB.ExecContext(ctx, `UPDATE keel_meta.ai_provider_attempt_settlements SET source_ref='forged:source'
+		WHERE tenant_id=$1 AND inference_id=$2`, tenantID, confirmedLease.InferenceID); err == nil {
+		t.Fatal("AI worker mutated append-only settlement evidence")
 	}
 	staleConfirmedLease := confirmedLease
 	staleConfirmedLease.Epoch++
@@ -556,13 +604,46 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("claim no-charge attempt: claimed=%t err=%v", claimed, err)
 	}
-	if err := repo.SettleNoCharge(ctx, noChargeLease, "provider-explicit-no-charge"); err != nil {
-		t.Fatal(err)
+	noChargeOutcome := attempt.Outcome{AttemptID: noChargeLease.AttemptID, Acceptance: attempt.AcceptanceRejected,
+		Charge: attempt.ChargeNone, Failure: attempt.FailureNone, FinishedAt: time.Now().UTC()}
+	if disposition, err := repo.SettleAttemptOutcome(ctx, noChargeLease, noChargeOutcome, "provider-explicit-no-charge"); err != nil || disposition != AttemptSettledNoCharge {
+		t.Fatalf("no-charge attempt disposition=%q err=%v", disposition, err)
+	}
+	if disposition, err := repo.SettleAttemptOutcome(ctx, noChargeLease, noChargeOutcome, "provider-explicit-no-charge"); err != nil || disposition != AttemptSettledNoCharge {
+		t.Fatalf("exact no-charge replay disposition=%q err=%v", disposition, err)
 	}
 	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, noChargeLease.InferenceID).Scan(&outcome); err != nil {
 		t.Fatal(err)
 	}
 	if outcome != "no_charge" {
 		t.Fatalf("definite no-charge result left job in %s", outcome)
+	}
+	fallbackDisposition, err := repo.SettleAttemptOutcome(ctx, first, fallbackOutcome, "provider-fallback-usage")
+	if err != nil || fallbackDisposition != AttemptSettledConfirmed {
+		t.Fatalf("fallback settlement disposition=%q err=%v", fallbackDisposition, err)
+	}
+	if err := admin.QueryRowContext(ctx, `SELECT state FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`, tenantID, first.InferenceID).Scan(&outcome); err != nil || outcome != "succeeded" {
+		t.Fatalf("fallback charge left job state=%s err=%v", outcome, err)
+	}
+	if disposition, err := repo.SettleAttemptOutcome(ctx, first, planOutcome, "provider-primary-rejected"); err != nil || disposition != AttemptFallbackConsumed {
+		t.Fatalf("replay of primary after fallback settlement disposition=%q err=%v", disposition, err)
+	}
+	overrun := createAdmission("member-attempt-overrun")
+	if _, err := repo.Enqueue(ctx, overrun); err != nil {
+		t.Fatal(err)
+	}
+	overrunLease, claimed, err := repo.ClaimNext(ctx, tenant, provider, model, "worker-attempt-overrun", 5*time.Second)
+	if err != nil || !claimed {
+		t.Fatalf("claim attempt overrun: claimed=%t err=%v", claimed, err)
+	}
+	overrunOutcome := attempt.Outcome{AttemptID: overrunLease.AttemptID, Acceptance: attempt.AcceptanceAccepted,
+		Charge: attempt.ChargeConfirmed, Failure: attempt.FailureNone,
+		UsageMicroUSD: overrun.Admission.Quote.MaximumLiabilityMicroUSD() + 1, FinishedAt: time.Now().UTC()}
+	if disposition, err := repo.SettleAttemptOutcome(ctx, overrunLease, overrunOutcome, "provider-usage:overrun"); err != nil || disposition != AttemptSettledConfirmed {
+		t.Fatalf("overrun attempt disposition=%q err=%v", disposition, err)
+	}
+	var overrunBlocked bool
+	if err := admin.QueryRowContext(ctx, `SELECT overrun_blocked FROM keel_meta.ai_budget_accounts WHERE tenant_id=$1 AND period_id=$2 AND scope='inference'`, tenantID, periodID).Scan(&overrunBlocked); err != nil || !overrunBlocked {
+		t.Fatalf("attempt overrun did not block further budget admissions: blocked=%t err=%v", overrunBlocked, err)
 	}
 }
