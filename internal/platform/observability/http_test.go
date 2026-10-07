@@ -45,6 +45,10 @@ func TestHTTPAddsValidatedCorrelationAndLogsOnlyRoutePattern(t *testing.T) {
 		if !ok || correlation.RequestID == "" || correlation.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" || correlation.ParentSpanID != "00f067aa0ba902b7" || correlation.TraceFlags != 1 || correlation.SpanID == correlation.ParentSpanID {
 			t.Errorf("request correlation context=%+v present=%v", correlation, ok)
 		}
+		propagated, propagatedOK := TraceparentFromContext(r.Context())
+		if !propagatedOK || propagated != "00-"+correlation.TraceID+"-"+correlation.SpanID+"-01" {
+			t.Errorf("downstream traceparent=%q valid=%v", propagated, propagatedOK)
+		}
 		w.WriteHeader(http.StatusAccepted)
 	})
 	request := httptest.NewRequest(http.MethodGet, "/orders/private-order?api_key=do-not-log", nil)

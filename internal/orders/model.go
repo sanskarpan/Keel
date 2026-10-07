@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
 
 var (
@@ -149,7 +151,6 @@ type Snapshot struct {
 var (
 	uuidPattern        = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	actorPattern       = regexp.MustCompile(`^(principal|service-principal):[A-Za-z0-9._~-]{1,120}$`)
-	traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`)
 	reasonCodePattern  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 	digestPattern      = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
@@ -185,8 +186,10 @@ func validateMetadata(meta EventMetadata) (EventMetadata, error) {
 		return EventMetadata{}, fmt.Errorf("%w: event time is required", ErrInvalidCommand)
 	}
 	meta.OccurredAt = meta.OccurredAt.UTC()
-	if meta.Traceparent != "" && !traceparentPattern.MatchString(meta.Traceparent) {
-		return EventMetadata{}, fmt.Errorf("%w: traceparent is invalid", ErrInvalidCommand)
+	if meta.Traceparent != "" {
+		if _, ok := tracecontext.Parse(meta.Traceparent); !ok {
+			return EventMetadata{}, fmt.Errorf("%w: traceparent is invalid", ErrInvalidCommand)
+		}
 	}
 	return meta, nil
 }
