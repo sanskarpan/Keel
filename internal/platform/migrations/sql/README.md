@@ -31,11 +31,16 @@ expiring idempotency receipts, a 60-second outage fence, and recovery fencing th
 credentialed rate-control role. It does not enable fallback on any production route or qualify
 managed Redis/PostgreSQL failover.
 
-Migration `0029_rate_limit_degraded_status` adds a rate-control-only function for reading one
-home-region window's presence, recovery fence, admission-open state, expiry, and last recovery time.
-It exposes no tenant, route, request, outage, or Redis key data and grants no direct application-role
-read access. The observer converts successful reads into unlabeled gauges; it must be refreshed by a
-future control-plane runtime before those metrics represent current state.
+Migration `0029_rate_limit_degraded_status` adds a function for reading one home-region window's
+presence, recovery fence, admission-open state, expiry, and last recovery time. It exposes no tenant,
+route, request, outage, or Redis key data and grants no direct application-role read access.
+
+Migration `0030_rate_limit_status_role` moves execution behind a dedicated `keel_rate_status` role.
+It revokes status-function execution from `keel_rate_control`, whose credential can clear the Redis
+recovery fence, and grants only schema usage plus status-function execution to the status role. The
+deployment must provision the no-login role before migration; local bootstrap creates the separate
+`keel_local_rate_status` login. The `rate-limit-observer` runtime uses this login to refresh and export
+the snapshot, but a deployment profile still needs to launch it and configure scraping.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

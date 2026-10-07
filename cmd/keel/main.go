@@ -41,7 +41,7 @@ func run() error {
 		"environment", cfg.Environment,
 		"listen_address", cfg.ListenAddress,
 	)
-	if err := runtime.Dispatch(ctx, cfg.Role, runtime.Registry{}); err != nil {
+	if err := runtime.Dispatch(ctx, cfg.Role, runtime.RegistryFor(cfg)); err != nil {
 		logger.Error("Keel runtime role is not available yet", "role", cfg.Role, "error_code", "role_not_registered")
 		return err
 	}
