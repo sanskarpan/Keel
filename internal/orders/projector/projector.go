@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/sanskarpan/keel/internal/orders"
+	"github.com/sanskarpan/keel/internal/platform/observability"
+	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
 
 const (
@@ -52,6 +54,7 @@ type Envelope struct {
 	AggregateVersion int64            `json:"aggregate_version"`
 	EventType        orders.EventType `json:"event_type"`
 	OccurredAt       time.Time        `json:"occurred_at"`
+	Traceparent      string           `json:"traceparent,omitempty"`
 }
 
 type Disposition string
@@ -110,6 +113,11 @@ func (p *Processor) Process(ctx context.Context, tenantID string, record Record)
 			return Result{}, fmt.Errorf("persist malformed-record quarantine: %w", quarantineErr)
 		}
 		return Result{Disposition: Quarantined, ReasonCode: reason}, nil
+	}
+	if envelope.Traceparent != "" {
+		if childContext, ok := observability.WithRemoteTraceparent(ctx, envelope.Traceparent); ok {
+			ctx = childContext
+		}
 	}
 	result, err := p.store.Apply(ctx, p.consumerID, envelope, digest)
 	if err != nil {
@@ -183,8 +191,12 @@ func Decode(tenantID string, record Record) (Envelope, [32]byte, error) {
 	if envelope.SchemaVersion < 1 {
 		return Envelope{}, [32]byte{}, fmt.Errorf("%w: schema version is missing or invalid", ErrInvalidRecord)
 	}
-	if envelope.SchemaVersion > 1 {
+	if envelope.SchemaVersion > 2 {
 		return Envelope{}, [32]byte{}, fmt.Errorf("%w: schema version %d", ErrUnsupportedSchema, envelope.SchemaVersion)
+	}
+	if (envelope.SchemaVersion == 1 && envelope.Traceparent != "") ||
+		(envelope.SchemaVersion == 2 && (envelope.Traceparent == "" || !validTraceparent(envelope.Traceparent))) {
+		return Envelope{}, [32]byte{}, fmt.Errorf("%w: trace context does not match envelope schema", ErrInvalidRecord)
 	}
 	if envelope.TenantID != tenantID ||
 		!uuidPattern.MatchString(envelope.EventID) || !uuidPattern.MatchString(envelope.AggregateID) ||
@@ -194,10 +206,10 @@ func Decode(tenantID string, record Record) (Envelope, [32]byte, error) {
 	if string(record.Key) != envelope.TenantID+"/"+envelope.AggregateID {
 		return Envelope{}, [32]byte{}, fmt.Errorf("%w: partition key does not match aggregate", ErrInvalidRecord)
 	}
-	headers := make(map[string]string, 3)
+	headers := make(map[string]string, 4)
 	for _, header := range record.Headers {
 		switch header.Key {
-		case "event_id", "schema_version", "aggregate_version":
+		case "event_id", "schema_version", "aggregate_version", "traceparent":
 		default:
 			return Envelope{}, [32]byte{}, fmt.Errorf("%w: unknown Kafka identity header", ErrInvalidRecord)
 		}
@@ -211,12 +223,21 @@ func Decode(tenantID string, record Record) (Envelope, [32]byte, error) {
 		headers["aggregate_version"] != strconv.FormatInt(envelope.AggregateVersion, 10) {
 		return Envelope{}, [32]byte{}, fmt.Errorf("%w: Kafka identity headers do not match envelope", ErrInvalidRecord)
 	}
+	if (envelope.Traceparent == "" && headers["traceparent"] != "") ||
+		(envelope.Traceparent != "" && (headers["traceparent"] != envelope.Traceparent || !validTraceparent(headers["traceparent"]))) {
+		return Envelope{}, [32]byte{}, fmt.Errorf("%w: Kafka trace context does not match envelope", ErrInvalidRecord)
+	}
 	envelope.OccurredAt = envelope.OccurredAt.UTC()
 	canonical, err := json.Marshal(envelope)
 	if err != nil {
 		return Envelope{}, [32]byte{}, fmt.Errorf("%w: canonicalize envelope", ErrInvalidRecord)
 	}
 	return envelope, sha256.Sum256(canonical), nil
+}
+
+func validTraceparent(value string) bool {
+	_, ok := tracecontext.Parse(value)
+	return ok
 }
 
 func rejectDuplicateJSONKeys(raw []byte) error {

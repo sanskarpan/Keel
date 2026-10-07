@@ -22,6 +22,7 @@ import (
 	"github.com/sanskarpan/keel/internal/orders/outbox"
 	"github.com/sanskarpan/keel/internal/orders/projector"
 	"github.com/sanskarpan/keel/internal/platform/kafkarelay"
+	"github.com/sanskarpan/keel/internal/platform/observability"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 	kafka "github.com/segmentio/kafka-go"
 )
@@ -73,6 +74,19 @@ func testMetadata(tenantID, orderID string) orders.EventMetadata {
 		OccurredAt: time.Now().UTC(), ActorRef: "principal:requester-1",
 		CausationID: nextUUID(), CorrelationID: nextUUID(),
 	}
+}
+
+func testTraceContext(t *testing.T, ctx context.Context) (context.Context, string) {
+	t.Helper()
+	ctx, ok := observability.WithRemoteTraceparent(ctx, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	if !ok {
+		t.Fatal("create test child trace context")
+	}
+	traceparent, ok := observability.TraceparentFromContext(ctx)
+	if !ok {
+		t.Fatal("read test child trace context")
+	}
+	return ctx, traceparent
 }
 
 func testCreate(externalRef string) orders.CreateOrder {
@@ -316,8 +330,9 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 	command := testCreate(secretCanary)
 	command.LineItems[0].Description = "DESCRIPTION-CANARY-" + nextUUID()
 	key := "outbox-atomicity-key-0001"
+	ctx, expectedTraceparent := testTraceContext(t, ctx)
 	metadata := testMetadata(string(tenant), nextUUID())
-	metadata.Traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	metadata.Traceparent = "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
 	created, err := repo.Create(ctx, tenant, command, metadata, key, principal)
 	if err != nil {
 		t.Fatal(err)
@@ -345,8 +360,8 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventID := eventsInStream[0].Metadata.EventID
-	if eventsInStream[0].Metadata.Traceparent != metadata.Traceparent {
-		t.Fatalf("protected event history traceparent=%q, want %q", eventsInStream[0].Metadata.Traceparent, metadata.Traceparent)
+	if eventsInStream[0].Metadata.Traceparent != expectedTraceparent {
+		t.Fatalf("protected event history traceparent=%q, want %q", eventsInStream[0].Metadata.Traceparent, expectedTraceparent)
 	}
 	if err := admin.QueryRowContext(ctx, `SELECT safe_envelope FROM keel_meta.event_outbox WHERE tenant_id=$1 AND event_id=$2`, string(tenant), eventID).Scan(&envelopeRaw); err != nil {
 		t.Fatal(err)
@@ -357,9 +372,6 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 	if strings.Contains(string(envelopeRaw), secretCanary) || strings.Contains(string(envelopeRaw), command.LineItems[0].Description) || strings.Contains(string(stateRaw), secretCanary) || strings.Contains(string(stateRaw), command.LineItems[0].Description) {
 		t.Fatal("safe outbox/state-feed payload leaked private order fields")
 	}
-	if strings.Contains(string(envelopeRaw), "traceparent") || strings.Contains(string(stateRaw), "traceparent") {
-		t.Fatal("trace context escaped protected event history into public outbox/state-feed payloads")
-	}
 	var envelopeFields, stateFields map[string]json.RawMessage
 	if err := json.Unmarshal(envelopeRaw, &envelopeFields); err != nil {
 		t.Fatal(err)
@@ -367,7 +379,11 @@ func TestPostgreSQLCommandOutboxAndStateFeedAreAtomicAndPrivate(t *testing.T) {
 	if err := json.Unmarshal(stateRaw, &stateFields); err != nil {
 		t.Fatal(err)
 	}
-	requireJSONKeys(t, envelopeFields, "aggregate_id", "aggregate_version", "event_id", "event_type", "occurred_at", "schema_version", "tenant_id")
+	var persistedTraceparent string
+	if err := json.Unmarshal(envelopeFields["traceparent"], &persistedTraceparent); err != nil || persistedTraceparent != expectedTraceparent || strings.Contains(string(stateRaw), "traceparent") {
+		t.Fatal("validated trace context was not limited to the versioned relay envelope")
+	}
+	requireJSONKeys(t, envelopeFields, "aggregate_id", "aggregate_version", "event_id", "event_type", "occurred_at", "schema_version", "tenant_id", "traceparent")
 	requireJSONKeys(t, stateFields, "aggregate_id", "aggregate_version", "event_id", "schema_version", "status")
 
 	workerTxErr := tenancy.WithTenantTx(ctx, worker, tenant, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
@@ -580,6 +596,7 @@ func TestPostgreSQLPublishHeadFencesStaleWorkerAndRetries(t *testing.T) {
 	}
 	meta := testMetadata(string(tenant), created.Snapshot.OrderID)
 	meta.ActorRef = "principal:requester-1"
+	ctx, _ = testTraceContext(t, ctx)
 	if _, err := repo.Submit(ctx, tenant, created.Snapshot.OrderID, 1, testSubmit(), meta, "publish-fence-submit-key-0001", "principal:requester-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -688,6 +705,12 @@ type targetDeliveryProcessor struct {
 	kafkarelay.RecordProcessor
 	eventID string
 	results []projector.Disposition
+	coords  []kafkaCoord
+}
+
+type kafkaCoord struct {
+	partition int
+	offset    int64
 }
 
 func (p *targetDeliveryProcessor) ProcessRecord(ctx context.Context, record projector.Record) (projector.Result, error) {
@@ -696,6 +719,7 @@ func (p *targetDeliveryProcessor) ProcessRecord(ctx context.Context, record proj
 		for _, header := range record.Headers {
 			if header.Key == "event_id" && string(header.Value) == p.eventID {
 				p.results = append(p.results, result.Disposition)
+				p.coords = append(p.coords, kafkaCoord{partition: record.Partition, offset: record.Offset})
 				break
 			}
 		}
@@ -729,6 +753,7 @@ func TestPostgreSQLRelayCrashAfterBrokerAcceptanceRedeliversSameEffect(t *testin
 		t.Fatal(err)
 	}
 	ctx := context.Background()
+	ctx, _ = testTraceContext(t, ctx)
 	created, err := appRepo.Create(ctx, tenant, testCreate("relay-crash-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "relay-crash-create-"+nextUUID(), "principal:requester-1")
 	if err != nil {
 		t.Fatal(err)
@@ -899,6 +924,7 @@ func TestPostgreSQLPublisherWritesStableEventsToKafkaInOrder(t *testing.T) {
 	}
 	meta := testMetadata(string(tenant), created.Snapshot.OrderID)
 	meta.ActorRef = "principal:requester-1"
+	ctx, _ = testTraceContext(t, ctx)
 	if _, err := repo.Submit(ctx, tenant, created.Snapshot.OrderID, 1, testSubmit(), meta, "kafka-publish-submit-key-0001", "principal:requester-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -965,6 +991,18 @@ func TestPostgreSQLPublisherWritesStableEventsToKafkaInOrder(t *testing.T) {
 		}
 		if version != wantVersion || seen[eventID] {
 			t.Fatalf("Kafka event identity/version duplicate or reorder: id=%q version=%d want=%d", eventID, version, wantVersion)
+		}
+		traceHeaders := 0
+		for _, header := range message.Headers {
+			if header.Key == "traceparent" {
+				traceHeaders++
+				if string(header.Value) != events[1].Metadata.Traceparent || wantVersion != 2 {
+					t.Fatalf("unexpected traceparent header on version %d: %q", wantVersion, header.Value)
+				}
+			}
+		}
+		if (wantVersion == 2 && traceHeaders != 1) || (wantVersion == 1 && traceHeaders != 0) {
+			t.Fatalf("version %d traceparent header count=%d", wantVersion, traceHeaders)
 		}
 		if wantVersion == 2 && !seen[events[0].Metadata.EventID] {
 			t.Fatal("aggregate version 2 arrived before version 1")
