@@ -113,6 +113,7 @@ ALTER ROLE keel_local_migrator LOGIN PASSWORD 'keel-migrate-local-only' NOSUPERU
 GRANT keel_app TO keel_local_app;
 GRANT keel_budget_control TO keel_local_budget_control;
 GRANT keel_rate_control TO keel_local_rate_control;
+GRANT keel_rate_status TO keel_local_rate_status;
 GRANT keel_ai_worker TO keel_local_ai_worker;
 GRANT keel_worker TO keel_local_worker;
 GRANT keel_projector TO keel_local_projector;
