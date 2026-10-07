@@ -7,12 +7,14 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/sanskarpan/keel/internal/ai/attempt"
 	"github.com/sanskarpan/keel/internal/ai/budget"
 	"github.com/sanskarpan/keel/internal/ai/policy"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
@@ -109,6 +111,12 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 		VALUES($1,$2,$3,$4,2,8,128,10000)`, tenantID, provider, model, policyHash); err != nil {
 		t.Fatal(err)
 	}
+	fallbackProvider, fallbackModel := "offline-fallback", "model-fallback-v1"
+	if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.ai_execution_profiles
+		(tenant_id,provider_id,model_id,policy_sha256,max_concurrency,max_queue_depth,max_output_tokens,max_attempt_duration_ms)
+		VALUES($1,$2,$3,$4,2,8,128,10000)`, tenantID, fallbackProvider, fallbackModel, policyHash); err != nil {
+		t.Fatal(err)
+	}
 	createAdmission := func(principal string) JobSpec {
 		t.Helper()
 		return JobSpec{Admission: budget.Admission{Tenant: tenant, PeriodID: periodID, InferenceID: uuid.NewString(), AttemptID: uuid.NewString(), ReservationID: uuid.NewString(),
@@ -116,9 +124,21 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 			ProviderID: provider, ModelID: model, MaxOutputTokens: 64}
 	}
 	firstSpec := createAdmission("member-a")
+	primaryLiability := quote.MaximumLiabilityMicroUSD() - 1
+	firstSpec.AttemptPlan = &attempt.Plan{TenantID: tenantID, InferenceID: firstSpec.Admission.InferenceID,
+		PolicyDigest: quote.PolicyDigest(), PrimaryAttemptID: firstSpec.Admission.AttemptID,
+		Primary: attempt.Capability{ProviderID: provider, ProviderVersion: "v1", ModelID: model,
+			ArtifactDigest: strings.Repeat("a", 64), MaximumAttemptLiabilityUSD: primaryLiability},
+		FallbackAttemptID: uuid.NewString(), Fallback: &attempt.Capability{ProviderID: fallbackProvider, ProviderVersion: "v1",
+			ModelID: fallbackModel, ArtifactDigest: strings.Repeat("b", 64), MaximumAttemptLiabilityUSD: 1},
+		FallbackAllowanceMicroUSD: 1, ReservedLiabilityMicroUSD: quote.MaximumLiabilityMicroUSD(), Deadline: now.Add(30 * time.Second)}
 	secondSpec := createAdmission("member-a")
 	if result, err := repo.Enqueue(ctx, firstSpec); err != nil || result.Replayed {
 		t.Fatalf("enqueue first job result=%+v err=%v", result, err)
+	}
+	if _, err := appDB.ExecContext(ctx, `UPDATE keel_meta.ai_provider_attempt_plans SET deadline_at=deadline_at+interval '1 second'
+		WHERE tenant_id=$1 AND inference_id=$2`, tenantID, firstSpec.Admission.InferenceID); err == nil {
+		t.Fatal("application SQL role mutated immutable provider attempt plan")
 	}
 	if result, err := repo.Enqueue(ctx, firstSpec); err != nil || !result.Replayed {
 		t.Fatalf("idempotent enqueue result=%+v err=%v", result, err)
@@ -152,6 +172,68 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if claimCount != 1 || first.MaxOutputTokens != 64 || first.Epoch != 1 || first.AttemptCount != 1 {
 		t.Fatalf("same queued job was claimed %d times; lease=%+v", claimCount, first)
 	}
+	planOutcome := attempt.Outcome{AttemptID: first.AttemptID, Acceptance: attempt.AcceptanceRejected,
+		Charge: attempt.ChargeNone, Failure: attempt.FailureRateLimited, FinishedAt: time.Now().UTC()}
+	fallbackOutcome := attempt.Outcome{AttemptID: firstSpec.AttemptPlan.FallbackAttemptID, Acceptance: attempt.AcceptanceAccepted,
+		Charge: attempt.ChargeConfirmed, Failure: attempt.FailureProvider, ProviderOutputSeen: true,
+		ClientTokenBytes: 12, UsageMicroUSD: 1, FinishedAt: planOutcome.FinishedAt.Add(time.Millisecond)}
+	if err := repo.RecordAttemptOutcome(ctx, first, fallbackOutcome); err == nil {
+		t.Fatal("fallback attempt was recorded without proof of a safe primary failure")
+	}
+	var outcomeErrors [2]error
+	var outcomeWG sync.WaitGroup
+	outcomeStart := make(chan struct{})
+	for i := range outcomeErrors {
+		outcomeWG.Add(1)
+		go func(i int) {
+			defer outcomeWG.Done()
+			<-outcomeStart
+			outcomeErrors[i] = repo.RecordAttemptOutcome(ctx, first, planOutcome)
+		}(i)
+	}
+	close(outcomeStart)
+	outcomeWG.Wait()
+	if outcomeErrors[0] != nil || outcomeErrors[1] != nil {
+		t.Fatalf("concurrent exact provider outcome delivery: %v", outcomeErrors)
+	}
+	if err := repo.RecordAttemptOutcome(ctx, first, fallbackOutcome); err != nil {
+		t.Fatalf("persist eligible fallback outcome: %v", err)
+	}
+	conflictingOutcome := planOutcome
+	conflictingOutcome.Failure = attempt.FailureProvider
+	if err := repo.RecordAttemptOutcome(ctx, first, conflictingOutcome); !errors.Is(err, ErrQueueConflict) {
+		t.Fatalf("conflicting provider attempt outcome replay: %v", err)
+	}
+	if _, err := appDB.ExecContext(ctx, `INSERT INTO keel_meta.ai_provider_attempt_outcomes
+		(tenant_id,inference_id,attempt_id,lease_owner,lease_epoch,acceptance,charge_state,failure_class,
+		 provider_output_seen,client_token_bytes,usage_micro_usd,finished_at)
+		VALUES($1,$2,$3,'worker-forge',1,'unknown','unknown','timeout',false,0,0,clock_timestamp())`,
+		tenantID, first.InferenceID, first.AttemptID); err == nil {
+		t.Fatal("application SQL role forged a provider attempt outcome")
+	}
+	if _, err := workerDB.ExecContext(ctx, `UPDATE keel_meta.ai_provider_attempt_outcomes SET failure_class='provider_error'
+		WHERE tenant_id=$1 AND inference_id=$2 AND attempt_id=$3`, tenantID, first.InferenceID, first.AttemptID); err == nil {
+		t.Fatal("AI worker mutated append-only provider attempt evidence")
+	}
+	staleOutcomeLease := first
+	staleOutcomeLease.WorkerID = "worker-stale"
+	if err := repo.RecordAttemptOutcome(ctx, staleOutcomeLease, planOutcome); !errors.Is(err, ErrQueueConflict) {
+		t.Fatalf("stale lease wrote provider attempt evidence: %v", err)
+	}
+	var primaryOrdinal, fallbackOrdinal int
+	if err := admin.QueryRowContext(ctx, `SELECT min(attempt_ordinal),max(attempt_ordinal)
+		FROM keel_meta.ai_provider_attempt_outcomes WHERE tenant_id=$1 AND inference_id=$2`, tenantID, first.InferenceID).
+		Scan(&primaryOrdinal, &fallbackOrdinal); err != nil || primaryOrdinal != 1 || fallbackOrdinal != 2 {
+		t.Fatalf("provider attempt ordinals primary=%d fallback=%d err=%v", primaryOrdinal, fallbackOrdinal, err)
+	}
+	var attemptLedgerLiability string
+	if err := admin.QueryRowContext(ctx, `SELECT liability_state FROM keel_meta.ai_budget_reservations
+		WHERE tenant_id=$1 AND inference_id=$2`, tenantID, first.InferenceID).Scan(&attemptLedgerLiability); err != nil || attemptLedgerLiability != "reserved" {
+		t.Fatalf("attempt evidence changed reserved liability to %q: %v", attemptLedgerLiability, err)
+	}
+	if result, err := repo.Enqueue(ctx, firstSpec); err != nil || !result.Replayed {
+		t.Fatalf("replay planned admission after lease and outcomes result=%+v err=%v", result, err)
+	}
 	if result, err := repo.Enqueue(ctx, secondSpec); err != nil || result.Replayed {
 		t.Fatalf("enqueue second job result=%+v err=%v", result, err)
 	}
@@ -184,6 +266,11 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	if _, claimed, err := repo.ClaimNext(ctx, otherTenant, provider, model, "worker-z", time.Second); err != nil || claimed {
 		t.Fatalf("cross-tenant job became visible: claimed=%t err=%v", claimed, err)
 	}
+	crossTenantLease := first
+	crossTenantLease.Tenant = otherTenant
+	if err := repo.RecordAttemptOutcome(ctx, crossTenantLease, planOutcome); err == nil {
+		t.Fatal("cross-tenant worker wrote provider attempt evidence")
+	}
 	// A failure after the budget lock/reservation begins must roll the entire
 	// admission back when the execution profile is unavailable.
 	missingProfile := createAdmission("member-missing-profile")
@@ -205,6 +292,25 @@ func TestPostgreSQLFairClaimsConcurrencyFencingAndCaps(t *testing.T) {
 	}
 	if admissions != 0 || reservations != 0 {
 		t.Fatalf("failed enqueue left budget state behind: admissions=%d reservations=%d", admissions, reservations)
+	}
+	invalidPlan := createAdmission("member-invalid-plan")
+	invalidPlan.AttemptPlan = &attempt.Plan{TenantID: tenantID, InferenceID: invalidPlan.Admission.InferenceID,
+		PolicyDigest: strings.Repeat("b", 64), PrimaryAttemptID: invalidPlan.Admission.AttemptID,
+		Primary: attempt.Capability{ProviderID: provider, ProviderVersion: "v1", ModelID: model,
+			ArtifactDigest: strings.Repeat("a", 64), MaximumAttemptLiabilityUSD: quote.MaximumLiabilityMicroUSD()},
+		ReservedLiabilityMicroUSD: quote.MaximumLiabilityMicroUSD(), Deadline: time.Now().Add(time.Minute)}
+	if _, err := repo.Enqueue(ctx, invalidPlan); !errors.Is(err, ErrQueueConflict) {
+		t.Fatalf("invalid attempt plan was admitted: %v", err)
+	}
+	for name, query := range map[string]string{
+		"admission": `SELECT count(*) FROM keel_meta.ai_inference_admissions WHERE tenant_id=$1 AND inference_id=$2`,
+		"reservation": `SELECT count(*) FROM keel_meta.ai_budget_reservations WHERE tenant_id=$1 AND inference_id=$2`,
+		"job": `SELECT count(*) FROM keel_meta.ai_jobs WHERE tenant_id=$1 AND inference_id=$2`,
+	} {
+		var count int
+		if err := admin.QueryRowContext(ctx, query, tenantID, invalidPlan.Admission.InferenceID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("invalid plan rollback left %s count=%d err=%v", name, count, err)
+		}
 	}
 
 	// A queued request whose pinned policy/token bounds are no longer active is

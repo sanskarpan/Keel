@@ -42,5 +42,11 @@ deployment must provision the no-login role before migration; local bootstrap cr
 `keel_local_rate_status` login. The `rate-limit-observer` runtime uses this login to refresh and export
 the snapshot, but a deployment profile still needs to launch it and configure scraping.
 
+Migration `0031_ai_provider_attempt_ledger` adds immutable, content-free provider attempt plans and
+append-only outcome evidence. Queue admission can persist the plan in the same transaction as the
+K4.3 reserve and K4.4 job. Outcome recording requires the current AI worker lease owner and epoch.
+The ledger does not dispatch provider requests, retry a fallback, or settle/release budget liability;
+those remain separate qualification gates.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
