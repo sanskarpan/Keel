@@ -104,7 +104,6 @@ func (h *Handler) streamOrderState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
