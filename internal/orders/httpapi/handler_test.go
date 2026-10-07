@@ -30,6 +30,10 @@ func TestGetOrderReturnsAuthoritativeSnapshotAndIndependentWatermark(t *testing.
 	if unauthenticated.Code != http.StatusUnauthorized {
 		t.Fatalf("missing trusted identity status=%d", unauthenticated.Code)
 	}
+	var unauthenticatedProblem problem
+	if err := json.Unmarshal(unauthenticated.Body.Bytes(), &unauthenticatedProblem); err != nil || unauthenticatedProblem.RequestID == "" || unauthenticatedProblem.RequestID != unauthenticated.Header().Get("X-Request-ID") {
+		t.Fatalf("problem body/header request IDs do not match: problem=%+v header=%q err=%v", unauthenticatedProblem, unauthenticated.Header().Get("X-Request-ID"), err)
+	}
 
 	req := authenticatedRequest(http.MethodGet, "/v1/orders/"+httpTestOrder)
 	req.Header.Set("X-Tenant-ID", "22222222-2222-4222-8222-222222222222")
@@ -37,6 +41,9 @@ func TestGetOrderReturnsAuthoritativeSnapshotAndIndependentWatermark(t *testing.
 	handler.ServeHTTP(response, req)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("X-Request-ID") == "" {
+		t.Fatal("successful request omitted the server request ID")
 	}
 	var body map[string]any
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {

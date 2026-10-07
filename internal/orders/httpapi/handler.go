@@ -5,12 +5,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"html/template"
 	"io/fs"
 	"net/http"
@@ -21,6 +18,7 @@ import (
 
 	"github.com/sanskarpan/keel/internal/orders"
 	"github.com/sanskarpan/keel/internal/orders/historycursor"
+	"github.com/sanskarpan/keel/internal/platform/observability"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
 
@@ -95,7 +93,7 @@ func NewHandler(reader Reader, authorizer Authorizer, cursors *historycursor.Cod
 	mux.HandleFunc("GET /v1/orders/{order_id}/stream", h.streamOrderState)
 	mux.HandleFunc("GET /app/orders/{order_id}", h.getOrderPage)
 	mux.HandleFunc("GET /app/orders/assets/order.css", h.getCSS)
-	h.handler = securityHeaders(mux)
+	h.handler = observability.HTTP(nil, securityHeaders(mux))
 	return h, nil
 }
 
@@ -224,10 +222,10 @@ func (h *Handler) getOrderPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(rendered.Bytes())
 }
 
-func (h *Handler) getCSS(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) getCSS(w http.ResponseWriter, r *http.Request) {
 	data, err := fs.ReadFile(uiFiles, "ui/order.css")
 	if err != nil {
-		writeProblem(w, nil, http.StatusServiceUnavailable, "ui_unavailable", "The order view is temporarily unavailable.")
+		writeProblem(w, r, http.StatusServiceUnavailable, "ui_unavailable", "The order view is temporarily unavailable.")
 		return
 	}
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
@@ -401,14 +399,17 @@ type problem struct {
 }
 
 func writeProblem(w http.ResponseWriter, r *http.Request, status int, code, detail string) {
-	var requestID [16]byte
-	if _, err := rand.Read(requestID[:]); err != nil {
-		requestID = [16]byte{}
+	requestID := ""
+	if r != nil {
+		correlation, ok := observability.RequestContextFromContext(r.Context())
+		if ok {
+			requestID = correlation.RequestID
+		}
 	}
 	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(problem{Type: "about:blank", Title: http.StatusText(status), Status: status, Code: code, Detail: detail, RequestID: fmt.Sprintf("%s-%s-%s-%s-%s", hex.EncodeToString(requestID[0:4]), hex.EncodeToString(requestID[4:6]), hex.EncodeToString(requestID[6:8]), hex.EncodeToString(requestID[8:10]), hex.EncodeToString(requestID[10:16]))})
+	_ = json.NewEncoder(w).Encode(problem{Type: "about:blank", Title: http.StatusText(status), Status: status, Code: code, Detail: detail, RequestID: requestID})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
