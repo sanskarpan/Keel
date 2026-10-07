@@ -61,5 +61,12 @@ unexpired rows under forced RLS; local bootstrap provides a separate test login.
 plaintext and does not add expiry deletion, legal-hold processing, replay authorization, KMS
 integration, or Langfuse delivery.
 
+Migration `0034_context_retention_policy` adds immutable tenant/purpose retention snapshots and a
+monotonic current-policy pointer. Context writes require the current enabled snapshot and explicit
+consent reference; PostgreSQL derives expiry from its own clock and the approved retention interval.
+The separate `keel_context_policy` capability can author snapshots but cannot read vault records;
+the vault role can read policy metadata but cannot author policy. Expired-record deletion, legal holds,
+and backup/replica erasure remain separate K5.4 work.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
