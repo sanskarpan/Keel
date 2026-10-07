@@ -113,6 +113,9 @@ func TestDegradedMetricsAreLowCardinalityAndScrapedByHealthHandler(t *testing.T)
 	metrics.record("tenant-private-123", time.Second)
 	metrics.recordPrimary("unavailable", 8*time.Millisecond)
 	metrics.recordPrimary("tenant-private-123", time.Second)
+	recoveredAt := time.Unix(1_800_000_000, 0).UTC()
+	metrics.setWindowStatus(DegradedWindowStatus{Present: true, Active: true, AdmissionOpen: true,
+		SecondsUntilExpiry: 42.5, ObservedAt: time.Unix(1_800_000_010, 0).UTC(), LastRecoveredAt: &recoveredAt})
 	handler := health.NewHandlerWithMetrics(buildinfo.Info{}, metrics)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
@@ -122,8 +125,20 @@ func TestDegradedMetricsAreLowCardinalityAndScrapedByHealthHandler(t *testing.T)
 		!strings.Contains(content, `keel_rate_limit_degraded_admission_duration_seconds_sum{result="allowed"} 0.025000`) ||
 		!strings.Contains(content, `keel_rate_limit_primary_admissions_total{result="unavailable"} 1`) ||
 		!strings.Contains(content, `keel_rate_limit_primary_admissions_total{result="error"} 1`) ||
-		!strings.Contains(content, `result="invalid_request"`) || strings.Contains(content, "tenant-private-123") {
+		!strings.Contains(content, `result="invalid_request"`) ||
+		!strings.Contains(content, "keel_rate_limit_degraded_window_status_observed 1") ||
+		!strings.Contains(content, "keel_rate_limit_degraded_window_present 1") ||
+		!strings.Contains(content, "keel_rate_limit_degraded_window_active 1") ||
+		!strings.Contains(content, "keel_rate_limit_degraded_admission_window_open 1") ||
+		!strings.Contains(content, "keel_rate_limit_degraded_window_seconds_until_expiry 42.500000") ||
+		!strings.Contains(content, "keel_rate_limit_degraded_window_last_recovered_timestamp_seconds 1800000000.000000") ||
+		strings.Contains(content, "tenant-private-123") {
 		t.Fatalf("health metrics missing fixed low-cardinality degraded series or exposed input: %s", content)
+	}
+	unobserved := NewDegradedMetrics().PrometheusMetrics()
+	if !strings.Contains(unobserved, "\nkeel_rate_limit_degraded_window_status_observed 0\n") ||
+		strings.Contains(unobserved, "\nkeel_rate_limit_degraded_window_present ") {
+		t.Fatalf("unobserved database status was presented as an empty healthy window: %s", unobserved)
 	}
 }
 
@@ -981,6 +996,76 @@ func TestPostgresDegradedRecoveryProbeFlapRestartsHealthInterval(t *testing.T) {
 	}
 	if active {
 		t.Fatal("verified recovery did not close the degraded window after consecutive healthy probes")
+	}
+}
+
+func TestPostgresDegradedWindowStatusIsRateControlOnlyAndReflectsRecovery(t *testing.T) {
+	appDB, admin, rateControl := openDegradedTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	region := "test-" + uuid.NewString()[:8]
+	t.Cleanup(func() {
+		_, _ = admin.ExecContext(context.Background(), `DELETE FROM keel_meta.rate_limit_degraded_windows WHERE home_region=$1`, region)
+	})
+	metrics := NewDegradedMetrics()
+
+	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, metrics); err != nil {
+		t.Fatalf("read absent region window: %v", err)
+	}
+	if got := metrics.PrometheusMetrics(); !strings.Contains(got, "keel_rate_limit_degraded_window_status_observed 1") ||
+		!strings.Contains(got, "keel_rate_limit_degraded_window_present 0") {
+		t.Fatalf("absent window status was not represented explicitly: %s", got)
+	}
+	if err := ObserveDegradedWindowStatus(ctx, appDB, region, NewDegradedMetrics()); err == nil {
+		t.Fatal("ordinary application role read the rate-control-only window status function")
+	}
+	if _, err := appDB.ExecContext(ctx, `SELECT count(*) FROM keel_meta.rate_limit_degraded_windows`); err == nil {
+		t.Fatal("ordinary application role read the degraded-window table directly")
+	}
+
+	if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.rate_limit_degraded_windows(home_region,outage_id,started_at,expires_at,active)
+		VALUES($1,gen_random_uuid(),clock_timestamp(),clock_timestamp()+interval '60 seconds',true)`, region); err != nil {
+		t.Fatal(err)
+	}
+	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, metrics); err != nil {
+		t.Fatalf("read active region window: %v", err)
+	}
+	activeMetrics := metrics.PrometheusMetrics()
+	if !strings.Contains(activeMetrics, "keel_rate_limit_degraded_window_present 1") ||
+		!strings.Contains(activeMetrics, "keel_rate_limit_degraded_window_active 1") ||
+		!strings.Contains(activeMetrics, "keel_rate_limit_degraded_admission_window_open 1") ||
+		strings.Contains(activeMetrics, "{region=") || strings.Contains(activeMetrics, region) {
+		t.Fatalf("active window status is missing or leaks regional identity: %s", activeMetrics)
+	}
+
+	if _, err := admin.ExecContext(ctx, `WITH test_time AS (SELECT clock_timestamp() AS now_at)
+		UPDATE keel_meta.rate_limit_degraded_windows
+		SET started_at=test_time.now_at-interval '60 seconds', expires_at=test_time.now_at-interval '1 second'
+		FROM test_time WHERE home_region=$1`, region); err != nil {
+		t.Fatal(err)
+	}
+	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, metrics); err != nil {
+		t.Fatalf("read expired region window: %v", err)
+	}
+	expiredMetrics := metrics.PrometheusMetrics()
+	if !strings.Contains(expiredMetrics, "keel_rate_limit_degraded_window_active 1") ||
+		!strings.Contains(expiredMetrics, "keel_rate_limit_degraded_admission_window_open 0") ||
+		!strings.Contains(expiredMetrics, "keel_rate_limit_degraded_window_seconds_until_expiry 0.000000") {
+		t.Fatalf("expired window did not remain fenced: %s", expiredMetrics)
+	}
+
+	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.rate_limit_degraded_windows
+		SET active=false,recovered_at=clock_timestamp() WHERE home_region=$1`, region); err != nil {
+		t.Fatal(err)
+	}
+	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, metrics); err != nil {
+		t.Fatalf("read recovered region window: %v", err)
+	}
+	recoveredMetrics := metrics.PrometheusMetrics()
+	if !strings.Contains(recoveredMetrics, "keel_rate_limit_degraded_window_active 0") ||
+		!strings.Contains(recoveredMetrics, "keel_rate_limit_degraded_admission_window_open 0") ||
+		!strings.Contains(recoveredMetrics, "keel_rate_limit_degraded_window_last_recovered_timestamp_seconds 1") {
+		t.Fatalf("recovered window state or timestamp is missing: %s", recoveredMetrics)
 	}
 }
 

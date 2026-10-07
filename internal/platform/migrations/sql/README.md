@@ -31,5 +31,11 @@ expiring idempotency receipts, a 60-second outage fence, and recovery fencing th
 credentialed rate-control role. It does not enable fallback on any production route or qualify
 managed Redis/PostgreSQL failover.
 
+Migration `0029_rate_limit_degraded_status` adds a rate-control-only function for reading one
+home-region window's presence, recovery fence, admission-open state, expiry, and last recovery time.
+It exposes no tenant, route, request, outage, or Redis key data and grants no direct application-role
+read access. The observer converts successful reads into unlabeled gauges; it must be refreshed by a
+future control-plane runtime before those metrics represent current state.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

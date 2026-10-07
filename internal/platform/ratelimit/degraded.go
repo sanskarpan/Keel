@@ -73,6 +73,7 @@ type DegradedMetrics struct {
 	mu             sync.Mutex
 	samples        map[string]degradedMetricSample
 	primarySamples map[string]degradedMetricSample
+	windowStatus   *DegradedWindowStatus
 }
 
 type degradedMetricSample struct {
@@ -146,6 +147,15 @@ func (m *DegradedMetrics) PrometheusMetrics() string {
 	for outcome, sample := range m.primarySamples {
 		primarySamples[outcome] = sample
 	}
+	var windowStatus *DegradedWindowStatus
+	if m.windowStatus != nil {
+		status := *m.windowStatus
+		if m.windowStatus.LastRecoveredAt != nil {
+			recoveredAt := *m.windowStatus.LastRecoveredAt
+			status.LastRecoveredAt = &recoveredAt
+		}
+		windowStatus = &status
+	}
 	m.mu.Unlock()
 	outcomes := make([]string, 0, len(samples))
 	for outcome := range samples {
@@ -182,6 +192,7 @@ func (m *DegradedMetrics) PrometheusMetrics() string {
 		fmt.Fprintf(&b, "keel_rate_limit_primary_admission_duration_seconds_sum{result=%q} %.6f\n", outcome, sample.duration.Seconds())
 		fmt.Fprintf(&b, "keel_rate_limit_primary_admission_duration_seconds_count{result=%q} %d\n", outcome, sample.count)
 	}
+	writeDegradedWindowMetrics(&b, windowStatus)
 	return b.String()
 }
 
