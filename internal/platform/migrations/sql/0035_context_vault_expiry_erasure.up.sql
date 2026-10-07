@@ -26,9 +26,17 @@ CREATE FUNCTION keel_meta.context_vault_envelope_sha256(
     p_algorithm text,p_key_id text,p_wrapped_dek bytea,p_nonce bytea,p_ciphertext bytea)
 RETURNS text LANGUAGE sql IMMUTABLE STRICT SET search_path=pg_catalog AS $$
     SELECT 'sha256:' || pg_catalog.encode(pg_catalog.sha256(
-        pg_catalog.convert_to(p_tenant_id::text || '/' || p_record_id::text || '/' || p_version::text || '/' ||
-            p_policy_digest || '/' || p_algorithm || '/' || p_key_id || '/', 'UTF8') ||
-        p_wrapped_dek || p_nonce || p_ciphertext), 'hex')
+        pg_catalog.convert_to('keel.context-vault-envelope/v1', 'UTF8') ||
+        pg_catalog.uuid_send(p_tenant_id) || pg_catalog.uuid_send(p_record_id) || pg_catalog.int8send(p_version) ||
+        pg_catalog.int4send(pg_catalog.octet_length(pg_catalog.convert_to(p_policy_digest, 'UTF8'))) ||
+            pg_catalog.convert_to(p_policy_digest, 'UTF8') ||
+        pg_catalog.int4send(pg_catalog.octet_length(pg_catalog.convert_to(p_algorithm, 'UTF8'))) ||
+            pg_catalog.convert_to(p_algorithm, 'UTF8') ||
+        pg_catalog.int4send(pg_catalog.octet_length(pg_catalog.convert_to(p_key_id, 'UTF8'))) ||
+            pg_catalog.convert_to(p_key_id, 'UTF8') ||
+        pg_catalog.int4send(pg_catalog.octet_length(p_wrapped_dek)) || p_wrapped_dek ||
+        pg_catalog.int4send(pg_catalog.octet_length(p_nonce)) || p_nonce ||
+        pg_catalog.int4send(pg_catalog.octet_length(p_ciphertext)) || p_ciphertext), 'hex')
 $$;
 REVOKE ALL ON FUNCTION keel_meta.context_vault_envelope_sha256(uuid,uuid,bigint,text,text,text,bytea,bytea,bytea) FROM PUBLIC;
 
