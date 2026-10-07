@@ -121,7 +121,9 @@ func (b *Broker) Publish(ctx context.Context, message outbox.Message) error {
 	if b == nil {
 		return errors.New("Kafka writer is not configured")
 	}
-	if message.SchemaVersion < 1 || message.TenantID == "" || message.AggregateID == "" || message.EventID == "" || message.AggregateVersion < 1 || len(message.Payload) == 0 {
+	if message.SchemaVersion < 1 || message.SchemaVersion > 2 || message.TenantID == "" || message.AggregateID == "" || message.EventID == "" || message.AggregateVersion < 1 || len(message.Payload) == 0 ||
+		(message.SchemaVersion == 1 && message.Traceparent != "") ||
+		(message.SchemaVersion == 2 && (message.Traceparent == "" || !outbox.ValidTraceparent(message.Traceparent))) {
 		return errors.New("outbox message is incomplete")
 	}
 	b.mu.Lock()
@@ -132,11 +134,16 @@ func (b *Broker) Publish(ctx context.Context, message outbox.Message) error {
 	err := b.writer.WriteMessages(ctx, kafka.Message{
 		Key:   message.Key(),
 		Value: message.Payload,
-		Headers: []kafka.Header{
+		Headers: append([]kafka.Header{
 			{Key: "event_id", Value: []byte(message.EventID)},
 			{Key: "schema_version", Value: []byte(fmt.Sprintf("%d", message.SchemaVersion))},
 			{Key: "aggregate_version", Value: []byte(fmt.Sprintf("%d", message.AggregateVersion))},
-		},
+		}, func() []kafka.Header {
+			if message.Traceparent == "" {
+				return nil
+			}
+			return []kafka.Header{{Key: "traceparent", Value: []byte(message.Traceparent)}}
+		}()...),
 	})
 	return redactKafkaError(err, b.security)
 }
