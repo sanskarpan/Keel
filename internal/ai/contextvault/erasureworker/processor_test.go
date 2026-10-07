@@ -47,6 +47,18 @@ func TestProcessorDoesNotRetryStaleLease(t *testing.T) {
 	}
 }
 
+func TestProcessorReportsLegalHoldWithoutRetryingOrCompleting(t *testing.T) {
+	repository := &fakeRepository{claimed: true, processResult: postgres.ErasureProcessHeld}
+	processor, err := NewProcessor(repository, "worker-a", time.Minute, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, claimed, err := processor.ProcessOne(context.Background(), tenancy.TenantID("11111111-1111-4111-8111-111111111111"))
+	if err != nil || !claimed || job.State != "held" || repository.retried != 0 {
+		t.Fatalf("held job=%+v claimed=%v retries=%d err=%v", job, claimed, repository.retried, err)
+	}
+}
+
 func TestRetryDelayCapsAtMaximum(t *testing.T) {
 	if got := retryDelay(time.Second, 1); got != time.Second {
 		t.Fatalf("first retry delay=%s", got)
@@ -60,22 +72,26 @@ func TestRetryDelayCapsAtMaximum(t *testing.T) {
 }
 
 type fakeRepository struct {
-	claimed    bool
-	processErr error
-	retried    int
-	retryCode  string
-	retryDelay time.Duration
-	retryState string
-	processed  int
+	claimed       bool
+	processErr    error
+	processResult postgres.ErasureProcessResult
+	retried       int
+	retryCode     string
+	retryDelay    time.Duration
+	retryState    string
+	processed     int
 }
 
 func (r *fakeRepository) Claim(_ context.Context, tenant tenancy.TenantID, worker string, _ time.Duration) (postgres.ErasureJob, bool, error) {
 	return postgres.ErasureJob{TenantID: tenant, RecordID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", Version: 1, LeaseEpoch: 1, Failures: 1}, r.claimed, nil
 }
 
-func (r *fakeRepository) Process(context.Context, tenancy.TenantID, postgres.ErasureJob) (bool, error) {
+func (r *fakeRepository) Process(context.Context, tenancy.TenantID, postgres.ErasureJob) (postgres.ErasureProcessResult, error) {
 	r.processed++
-	return true, r.processErr
+	if r.processResult == "" {
+		r.processResult = postgres.ErasureProcessDeleted
+	}
+	return r.processResult, r.processErr
 }
 
 func (r *fakeRepository) Retry(_ context.Context, _ tenancy.TenantID, _ postgres.ErasureJob, code string, delay time.Duration) (string, error) {
