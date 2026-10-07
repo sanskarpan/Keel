@@ -48,6 +48,7 @@ type Reader interface {
 	ReadOrder(context.Context, tenancy.TenantID, string) (orders.ReadView, error)
 	PageEvents(context.Context, tenancy.TenantID, string, uint64, int) (orders.HistoryPage, error)
 	ReadOrderWithHistory(context.Context, tenancy.TenantID, string, uint64, int) (orders.ReadView, orders.HistoryPage, error)
+	ReadStateUpdates(context.Context, tenancy.TenantID, uint64, int) (orders.StateFeedBatch, error)
 }
 
 type Authorizer interface {
@@ -90,6 +91,7 @@ func NewHandler(reader Reader, authorizer Authorizer, cursors *historycursor.Cod
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/orders/{order_id}", h.getOrder)
 	mux.HandleFunc("GET /v1/orders/{order_id}/events", h.getOrderEvents)
+	mux.HandleFunc("GET /v1/orders/{order_id}/stream", h.streamOrderState)
 	mux.HandleFunc("GET /app/orders/{order_id}", h.getOrderPage)
 	mux.HandleFunc("GET /app/orders/assets/order.css", h.getCSS)
 	h.handler = securityHeaders(mux)
