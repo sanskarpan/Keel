@@ -72,8 +72,16 @@ bounded `erase_expired_context_vault` database function. The dedicated `keel_con
 capability can invoke it, but cannot read or directly delete vault rows or receipts. Each call derives
 tenant scope from the authenticated database session, deletes at most 100 expired rows, and inserts a
 SHA-256 receipt over a versioned, length-prefixed binary envelope serialization in the same transaction
-as each deletion. Durable worker leases/retries,
-legal holds, and backup/PITR/replica/restore erasure qualification remain separate K5.4 work.
+as each deletion. Migration `0036` adds the durable worker lease and retry queue; legal holds and
+backup/PITR/replica/restore erasure qualification remain separate K5.4 work.
+
+Migration `0036_context_vault_erasure_jobs` creates one content-free durable job for each context
+record, scheduled from its database-derived expiry. The `keel_context_erasure_worker` capability has
+no direct table access; security-definer functions provide tenant-scoped one-at-a-time claims,
+lease-epoch fencing, bounded retry/backoff and terminal blocking. Processing atomically inserts the
+0035 receipt, deletes the expired envelope, and completes its current job lease. The Go polling
+runtime accepts one explicitly authorized tenant and is injectable/local only; no deployable worker
+profile, legal-hold lifecycle, or hosted backup/restore guarantee is provided.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
