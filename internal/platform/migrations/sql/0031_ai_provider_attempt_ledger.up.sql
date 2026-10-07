@@ -92,7 +92,7 @@ BEGIN
     liability:=(p_plan->>'reserved_liability_micro_usd')::bigint;
     deadline:=(p_plan->>'deadline_at')::timestamptz;
     IF octet_length(plan_policy)<>32 OR octet_length(primary_digest)<>32 OR primary_attempt IS NULL OR jsonb_typeof(primary_cap)<>'object'
-       OR jsonb_object_length(primary_cap)<>6
+       OR (SELECT count(*) FROM jsonb_object_keys(primary_cap))<>6
        OR NOT (primary_cap ?& ARRAY['provider_id','provider_version','model_id','artifact_digest','supports_idempotency','maximum_attempt_liability_micro_usd'])
        OR fallback_allowance<0 OR liability<=0
        OR (fallback_cap IS NULL)<>(fallback_attempt IS NULL)
@@ -114,7 +114,7 @@ BEGIN
         RAISE EXCEPTION 'AI provider attempt plan does not match queued reserved admission';
     END IF;
     IF fallback_cap IS NOT NULL AND (jsonb_typeof(fallback_cap)<>'object'
-       OR jsonb_object_length(fallback_cap)<>6
+       OR (SELECT count(*) FROM jsonb_object_keys(fallback_cap))<>6
        OR NOT (fallback_cap ?& ARRAY['provider_id','provider_version','model_id','artifact_digest','supports_idempotency','maximum_attempt_liability_micro_usd'])
        OR (fallback_cap->>'provider_id') !~ '^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$'
        OR (fallback_cap->>'model_id') !~ '^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$'
