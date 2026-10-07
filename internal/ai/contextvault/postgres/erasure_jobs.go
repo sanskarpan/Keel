@@ -40,6 +40,14 @@ type ErasureJob struct {
 	WorkerID   string
 }
 
+type ErasureProcessResult string
+
+const (
+	ErasureProcessDeleted     ErasureProcessResult = "deleted"
+	ErasureProcessAlreadyDone ErasureProcessResult = "already_deleted"
+	ErasureProcessHeld        ErasureProcessResult = "held"
+)
+
 // ErasureWorkerStore exposes only claim, atomic process, and bounded retry functions. Its
 // connection must use the dedicated worker capability, which cannot directly read ciphertext.
 type ErasureWorkerStore struct{ db *sql.DB }
@@ -114,43 +122,50 @@ func (s *ErasureWorkerStore) ClaimTx(ctx context.Context, tx *sql.Tx, tenant ten
 
 // Process atomically inserts the tombstone, removes the expired ciphertext, and completes
 // the current fenced job. A repeated result after an independently completed deletion is safe.
-func (s *ErasureWorkerStore) Process(ctx context.Context, tenant tenancy.TenantID, job ErasureJob) (bool, error) {
+func (s *ErasureWorkerStore) Process(ctx context.Context, tenant tenancy.TenantID, job ErasureJob) (ErasureProcessResult, error) {
 	if s == nil || s.db == nil || ctx == nil || !sameUUID(string(tenant), string(job.TenantID)) ||
 		!validErasureWorkerID(job.WorkerID) || job.Version == 0 || job.Version > maxVersion || job.LeaseEpoch < 1 || !validRecordID(job.RecordID) {
-		return false, ErrInvalid
+		return "", ErrInvalid
 	}
-	var deleted bool
+	var result ErasureProcessResult
 	err := tenancy.WithTenantTx(ctx, s.db, tenant, nil, func(tx *sql.Tx) error {
 		var err error
-		deleted, err = s.ProcessTx(ctx, tx, tenant, job)
+		result, err = s.ProcessTx(ctx, tx, tenant, job)
 		return err
 	})
 	if isContextErasureLeaseLost(err) {
-		return false, ErrErasureJobLeaseLost
+		return "", ErrErasureJobLeaseLost
 	}
 	if err != nil {
-		return false, fmt.Errorf("process context erasure job: %w", err)
+		return "", fmt.Errorf("process context erasure job: %w", err)
 	}
-	return deleted, nil
+	if result != ErasureProcessDeleted && result != ErasureProcessAlreadyDone && result != ErasureProcessHeld {
+		return "", fmt.Errorf("process context erasure job returned an unknown outcome %q", result)
+	}
+	return result, nil
 }
 
 // ProcessTx composes the atomic tombstone/deletion/job-completion transition with a caller transaction.
-func (s *ErasureWorkerStore) ProcessTx(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, job ErasureJob) (bool, error) {
+func (s *ErasureWorkerStore) ProcessTx(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, job ErasureJob) (ErasureProcessResult, error) {
 	if s == nil || tx == nil || ctx == nil || !sameUUID(string(tenant), string(job.TenantID)) ||
 		!validErasureWorkerID(job.WorkerID) || job.Version == 0 || job.Version > maxVersion ||
 		job.LeaseEpoch < 1 || !validRecordID(job.RecordID) {
-		return false, ErrInvalid
+		return "", ErrInvalid
 	}
-	var deleted bool
+	var result string
 	err := tx.QueryRowContext(ctx, `SELECT keel_meta.process_context_vault_erasure_job($1,$2,$3,$4)`,
-		job.RecordID, int64(job.Version), job.WorkerID, job.LeaseEpoch).Scan(&deleted)
+		job.RecordID, int64(job.Version), job.WorkerID, job.LeaseEpoch).Scan(&result)
 	if isContextErasureLeaseLost(err) {
-		return false, ErrErasureJobLeaseLost
+		return "", ErrErasureJobLeaseLost
 	}
 	if err != nil {
-		return false, fmt.Errorf("process context erasure job: %w", err)
+		return "", fmt.Errorf("process context erasure job: %w", err)
 	}
-	return deleted, nil
+	processResult := ErasureProcessResult(result)
+	if processResult != ErasureProcessDeleted && processResult != ErasureProcessAlreadyDone && processResult != ErasureProcessHeld {
+		return "", fmt.Errorf("process context erasure job returned an unknown outcome %q", result)
+	}
+	return processResult, nil
 }
 
 // Retry releases a current claim with a bounded delay and content-free error classification.
