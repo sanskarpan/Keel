@@ -47,10 +47,12 @@ Problem response: `{type,title,status,code,detail,request_id,retry_after_seconds
 | `POST /v1/reconciliation-runs` | integration-manager; adapter/cursor/dry-run; capped async run |
 | `GET /v1/reconciliation-runs/{id}` | authorized operator; diffs and effect references |
 | `POST /v1/integrations/{adapter}/callbacks` | verified provider signature; no browser token; durable inbox + 202 |
-| `POST /v1/context-records/{id}/replay` | separately granted diagnostic role; sandbox/retention policy |
+| `POST /v1/context-records/{id}/replay` | specified but unmounted; requires separately granted diagnostic role, sandbox and retention policy |
 | `POST /v1/erasures` | authorized privacy-admin; legal-hold checks, deletion manifest operation |
 
 Admin/operator APIs are separately routed, strongly authenticated and never accessed by ordinary model tools. Bulk replay/erasure have explicit maximum batch sizes and progress IDs.
+
+The context replay service boundary is tracked by [issue #306](https://github.com/sanskarpan/Keel/issues/306). Implementing that internal boundary does not mount this route. Keep it unavailable until authenticated actor/tenant resolution, diagnostic grants, production key-provider access, deployment isolation, and endpoint-specific rate/deadline controls are qualified.
 
 K2.4 decision acceptance is a case-app boundary only: PostgreSQL rechecks the frozen step role, active reviewer grant/delegation, separation of duties, dependency completion and database deadline while holding the case lock. Identical decision IDs with identical content replay safely; conflicting reuse returns a conflict. The endpoint must remain unmounted until K0 identity and runtime authorization wiring plus reviewer-grant provisioning are qualified.
 
