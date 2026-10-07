@@ -73,7 +73,8 @@ type DegradedMetrics struct {
 	mu             sync.Mutex
 	samples        map[string]degradedMetricSample
 	primarySamples map[string]degradedMetricSample
-	windowStatus   *DegradedWindowStatus
+	windowStatus              *DegradedWindowStatus
+	windowStatusRefreshErrors uint64
 }
 
 type degradedMetricSample struct {
@@ -156,6 +157,7 @@ func (m *DegradedMetrics) PrometheusMetrics() string {
 		}
 		windowStatus = &status
 	}
+	windowStatusRefreshErrors := m.windowStatusRefreshErrors
 	m.mu.Unlock()
 	outcomes := make([]string, 0, len(samples))
 	for outcome := range samples {
@@ -193,6 +195,9 @@ func (m *DegradedMetrics) PrometheusMetrics() string {
 		fmt.Fprintf(&b, "keel_rate_limit_primary_admission_duration_seconds_count{result=%q} %d\n", outcome, sample.count)
 	}
 	writeDegradedWindowMetrics(&b, windowStatus)
+	b.WriteString("# HELP keel_rate_limit_degraded_window_status_refresh_errors_total Failed refreshes of the protected degraded-window status snapshot.\n")
+	b.WriteString("# TYPE keel_rate_limit_degraded_window_status_refresh_errors_total counter\n")
+	fmt.Fprintf(&b, "keel_rate_limit_degraded_window_status_refresh_errors_total %d\n", windowStatusRefreshErrors)
 	return b.String()
 }
 
