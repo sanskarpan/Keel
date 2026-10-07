@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sanskarpan/keel/internal/ai/attempt"
 	"github.com/sanskarpan/keel/internal/ai/budget"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
@@ -50,6 +52,9 @@ type JobSpec struct {
 	ProviderID      string
 	ModelID         string
 	MaxOutputTokens int
+	// AttemptPlan persists an immutable, content-free provider candidate plan
+	// with queue admission. It does not authorize provider dispatch.
+	AttemptPlan *attempt.Plan
 }
 
 type EnqueueResult struct {
@@ -95,6 +100,11 @@ func (r *Repository) Enqueue(ctx context.Context, spec JobSpec) (EnqueueResult, 
 				return ErrQueueConflict
 			}
 			result.Replayed = true
+			if spec.AttemptPlan != nil {
+				if err := persistAttemptPlan(ctx, tx, spec, policyHash); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -127,12 +137,91 @@ func (r *Repository) Enqueue(ctx context.Context, spec JobSpec) (EnqueueResult, 
 		if rows != 1 {
 			return ErrQueueUnavailable
 		}
+		if spec.AttemptPlan != nil {
+			if err := persistAttemptPlan(ctx, tx, spec, policyHash); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
 		return EnqueueResult{}, mapQueueError(err)
 	}
 	return result, nil
+}
+
+type persistedCapability struct {
+	ProviderID                 string `json:"provider_id"`
+	ProviderVersion            string `json:"provider_version"`
+	ModelID                    string `json:"model_id"`
+	ArtifactDigest             string `json:"artifact_digest"`
+	SupportsIdempotency        bool   `json:"supports_idempotency"`
+	MaximumAttemptLiabilityUSD int64  `json:"maximum_attempt_liability_micro_usd"`
+}
+
+type persistedAttemptPlan struct {
+	PrimaryAttemptID          string               `json:"primary_attempt_id"`
+	FallbackAttemptID         string               `json:"fallback_attempt_id,omitempty"`
+	PolicyDigest              string               `json:"policy_sha256"`
+	Primary                   persistedCapability  `json:"primary_capability"`
+	PrimaryCapabilityDigest   string               `json:"primary_capability_sha256"`
+	Fallback                  *persistedCapability `json:"fallback_capability"`
+	FallbackCapabilityDigest  string               `json:"fallback_capability_sha256,omitempty"`
+	FallbackAllowanceMicroUSD int64                `json:"fallback_allowance_micro_usd"`
+	ReservedLiabilityMicroUSD int64                `json:"reserved_liability_micro_usd"`
+	Deadline                  time.Time            `json:"deadline_at"`
+}
+
+func persistAttemptPlan(ctx context.Context, tx *sql.Tx, spec JobSpec, policyHash []byte) error {
+	p := spec.AttemptPlan
+	a := spec.Admission
+	if p == nil || p.Validate() != nil || p.TenantID != string(a.Tenant) || p.InferenceID != a.InferenceID ||
+		p.PrimaryAttemptID != a.AttemptID || p.PolicyDigest != a.Quote.PolicyDigest() ||
+		p.ReservedLiabilityMicroUSD != a.Quote.MaximumLiabilityMicroUSD() ||
+		p.Primary.ProviderID != spec.ProviderID || p.Primary.ModelID != spec.ModelID ||
+		!equalHash(policyHash, mustDecodeHash(p.PolicyDigest)) {
+		return ErrQueueConflict
+	}
+	encode := func(c attempt.Capability) persistedCapability {
+		return persistedCapability{ProviderID: c.ProviderID, ProviderVersion: c.ProviderVersion, ModelID: c.ModelID,
+			ArtifactDigest: c.ArtifactDigest, SupportsIdempotency: c.SupportsIdempotency,
+			MaximumAttemptLiabilityUSD: c.MaximumAttemptLiabilityUSD}
+	}
+	plan := persistedAttemptPlan{PrimaryAttemptID: p.PrimaryAttemptID, FallbackAttemptID: p.FallbackAttemptID,
+		PolicyDigest: p.PolicyDigest, Primary: encode(p.Primary), FallbackAllowanceMicroUSD: p.FallbackAllowanceMicroUSD,
+		ReservedLiabilityMicroUSD: p.ReservedLiabilityMicroUSD, Deadline: p.Deadline.UTC()}
+	primaryDigest, err := p.Primary.Digest()
+	if err != nil {
+		return ErrQueueConflict
+	}
+	plan.PrimaryCapabilityDigest = primaryDigest
+	if p.Fallback != nil {
+		fallback := encode(*p.Fallback)
+		plan.Fallback = &fallback
+		fallbackDigest, err := p.Fallback.Digest()
+		if err != nil {
+			return ErrQueueConflict
+		}
+		plan.FallbackCapabilityDigest = fallbackDigest
+	}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		return ErrQueueConflict
+	}
+	var persisted bool
+	if err := tx.QueryRowContext(ctx, `SELECT keel_meta.persist_ai_provider_attempt_plan($1,$2,$3::jsonb)`,
+		string(a.Tenant), a.InferenceID, string(data)).Scan(&persisted); err != nil {
+		return err
+	}
+	if !persisted {
+		return ErrQueueConflict
+	}
+	return nil
+}
+
+func mustDecodeHash(value string) []byte {
+	decoded, _ := hex.DecodeString(value)
+	return decoded
 }
 
 type Lease struct {
@@ -247,6 +336,30 @@ func (r *Repository) SettleNoCharge(ctx context.Context, lease Lease, source str
 		var ok bool
 		return tx.QueryRowContext(ctx, `SELECT keel_meta.apply_ai_job_outcome($1,$2,$3,$4,'no_charge',0,$5)`,
 			string(lease.Tenant), lease.InferenceID, lease.WorkerID, lease.Epoch, source).Scan(&ok)
+	}))
+}
+
+// RecordAttemptOutcome persists one content-free provider-attempt observation
+// under the current job lease fence. It records evidence only: budget and job
+// settlement remain owned by the existing atomic outcome methods.
+func (r *Repository) RecordAttemptOutcome(ctx context.Context, lease Lease, outcome attempt.Outcome) error {
+	if !validLease(lease) || outcome.Validate() != nil {
+		return ErrLeaseLost
+	}
+	return mapQueueError(tenancy.WithTenantTx(ctx, r.workerDB, lease.Tenant, nil, func(tx *sql.Tx) error {
+		var ok bool
+		err := tx.QueryRowContext(ctx, `SELECT keel_meta.record_ai_provider_attempt_outcome(
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, string(lease.Tenant), lease.InferenceID,
+			lease.WorkerID, lease.Epoch, outcome.AttemptID, string(outcome.Acceptance), string(outcome.Charge),
+			string(outcome.Failure), outcome.ProviderOutputSeen, outcome.ClientTokenBytes, outcome.UsageMicroUSD,
+			outcome.FinishedAt.UTC().Truncate(time.Microsecond)).Scan(&ok)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrQueueConflict
+		}
+		return nil
 	}))
 }
 
@@ -371,7 +484,9 @@ func mapQueueError(err error) error {
 		return ErrLeaseLost
 	case strings.Contains(strings.ToLower(err.Error()), "not expired or no longer current"):
 		return ErrLeaseLost
-	case strings.Contains(strings.ToLower(err.Error()), "outcome conflicts with existing disposition"), strings.Contains(strings.ToLower(err.Error()), "requires matching durable budget disposition"):
+	case strings.Contains(strings.ToLower(err.Error()), "outcome conflicts with existing disposition"),
+		strings.Contains(strings.ToLower(err.Error()), "requires matching durable budget disposition"),
+		strings.Contains(strings.ToLower(err.Error()), "conflicting ai provider attempt"):
 		return ErrQueueConflict
 	default:
 		return fmt.Errorf("AI queue transaction: %w", err)
