@@ -88,6 +88,80 @@ func TestRedisLostReplyAfterScriptCommitOverTCP(t *testing.T) {
 	}
 }
 
+func TestRedisRequestDroppedBeforeScriptExecutionOverTCP(t *testing.T) {
+	redisURL := strings.TrimSpace(os.Getenv("KEEL_TEST_REDIS_URL"))
+	if redisURL == "" {
+		t.Skip("set KEEL_TEST_REDIS_URL for TCP-level Redis fault injection")
+	}
+	options, err := redis.ParseURL(redisURL)
+	if err != nil {
+		t.Fatal("parse Redis integration URL")
+	}
+	if options.TLSConfig != nil {
+		t.Skip("TCP-level RESP fault proxy requires a plaintext disposable Redis fixture")
+	}
+	options.MaxRetries = -1
+	directClient := redis.NewClient(options)
+	t.Cleanup(func() { _ = directClient.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := directClient.Ping(ctx).Err(); err != nil {
+		t.Fatalf("connect to disposable Redis service: %v", err)
+	}
+	limiterConfig := Config{Region: "us-east-1", HomeRegion: "us-east-1", KeyID: "tcp-precommit-v1",
+		Secret: []byte(strings.Repeat("p", 32)), ReplayTTL: time.Minute}
+	directLimiter, err := New(directClient, limiterConfig)
+	if err != nil {
+		t.Fatal("create direct limiter")
+	}
+	policy := Policy{Digest: strings.Repeat("e", 64), CapacityUnits: 10, RefillUnitsPerSecond: 1, CostUnits: 10}
+	warmRequest := Request{TenantID: uuid.NewString(), RouteID: "safe.read", RequestID: uuid.NewString(), Policy: policy}
+	if decision, err := directLimiter.Allow(ctx, warmRequest); err != nil || !decision.Allowed {
+		t.Fatalf("warm Redis Lua script cache = %+v, err=%v", decision, err)
+	}
+
+	proxy := newRedisEVALSHADropRequestProxy(t, options.Addr)
+	proxyOptions := *options
+	proxyOptions.Addr = proxy.addr
+	proxyOptions.MaxRetries = -1
+	proxyClient := redis.NewClient(&proxyOptions)
+	t.Cleanup(func() { _ = proxyClient.Close() })
+	if err := proxyClient.Ping(ctx).Err(); err != nil {
+		t.Fatalf("connect through Redis TCP proxy: %v", err)
+	}
+	proxyLimiter, err := New(proxyClient, limiterConfig)
+	if err != nil {
+		t.Fatal("create fault-proxied limiter")
+	}
+
+	request := Request{TenantID: uuid.NewString(), RouteID: "safe.read", RequestID: uuid.NewString(), Policy: policy}
+	if decision, err := proxyLimiter.Allow(ctx, request); err == nil {
+		t.Fatalf("fault proxy unexpectedly returned admission decision %+v", decision)
+	} else if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("dropped Redis request classified as %v, want ErrUnavailable", err)
+	}
+	select {
+	case <-proxy.requestDropped:
+	case <-ctx.Done():
+		t.Fatal("TCP proxy did not observe and drop the EVALSHA request before Redis execution")
+	}
+
+	firstDecision, err := directLimiter.Allow(ctx, request)
+	if err != nil || !firstDecision.Allowed || firstDecision.Replayed || firstDecision.Remaining != 0 {
+		t.Fatalf("request dropped before execution did not retain its token for exact retry: %+v, err=%v", firstDecision, err)
+	}
+	replay, err := directLimiter.Allow(ctx, request)
+	if err != nil || !replay.Allowed || !replay.Replayed || replay.Remaining != 0 {
+		t.Fatalf("exact retry did not replay the now-committed Redis decision: %+v, err=%v", replay, err)
+	}
+	distinct := request
+	distinct.RequestID = uuid.NewString()
+	decision, err := directLimiter.Allow(ctx, distinct)
+	if err != nil || decision.Allowed {
+		t.Fatalf("exact retry did not consume a single shared bucket token: %+v, err=%v", decision, err)
+	}
+}
+
 func TestReadRedisCommandPreservesRESPAndNormalizesName(t *testing.T) {
 	frame := "*2\r\n$7\r\nevalsha\r\n$3\r\nabc\r\n"
 	gotFrame, command, err := readRedisCommand(bufio.NewReader(strings.NewReader(frame)))
@@ -111,6 +185,56 @@ type redisEVALSHAReplyDropProxy struct {
 	addr         string
 	replyDropped chan struct{}
 	dropNext     atomic.Bool
+}
+
+type redisEVALSHADropRequestProxy struct {
+	addr           string
+	requestDropped chan struct{}
+}
+
+func newRedisEVALSHADropRequestProxy(t *testing.T, upstream string) *redisEVALSHADropRequestProxy {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal("listen for Redis request-drop proxy")
+	}
+	proxy := &redisEVALSHADropRequestProxy{addr: listener.Addr().String(), requestDropped: make(chan struct{})}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			clientConn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go proxy.handleConnection(clientConn, upstream)
+		}
+	}()
+	return proxy
+}
+
+func (p *redisEVALSHADropRequestProxy) handleConnection(clientConn net.Conn, upstream string) {
+	upstreamConn, err := net.DialTimeout("tcp", upstream, time.Second)
+	if err != nil {
+		_ = clientConn.Close()
+		return
+	}
+	defer clientConn.Close()
+	defer upstreamConn.Close()
+	go func() { _, _ = io.Copy(clientConn, upstreamConn) }()
+	clientReader := bufio.NewReader(clientConn)
+	for {
+		frame, command, err := readRedisCommand(clientReader)
+		if err != nil {
+			return
+		}
+		if command == "EVALSHA" {
+			close(p.requestDropped)
+			return
+		}
+		if err := writeRedisFrame(upstreamConn, frame); err != nil {
+			return
+		}
+	}
 }
 
 func newRedisEVALSHAReplyDropProxy(t *testing.T, upstream string) *redisEVALSHAReplyDropProxy {
