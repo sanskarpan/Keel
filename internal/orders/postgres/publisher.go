@@ -1,13 +1,10 @@
 package postgres
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"time"
 
@@ -83,45 +80,33 @@ func (r *Repository) LoadClaimed(ctx context.Context, claim outbox.Claim) (outbo
 	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
 		var raw []byte
 		var eventType string
-		err := tx.QueryRowContext(ctx, `SELECT o.safe_envelope,o.event_type
+		var schemaVersion int
+		err := tx.QueryRowContext(ctx, `SELECT o.safe_envelope,o.event_type,o.schema_version
 			FROM keel_meta.outbox_publish_heads AS h
 			JOIN keel_meta.outbox_delivery AS d ON d.tenant_id=h.tenant_id AND d.event_id=$2
 			JOIN keel_meta.event_outbox AS o ON o.tenant_id=d.tenant_id AND o.event_id=d.event_id
 			WHERE h.tenant_id=$1 AND h.aggregate_id=$3 AND h.next_version=$4
 			  AND h.claim_owner=$5 AND h.lease_epoch=$6 AND h.lease_expires_at>clock_timestamp()
 			  AND d.aggregate_id=h.aggregate_id AND d.aggregate_version=h.next_version AND d.delivery_state='pending'`,
-			string(tenant), claim.EventID, claim.AggregateID, claim.Version, claim.Owner, claim.Epoch).Scan(&raw, &eventType)
+			string(tenant), claim.EventID, claim.AggregateID, claim.Version, claim.Owner, claim.Epoch).Scan(&raw, &eventType, &schemaVersion)
 		if errors.Is(err, sql.ErrNoRows) {
 			return outbox.ErrLeaseLost
 		}
 		if err != nil {
 			return err
 		}
-		var envelope struct {
-			SchemaVersion    int    `json:"schema_version"`
-			EventID          string `json:"event_id"`
-			TenantID         string `json:"tenant_id"`
-			AggregateID      string `json:"aggregate_id"`
-			AggregateVersion int64  `json:"aggregate_version"`
-			EventType        string `json:"event_type"`
-			OccurredAt       string `json:"occurred_at"`
-		}
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&envelope); err != nil {
+		envelope, _, err := decodeCanonicalEnvelope(string(tenant), raw)
+		if err != nil {
 			return fmt.Errorf("%w: %w: decode safe outbox envelope", ErrCorruptState, outbox.ErrPoisonEnvelope)
 		}
-		if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-			return fmt.Errorf("%w: %w: safe outbox envelope has trailing JSON", ErrCorruptState, outbox.ErrPoisonEnvelope)
-		}
-		if envelope.SchemaVersion < 1 || envelope.EventID != claim.EventID || envelope.TenantID != string(tenant) ||
-			envelope.AggregateID != claim.AggregateID || envelope.AggregateVersion != claim.Version || envelope.EventType != eventType ||
-			eventType != claim.EventType || envelope.OccurredAt == "" {
+		if envelope.SchemaVersion != schemaVersion || envelope.EventID != claim.EventID || envelope.TenantID != string(tenant) ||
+			envelope.AggregateID != claim.AggregateID || envelope.AggregateVersion != claim.Version || string(envelope.EventType) != eventType ||
+			eventType != claim.EventType || envelope.OccurredAt.IsZero() {
 			return fmt.Errorf("%w: %w: safe outbox envelope identity mismatch", ErrCorruptState, outbox.ErrPoisonEnvelope)
 		}
 		message = outbox.Message{
 			SchemaVersion: envelope.SchemaVersion, TenantID: envelope.TenantID, AggregateID: envelope.AggregateID,
-			AggregateVersion: envelope.AggregateVersion, EventID: envelope.EventID, EventType: envelope.EventType,
+			AggregateVersion: envelope.AggregateVersion, EventID: envelope.EventID, EventType: string(envelope.EventType), Traceparent: envelope.Traceparent,
 			Payload: append([]byte(nil), raw...),
 		}
 		return nil
