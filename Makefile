@@ -1,4 +1,4 @@
-.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-rate-limit-observer local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
+.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-rate-limit-observer local-monitoring-up local-monitoring-down local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
 
 COMPOSE_FILE := deploy/compose/compose.yaml
 
@@ -81,6 +81,12 @@ local-rate-limit-observer: local-migrate
 	KEEL_RATE_LIMIT_STATUS_REFRESH_INTERVAL=5s \
 	KEEL_RATE_LIMIT_STATUS_QUERY_TIMEOUT=1s \
 	GOTOOLCHAIN=local go run ./cmd/keel
+
+local-monitoring-up: local-up
+	docker compose -f $(COMPOSE_FILE) --profile monitoring up -d prometheus
+
+local-monitoring-down:
+	docker compose -f $(COMPOSE_FILE) --profile monitoring stop prometheus
 
 local-orders-test: local-migrate
 	@set -eu; \
