@@ -1,6 +1,7 @@
 package projector
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sanskarpan/keel/internal/orders"
+	"github.com/sanskarpan/keel/internal/platform/observability"
+	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
 
 const (
@@ -30,11 +33,77 @@ type fakeStore struct {
 	quarantineOffset    int64
 	quarantineHash      [32]byte
 	quarantineReason    string
+	childTraceparent    string
+	childParentSpanID   string
 }
 
-func (s *fakeStore) Apply(_ context.Context, consumer string, envelope Envelope, digest [32]byte) (Result, error) {
+func (s *fakeStore) Apply(ctx context.Context, consumer string, envelope Envelope, digest [32]byte) (Result, error) {
 	s.consumer, s.tenant, s.envelope, s.digest = consumer, envelope.TenantID, envelope, digest
+	s.childTraceparent, _ = observability.TraceparentFromContext(ctx)
+	if correlation, ok := observability.RequestContextFromContext(ctx); ok {
+		s.childParentSpanID = correlation.ParentSpanID
+	}
 	return s.result, s.err
+}
+
+func TestDecodeV2TraceContextRequiresExactValidHeaderAgreement(t *testing.T) {
+	const parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	raw, err := json.Marshal(Envelope{SchemaVersion: 2, EventID: testEvent, TenantID: testTenant, AggregateID: testOrder,
+		AggregateVersion: 1, EventType: orders.OrderCreated, OccurredAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Traceparent: parent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testRecord(raw, "1")
+	record.Headers[1].Value = []byte("2")
+	record.Headers = append(record.Headers, Header{Key: "traceparent", Value: []byte(parent)})
+	if got, _, err := Decode(testTenant, record); err != nil || got.Traceparent != parent {
+		t.Fatalf("v2 envelope=%+v err=%v", got, err)
+	}
+	cases := map[string]func(*Record){
+		"mismatched header": func(r *Record) {
+			r.Headers[len(r.Headers)-1].Value = []byte("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+		},
+		"duplicate header": func(r *Record) { r.Headers = append(r.Headers, Header{Key: "traceparent", Value: []byte(parent)}) },
+		"missing header":   func(r *Record) { r.Headers = r.Headers[:len(r.Headers)-1] },
+		"malformed envelope value": func(r *Record) {
+			r.Value = bytes.Replace(r.Value, []byte(parent), []byte("bad"), 1)
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			candidate := record
+			candidate.Headers = append([]Header(nil), record.Headers...)
+			candidate.Value = append([]byte(nil), record.Value...)
+			mutate(&candidate)
+			if _, _, err := Decode(testTenant, candidate); !errors.Is(err, ErrInvalidRecord) {
+				t.Fatalf("Decode error=%v, want ErrInvalidRecord", err)
+			}
+		})
+	}
+}
+
+func TestProcessCreatesChildCorrelationContextForV2(t *testing.T) {
+	const parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	raw, err := json.Marshal(Envelope{SchemaVersion: 2, EventID: testEvent, TenantID: testTenant, AggregateID: testOrder,
+		AggregateVersion: 1, EventType: orders.OrderCreated, OccurredAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Traceparent: parent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testRecord(raw, "1")
+	record.Headers[1].Value = []byte("2")
+	record.Headers = append(record.Headers, Header{Key: "traceparent", Value: []byte(parent)})
+	store := &fakeStore{}
+	processor, err := New(store, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := processor.Process(context.Background(), testTenant, record); err != nil {
+		t.Fatal(err)
+	}
+	child, ok := tracecontext.Parse(store.childTraceparent)
+	if !ok || child.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" || child.SpanID == "00f067aa0ba902b7" || store.childParentSpanID != "00f067aa0ba902b7" {
+		t.Fatalf("child correlation=%q parent span=%q", store.childTraceparent, store.childParentSpanID)
+	}
 }
 func (s *fakeStore) ReplayGaps(_ context.Context, tenant, consumer string, limit int) (int, error) {
 	s.tenant, s.consumer, s.limit = tenant, consumer, limit
