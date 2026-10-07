@@ -145,7 +145,7 @@ func (m *DegradedMetrics) WindowStatusFresh(now time.Time, maxAge time.Duration)
 	return now.Sub(m.windowStatusRefreshedAt) <= maxAge
 }
 
-func writeDegradedWindowMetrics(b *strings.Builder, status *DegradedWindowStatus) {
+func writeDegradedWindowMetrics(b *strings.Builder, status *DegradedWindowStatus, refreshAgeSeconds float64) {
 	b.WriteString("# HELP keel_rate_limit_degraded_window_status_observed Whether a database-backed window status snapshot has been observed.\n")
 	b.WriteString("# TYPE keel_rate_limit_degraded_window_status_observed gauge\n")
 	b.WriteString("# HELP keel_rate_limit_degraded_window_present Whether a degraded admission window exists for the configured home region.\n")
@@ -158,13 +158,17 @@ func writeDegradedWindowMetrics(b *strings.Builder, status *DegradedWindowStatus
 	b.WriteString("# TYPE keel_rate_limit_degraded_window_seconds_until_expiry gauge\n")
 	b.WriteString("# HELP keel_rate_limit_degraded_window_last_observed_timestamp_seconds Database timestamp of the latest successful window status read.\n")
 	b.WriteString("# TYPE keel_rate_limit_degraded_window_last_observed_timestamp_seconds gauge\n")
+	b.WriteString("# HELP keel_rate_limit_degraded_window_status_refresh_age_seconds Seconds since the observer process last refreshed the status snapshot; -1 means no snapshot or an invalid future refresh time.\n")
+	b.WriteString("# TYPE keel_rate_limit_degraded_window_status_refresh_age_seconds gauge\n")
 	b.WriteString("# HELP keel_rate_limit_degraded_window_last_recovered_timestamp_seconds Database timestamp when Redis recovery last closed the window, or zero when absent.\n")
 	b.WriteString("# TYPE keel_rate_limit_degraded_window_last_recovered_timestamp_seconds gauge\n")
 	if status == nil {
 		b.WriteString("keel_rate_limit_degraded_window_status_observed 0\n")
+		b.WriteString("keel_rate_limit_degraded_window_status_refresh_age_seconds -1\n")
 		return
 	}
 	b.WriteString("keel_rate_limit_degraded_window_status_observed 1\n")
+	fmt.Fprintf(b, "keel_rate_limit_degraded_window_status_refresh_age_seconds %.6f\n", refreshAgeSeconds)
 	writeBoolGauge(b, "keel_rate_limit_degraded_window_present", status.Present)
 	writeBoolGauge(b, "keel_rate_limit_degraded_window_active", status.Active)
 	writeBoolGauge(b, "keel_rate_limit_degraded_admission_window_open", status.AdmissionOpen)
