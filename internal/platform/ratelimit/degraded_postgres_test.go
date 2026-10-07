@@ -1038,9 +1038,10 @@ func TestPostgresDegradedWindowStatusIsRateControlOnlyAndReflectsRecovery(t *tes
 		t.Fatalf("active window status is missing or leaks regional identity: %s", activeMetrics)
 	}
 
-	if _, err := admin.ExecContext(ctx, `UPDATE keel_meta.rate_limit_degraded_windows
-		SET started_at=clock_timestamp()-interval '120 seconds', expires_at=clock_timestamp()-interval '60 seconds'
-		WHERE home_region=$1`, region); err != nil {
+	if _, err := admin.ExecContext(ctx, `WITH test_time AS (SELECT clock_timestamp() AS now_at)
+		UPDATE keel_meta.rate_limit_degraded_windows
+		SET started_at=test_time.now_at-interval '60 seconds', expires_at=test_time.now_at-interval '1 second'
+		FROM test_time WHERE home_region=$1`, region); err != nil {
 		t.Fatal(err)
 	}
 	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, metrics); err != nil {
