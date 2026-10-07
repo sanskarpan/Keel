@@ -128,8 +128,8 @@ func runRateLimitObserver(ctx context.Context, cfg config.Config, lookup func(st
 			if err := db.PingContext(probeCtx); err != nil {
 				return err
 			}
-			if !metrics.WindowStatusObserved() {
-				return errors.New("degraded window status has not been observed")
+			if !metrics.WindowStatusFresh(time.Now(), 3*settings.interval) {
+				return errors.New("degraded window status snapshot is absent or stale")
 			}
 			return nil
 		}
