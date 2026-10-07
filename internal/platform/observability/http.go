@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sanskarpan/keel/internal/platform/logging"
+	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
 
 type requestContextKey struct{}
@@ -32,26 +33,20 @@ func RequestContextFromContext(ctx context.Context) (RequestContext, bool) {
 
 // ParseTraceparent parses the supported W3C traceparent version 00 format.
 func ParseTraceparent(value string) (traceID, parentSpanID string, flags uint8, ok bool) {
-	if len(value) != 55 || value[2] != '-' || value[35] != '-' || value[52] != '-' || value[:2] != "00" {
+	parsed, ok := tracecontext.Parse(value)
+	if !ok {
 		return "", "", 0, false
 	}
-	for _, char := range value {
-		if char == '-' {
-			continue
-		}
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
-			return "", "", 0, false
-		}
+	return parsed.TraceID, parsed.SpanID, parsed.Flags, true
+}
+
+// TraceparentFromContext formats the server span as the parent for downstream work.
+func TraceparentFromContext(ctx context.Context) (string, bool) {
+	correlation, ok := RequestContextFromContext(ctx)
+	if !ok {
+		return "", false
 	}
-	traceID, parentSpanID = value[3:35], value[36:52]
-	if allZero(traceID) || allZero(parentSpanID) {
-		return "", "", 0, false
-	}
-	parsed, err := hex.DecodeString(value[53:55])
-	if err != nil || len(parsed) != 1 {
-		return "", "", 0, false
-	}
-	return traceID, parentSpanID, parsed[0], true
+	return tracecontext.Format(correlation.TraceID, correlation.SpanID, correlation.TraceFlags)
 }
 
 // HTTP assigns a request ID and a server span ID, stores validated correlation context,
