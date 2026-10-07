@@ -186,6 +186,7 @@ type fakeReader struct {
 	readCalls  int
 	pageCalls  int
 	stateBatches []orders.StateFeedBatch
+	streamSnapshot orders.StateStreamSnapshot
 	stateErr error
 	stateCalls int
 }
@@ -225,6 +226,14 @@ func (f *fakeReader) ReadStateUpdates(_ context.Context, tenant tenancy.TenantID
 		index = len(f.stateBatches) - 1
 	}
 	return f.stateBatches[index], nil
+}
+
+func (f *fakeReader) ReadOrderStateStreamSnapshot(_ context.Context, tenant tenancy.TenantID, orderID string) (orders.StateStreamSnapshot, error) {
+	f.lastTenant = string(tenant)
+	if f.streamSnapshot.OrderID != "" {
+		return f.streamSnapshot, nil
+	}
+	return orders.StateStreamSnapshot{OrderID: orderID, Version: 1, Status: orders.Draft}, nil
 }
 
 type fakeAuthorizer struct {
