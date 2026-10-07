@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
 
 var (
@@ -45,7 +47,14 @@ type Message struct {
 	AggregateVersion int64
 	EventID          string
 	EventType        string
+	Traceparent      string
 	Payload          []byte
+}
+
+// ValidTraceparent reports whether the value is a supported W3C traceparent.
+func ValidTraceparent(value string) bool {
+	_, ok := tracecontext.Parse(value)
+	return ok
 }
 
 // Key pins all versions of one tenant aggregate to one broker partition.
