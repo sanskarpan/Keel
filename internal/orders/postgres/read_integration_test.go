@@ -120,6 +120,10 @@ func TestPostgreSQLStateFeedPagesDurableTenantSequenceAndHidesOtherTenants(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshot, err := repo.ReadOrderStateStreamSnapshot(ctx, tenant, first.Snapshot.OrderID)
+	if err != nil || snapshot.OrderID != first.Snapshot.OrderID || snapshot.Version != 1 || snapshot.Status != orders.Draft || snapshot.Cursor != 2 {
+		t.Fatalf("order stream snapshot did not include a consistent durable high-water mark: %+v err=%v", snapshot, err)
+	}
 
 	page, err := repo.ReadStateUpdates(ctx, tenant, 0, 1)
 	if err != nil || page.Oldest != 1 || page.Latest != 2 || len(page.Updates) != 1 {

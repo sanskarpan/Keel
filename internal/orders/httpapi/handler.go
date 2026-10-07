@@ -49,6 +49,7 @@ type Reader interface {
 	PageEvents(context.Context, tenancy.TenantID, string, uint64, int) (orders.HistoryPage, error)
 	ReadOrderWithHistory(context.Context, tenancy.TenantID, string, uint64, int) (orders.ReadView, orders.HistoryPage, error)
 	ReadStateUpdates(context.Context, tenancy.TenantID, uint64, int) (orders.StateFeedBatch, error)
+	ReadOrderStateStreamSnapshot(context.Context, tenancy.TenantID, string) (orders.StateStreamSnapshot, error)
 }
 
 type Authorizer interface {

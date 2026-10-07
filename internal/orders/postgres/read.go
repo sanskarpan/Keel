@@ -24,6 +24,29 @@ func (r *Repository) ReadOrder(ctx context.Context, tenant tenancy.TenantID, ord
 	return view, err
 }
 
+// ReadOrderStateStreamSnapshot returns the authorized order head and durable feed high-water
+// mark from one repeatable-read transaction, so reconnect snapshots cannot skip later updates.
+func (r *Repository) ReadOrderStateStreamSnapshot(ctx context.Context, tenant tenancy.TenantID, orderID string) (snapshot orders.StateStreamSnapshot, err error) {
+	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
+		view, err := readOrderInTx(ctx, tx, tenant, orderID)
+		if err != nil {
+			return err
+		}
+		var cursor int64
+		err = tx.QueryRowContext(ctx, `SELECT last_sequence FROM keel_meta.state_feed_counters WHERE tenant_id=$1`, string(tenant)).Scan(&cursor)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if cursor < 0 {
+			return ErrCorruptState
+		}
+		snapshot = orders.StateStreamSnapshot{OrderID: view.Snapshot.OrderID, Version: view.Snapshot.Version,
+			Status: view.Snapshot.Status, UpdatedAt: view.UpdatedAt.UTC(), Cursor: uint64(cursor)}
+		return nil
+	})
+	return snapshot, err
+}
+
 // ReadStateUpdates returns a bounded tenant sequence page and retention bounds from one
 // repeatable-read snapshot. The caller receives typed allowlisted fields, never raw JSON.
 func (r *Repository) ReadStateUpdates(ctx context.Context, tenant tenancy.TenantID, after uint64, limit int) (batch orders.StateFeedBatch, err error) {
