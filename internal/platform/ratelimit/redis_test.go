@@ -46,6 +46,34 @@ func TestLimiterValidationAndRegionFence(t *testing.T) {
 		t.Fatalf("Redis client did not disable internal retries: %d", client.Options().MaxRetries)
 	}
 	_ = client.Close()
+
+	iamProvider := func(context.Context) (string, string, error) { return "keel-limiter", "signed-token", nil }
+	remoteTLS := &tls.Config{MinVersion: tls.VersionTLS12}
+	iamClient, err := NewRedisClient(ClientConfig{Addr: "cache.example:6379", Username: "keel-limiter", Region: "us-east-1", HomeRegion: "us-east-1",
+		TLSConfig: remoteTLS, CredentialsProvider: iamProvider, DialTimeout: time.Second, ReadTimeout: time.Second,
+		WriteTimeout: time.Second, PoolSize: 4})
+	if err != nil {
+		t.Fatalf("TLS Redis client rejected a dynamic IAM credential provider: %v", err)
+	}
+	if iamClient.Options().CredentialsProviderContext == nil || iamClient.Options().ConnMaxLifetime != 10*time.Hour {
+		t.Fatal("IAM client did not refresh credentials on new connections or bound connection lifetime")
+	}
+	_ = iamClient.Close()
+
+	clusterClient, err := NewRedisClusterClient(ClientConfig{Addr: "cache.example:6379", Username: "keel-limiter", Region: "us-east-1", HomeRegion: "us-east-1",
+		TLSConfig: remoteTLS, CredentialsProvider: iamProvider, DialTimeout: time.Second, ReadTimeout: time.Second,
+		WriteTimeout: time.Second, PoolSize: 4})
+	if err != nil {
+		t.Fatalf("cluster-aware Redis client rejected a dynamic IAM credential provider: %v", err)
+	}
+	if len(clusterClient.Options().Addrs) != 1 || clusterClient.Options().CredentialsProviderContext == nil || clusterClient.Options().ConnMaxLifetime != 10*time.Hour {
+		t.Fatal("cluster client did not retain its seed endpoint, IAM provider, and bounded connection lifetime")
+	}
+	_ = clusterClient.Close()
+	if _, err := NewRedisClusterClient(ClientConfig{Addr: "cache.example:6379", Username: "keel-limiter", Region: "us-east-1", HomeRegion: "us-east-1",
+		CredentialsProvider: iamProvider, DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second, PoolSize: 4}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("cluster IAM without TLS was accepted: %v", err)
+	}
 }
 
 func TestRedisScriptKeysShareOpaqueClusterHashTag(t *testing.T) {
@@ -76,11 +104,10 @@ func redisHashTag(key string) string {
 	return key[start+1 : start+1+end]
 }
 
-
 type syntheticRedisError string
 
 func (e syntheticRedisError) Error() string { return string(e) }
-func (syntheticRedisError) RedisError()       {}
+func (syntheticRedisError) RedisError()     {}
 
 func TestRedisFailureClassification(t *testing.T) {
 	connectionRefused := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
