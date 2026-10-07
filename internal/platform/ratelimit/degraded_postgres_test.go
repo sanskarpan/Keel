@@ -999,8 +999,9 @@ func TestPostgresDegradedRecoveryProbeFlapRestartsHealthInterval(t *testing.T) {
 	}
 }
 
-func TestPostgresDegradedWindowStatusIsRateControlOnlyAndReflectsRecovery(t *testing.T) {
+func TestPostgresDegradedWindowStatusHasReadOnlyRoleAndReflectsRecovery(t *testing.T) {
 	appDB, admin, rateControl := openDegradedTestDatabases(t)
+	rateStatus := openRateStatusTestDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	region := "test-" + uuid.NewString()[:8]
@@ -1009,7 +1010,7 @@ func TestPostgresDegradedWindowStatusIsRateControlOnlyAndReflectsRecovery(t *tes
 	})
 	metrics := NewDegradedMetrics()
 
-	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, metrics); err != nil {
+	if err := ObserveDegradedWindowStatus(ctx, rateStatus, region, metrics); err != nil {
 		t.Fatalf("read absent region window: %v", err)
 	}
 	if got := metrics.PrometheusMetrics(); !strings.Contains(got, "keel_rate_limit_degraded_window_status_observed 1") ||
@@ -1019,6 +1020,15 @@ func TestPostgresDegradedWindowStatusIsRateControlOnlyAndReflectsRecovery(t *tes
 	if err := ObserveDegradedWindowStatus(ctx, appDB, region, NewDegradedMetrics()); err == nil {
 		t.Fatal("ordinary application role read the rate-control-only window status function")
 	}
+	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, NewDegradedMetrics()); err == nil {
+		t.Fatal("rate-control role read the status function reserved for the read-only observer")
+	}
+	if _, err := rateStatus.ExecContext(ctx, `SELECT keel_meta.mark_rate_limit_redis_healthy($1,interval '5 seconds')`, region); err == nil {
+		t.Fatal("read-only status role cleared a Redis recovery fence")
+	}
+	if _, err := rateStatus.ExecContext(ctx, `SELECT count(*) FROM keel_meta.rate_limit_degraded_windows`); err == nil {
+		t.Fatal("read-only status role read the degraded-window table directly")
+	}
 	if _, err := appDB.ExecContext(ctx, `SELECT count(*) FROM keel_meta.rate_limit_degraded_windows`); err == nil {
 		t.Fatal("ordinary application role read the degraded-window table directly")
 	}
@@ -1027,7 +1037,7 @@ func TestPostgresDegradedWindowStatusIsRateControlOnlyAndReflectsRecovery(t *tes
 		VALUES($1,gen_random_uuid(),clock_timestamp(),clock_timestamp()+interval '60 seconds',true)`, region); err != nil {
 		t.Fatal(err)
 	}
-	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, metrics); err != nil {
+	if err := ObserveDegradedWindowStatus(ctx, rateStatus, region, metrics); err != nil {
 		t.Fatalf("read active region window: %v", err)
 	}
 	activeMetrics := metrics.PrometheusMetrics()
@@ -1044,7 +1054,7 @@ func TestPostgresDegradedWindowStatusIsRateControlOnlyAndReflectsRecovery(t *tes
 		FROM test_time WHERE home_region=$1`, region); err != nil {
 		t.Fatal(err)
 	}
-	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, metrics); err != nil {
+	if err := ObserveDegradedWindowStatus(ctx, rateStatus, region, metrics); err != nil {
 		t.Fatalf("read expired region window: %v", err)
 	}
 	expiredMetrics := metrics.PrometheusMetrics()
@@ -1058,7 +1068,7 @@ func TestPostgresDegradedWindowStatusIsRateControlOnlyAndReflectsRecovery(t *tes
 		SET active=false,recovered_at=clock_timestamp() WHERE home_region=$1`, region); err != nil {
 		t.Fatal(err)
 	}
-	if err := ObserveDegradedWindowStatus(ctx, rateControl, region, metrics); err != nil {
+	if err := ObserveDegradedWindowStatus(ctx, rateStatus, region, metrics); err != nil {
 		t.Fatalf("read recovered region window: %v", err)
 	}
 	recoveredMetrics := metrics.PrometheusMetrics()
@@ -1592,4 +1602,27 @@ func openDegradedTestDatabases(t testing.TB) (app, admin, control *sql.DB) {
 		return db
 	}
 	return open(appDSN), open(adminDSN), open(controlDSN)
+}
+
+func openRateStatusTestDatabase(t testing.TB) *sql.DB {
+	t.Helper()
+	dsn := os.Getenv("KEEL_TEST_RATE_STATUS_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set KEEL_TEST_RATE_STATUS_DATABASE_URL for read-only status role integration coverage")
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal("parse rate-status test database URL")
+	}
+	db, err := sql.Open("pgx", parsed.String())
+	if err != nil {
+		t.Fatal("open rate-status test database")
+	}
+	db.SetMaxOpenConns(2)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		t.Fatal("connect rate-status test database")
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
