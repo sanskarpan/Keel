@@ -54,7 +54,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 ## K5 — Live operations and correlated diagnostics
 
 - [ ] K5.1 Build multiplexed SSE state/token transport, durable cursors and transient token sequencing. The order-authorized durable state replay slice is complete under issue #270 and PR #271, merged as `613b046f4bbf36f389f5aef20d8463c1a17c2ec2`; contract CI #455 passed on reviewed head `74ebc5a465fbc48aba0c8593ea58b4bb4c4c5209`. Evidence: `docs/K5.1-STATE-STREAM.md`. Token delivery and production runtime/auth wiring remain open.
-- [ ] K5.2 Add per-client queue/write-timeout limits, reconnect snapshots and interrupted-result handling. Issue #275 implements the durable order snapshot and bounded synchronous write slice; provider interruption events remain unimplemented because no production token source exists. Evidence: `docs/K5.2-STREAM-RELIABILITY.md`.
+- [ ] K5.2 Add per-client queue/write-timeout limits, reconnect snapshots and interrupted-result handling. The durable order snapshot and bounded synchronous write slice is complete under issue #275 and PR #276, merged as `36532b19fdfd202c47e077be524da2d56cb6d7f6`; contract CI #462 passed on reviewed head `5140d602825dc2f0f9b668f4e35378409bd1ab3e`. Evidence: `docs/K5.2-STREAM-RELIABILITY.md`. Provider interruption events and deployment connection-capacity qualification remain open.
 - [ ] K5.3 Trace HTTP/query/event/workflow/model/delivery boundaries with links and safe attributes.
 - [ ] K5.4 Add encrypted context-vault retention, authorized read-only replay and Langfuse adapter.
 - [ ] K5.5 Implement tenant cost dashboard, confirmed/estimated/unknown breakdowns and rollup watermarks.
