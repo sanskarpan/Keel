@@ -109,6 +109,40 @@ func TestPostgreSQLAuthoritativeReadWatermarkAndBoundedHistory(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLStateFeedPagesDurableTenantSequenceAndHidesOtherTenants(t *testing.T) {
+	_, tenant, repo := repositoryTestDB(t)
+	ctx := context.Background()
+	first, err := repo.Create(ctx, tenant, testCreate("state-feed-first-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "state-feed-first-"+nextUUID(), "principal:requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := repo.Create(ctx, tenant, testCreate("state-feed-second-"+nextUUID()), testMetadata(string(tenant), nextUUID()), "state-feed-second-"+nextUUID(), "principal:requester-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := repo.ReadStateUpdates(ctx, tenant, 0, 1)
+	if err != nil || page.Oldest != 1 || page.Latest != 2 || len(page.Updates) != 1 {
+		t.Fatalf("first state feed page=%+v err=%v", page, err)
+	}
+	if page.Updates[0].Sequence != 1 || page.Updates[0].AggregateID != first.Snapshot.OrderID || page.Updates[0].Version != 1 || page.Updates[0].Kind != "order.changed" || page.Updates[0].Status != orders.Draft {
+		t.Fatalf("first state feed DTO=%+v", page.Updates[0])
+	}
+	page, err = repo.ReadStateUpdates(ctx, tenant, 1, 100)
+	if err != nil || len(page.Updates) != 1 || page.Updates[0].Sequence != 2 || page.Updates[0].AggregateID != second.Snapshot.OrderID {
+		t.Fatalf("resumed state feed page=%+v err=%v", page, err)
+	}
+
+	otherTenant := mustTenant(t, nextUUID())
+	isolated, err := repo.ReadStateUpdates(ctx, otherTenant, 0, 100)
+	if err != nil || isolated.Latest != 0 || isolated.Oldest != 0 || len(isolated.Updates) != 0 {
+		t.Fatalf("cross-tenant feed data visible: %+v err=%v", isolated, err)
+	}
+	if _, err := repo.ReadStateUpdates(ctx, tenant, 0, 101); err == nil {
+		t.Fatal("oversized feed page limit was accepted")
+	}
+}
+
 func TestPostgreSQLConcurrentCommandAndProjectorReadsShareOneSnapshot(t *testing.T) {
 	appDB, tenant, appRepo := repositoryTestDB(t)
 	projectorDSN := os.Getenv("KEEL_TEST_PROJECTOR_DATABASE_URL")
