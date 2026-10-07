@@ -70,10 +70,11 @@ type DegradedLimiter struct {
 // is a fixed outcome enum; tenant, route, request, region and outage IDs are
 // intentionally excluded.
 type DegradedMetrics struct {
-	mu             sync.Mutex
-	samples        map[string]degradedMetricSample
-	primarySamples map[string]degradedMetricSample
+	mu                        sync.Mutex
+	samples                   map[string]degradedMetricSample
+	primarySamples            map[string]degradedMetricSample
 	windowStatus              *DegradedWindowStatus
+	windowStatusRefreshedAt   time.Time
 	windowStatusRefreshErrors uint64
 }
 
