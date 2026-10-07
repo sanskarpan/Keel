@@ -78,6 +78,8 @@ Kafka transport errors are redacted for the active username and password before 
 
 ## 7. Security release requirements
 
+Order trace correlation crosses Kafka only in additive schema v2 and only from protected event metadata that passed the strict W3C parser. The broker header must occur once and exactly match the envelope. The projector quarantines malformed, duplicate, unsupported or mismatched values before changing projection state. The traceparent is not an identity, tenant claim, partition key, authorization input or deduplication key. Public APIs and state feeds remain trace-free. A child consumer span is correlation context only; this does not enable an exporter. See `docs/K5.3-OUTBOX-CORRELATION.md`.
+
 Release fails on tenant leakage, agent privilege escalation, plaintext credential/PII canary leakage, unbounded parser resource use, unsigned/unverifiable artifacts or an unresolved exploitable critical dependency issue. Lower findings require a named owner, exploitability assessment and bounded exception expiry. Threat-model changes accompany new tools, endpoints, external providers or tenant-scope changes.
 
 ## 8. Expanded SaaS and purchasing boundaries
