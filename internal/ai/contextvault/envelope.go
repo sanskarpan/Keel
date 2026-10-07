@@ -36,10 +36,58 @@ var (
 )
 
 // KeyWrapper delegates data-key protection to a KMS or HSM implementation.
-// Implementations must bind wrapped keys to keyID and must never log key material.
+// Implementations must authenticate every KeyBinding attribute and must never log key material.
 type KeyWrapper interface {
-	WrapKey(context.Context, string, []byte) ([]byte, error)
-	UnwrapKey(context.Context, string, []byte) ([]byte, error)
+	WrapKey(context.Context, KeyBinding, []byte) ([]byte, error)
+	UnwrapKey(context.Context, KeyBinding, []byte) ([]byte, error)
+}
+
+// KeyBinding is the canonical record context a KMS/HSM must authenticate when wrapping
+// a data key. Its fields are private so adapters receive only validated scope values.
+type KeyBinding struct {
+	tenantID     string
+	recordID     string
+	version      uint64
+	policyDigest string
+	keyID        string
+}
+
+// TenantID returns the canonical tenant UUID for provider encryption context.
+func (b KeyBinding) TenantID() string { return b.tenantID }
+
+// RecordID returns the canonical record UUID for provider encryption context.
+func (b KeyBinding) RecordID() string { return b.recordID }
+
+// Version returns the immutable record version for provider encryption context.
+func (b KeyBinding) Version() uint64 { return b.version }
+
+// PolicyDigest returns the bound policy digest for provider encryption context.
+func (b KeyBinding) PolicyDigest() string { return b.policyDigest }
+
+// KeyID returns the configured KMS/HSM key identifier for provider encryption context.
+func (b KeyBinding) KeyID() string { return b.keyID }
+
+// EncryptionContext returns provider-safe string attributes for authenticated key wrapping.
+func (b KeyBinding) EncryptionContext() map[string]string {
+	return map[string]string{
+		"keel:binding_version": "1",
+		"keel:tenant_id":       b.tenantID,
+		"keel:record_id":       b.recordID,
+		"keel:version":         fmt.Sprintf("%d", b.version),
+		"keel:policy_digest":   b.policyDigest,
+		"keel:key_id":          b.keyID,
+	}
+}
+
+// KeyBinding validates and canonicalizes the immutable scope for provider-side DEK binding.
+func (scope Scope) KeyBinding(keyID string) (KeyBinding, error) {
+	if _, err := validateScope(scope, keyID); err != nil {
+		return KeyBinding{}, err
+	}
+	return KeyBinding{
+		tenantID: strings.ToLower(scope.TenantID), recordID: strings.ToLower(scope.RecordID),
+		version: scope.Version, policyDigest: scope.PolicyDigest, keyID: keyID,
+	}, nil
 }
 
 // Scope is authenticated alongside the ciphertext and cannot be changed at read time.
@@ -73,8 +121,18 @@ func Encrypt(ctx context.Context, wrapper KeyWrapper, keyID string, scope Scope,
 	if _, err := rand.Read(dek); err != nil {
 		return Envelope{}, ErrKeyUnavailable
 	}
-	wrapped, err := wrapper.WrapKey(ctx, keyID, dek)
-	if err != nil || len(wrapped) == 0 || len(wrapped) > maxWrappedKeyBytes || bytes.Equal(wrapped, dek) {
+	binding, err := scope.KeyBinding(keyID)
+	if err != nil {
+		return Envelope{}, ErrInvalidInput
+	}
+	wrapped, err := wrapper.WrapKey(ctx, binding, dek)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Envelope{}, ctxErr
+		}
+		return Envelope{}, ErrKeyUnavailable
+	}
+	if len(wrapped) == 0 || len(wrapped) > maxWrappedKeyBytes || bytes.Equal(wrapped, dek) {
 		return Envelope{}, ErrKeyUnavailable
 	}
 	block, err := aes.NewCipher(dek)
@@ -102,8 +160,19 @@ func Decrypt(ctx context.Context, wrapper KeyWrapper, scope Scope, envelope Enve
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	dek, err := wrapper.UnwrapKey(ctx, envelope.KeyID, envelope.WrappedDEK)
-	if err != nil || len(dek) != dataKeyBytes {
+	binding, err := scope.KeyBinding(envelope.KeyID)
+	if err != nil {
+		return nil, ErrInvalidInput
+	}
+	dek, err := wrapper.UnwrapKey(ctx, binding, envelope.WrappedDEK)
+	if err != nil {
+		wipe(dek)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, ErrKeyUnavailable
+	}
+	if len(dek) != dataKeyBytes {
 		wipe(dek)
 		return nil, ErrKeyUnavailable
 	}
