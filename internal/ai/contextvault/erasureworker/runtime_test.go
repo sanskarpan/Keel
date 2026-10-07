@@ -54,6 +54,19 @@ func TestRuntimeReportsOnlyAggregatedErrorsAndCancelsCleanly(t *testing.T) {
 	}
 }
 
+func TestRuntimeCountsLegalHoldSeparatelyFromCompletedErasure(t *testing.T) {
+	processor := &fakeProcessor{claimed: true, job: postgres.ErasureJob{State: "held"}}
+	observer := &fakeObserver{}
+	runtime, err := New(processor, Scope{Tenant: tenancy.TenantID("11111111-1111-4111-8111-111111111111")}, time.Second, observer, func(error) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := runtime.PollOnce(context.Background())
+	if err != nil || observation.Claimed != 1 || observation.Held != 1 || observation.Completed != 0 {
+		t.Fatalf("held observation=%+v err=%v", observation, err)
+	}
+}
+
 func TestRuntimeRejectsInvalidScopeAndPollingBounds(t *testing.T) {
 	processor := &fakeProcessor{}
 	observer := &fakeObserver{}
