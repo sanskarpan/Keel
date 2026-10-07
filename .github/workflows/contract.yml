@@ -73,6 +73,13 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 release line, immutable commit
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2, immutable commit
+        with:
+          terraform_version: 1.16.5
+          terraform_wrapper: false
+      - name: Validate gated MemoryDB infrastructure
+        run: bash scripts/validate-memorydb-terraform.sh
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5 release line, immutable commit
         with:

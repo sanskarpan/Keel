@@ -11,3 +11,10 @@ secrets/
 /coverage.out
 /coverage.html
 /dist/
+
+# Terraform working directories and local state/plans
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
