@@ -82,6 +82,10 @@ event: state
 id: state:<order-id>:<tenant-sequence>
 data: {"sequence":18,"event_id":"<uuid>","aggregate_id":"<uuid>","version":4,"kind":"order.changed","status":"submitted"}
 
+event: snapshot
+id: state:<order-id>:<tenant-sequence>
+data: {"order_id":"<uuid>","version":4,"status":"submitted","updated_at":"...","cursor":18}
+
 event: model.token
 data: {"inference_id":"<uuid>","attempt":1,"sequence":18,"text":"..."}
 
@@ -89,9 +93,9 @@ event: model.completed
 data: {"inference_id":"<uuid>","result_url":"...","usage_status":"confirmed"}
 ```
 
-Token messages do not assign durable SSE event IDs. A durable order-bound state cursor survives mixed token messages and cannot be reused across order streams. `Last-Event-ID` takes precedence over the optional `cursor` query value; when both are supplied they must match. Cursor-only checkpoints advance the tenant sequence across updates for other orders without disclosing those aggregate IDs. Clients deduplicate aggregate versions and token `(inference,attempt,sequence)`. Heartbeats are SSE comments. Cross-origin CORS is disabled by default; any future browser cross-origin access requires an explicit origin allowlist. Authentication uses cookies with CSRF/origin protections or a fetch streaming client with Bearer header; tokens must not appear in query strings.
+On a new stream without a cursor, the first event is a privacy-safe order snapshot with the durable high-water cursor read in the same database snapshot. A reconnect with `Last-Event-ID` replays after that cursor; the cursor is order-bound and cannot be reused across order streams. `Last-Event-ID` takes precedence over the optional `cursor` query value; when both are supplied they must match. Cursor-only checkpoints advance the tenant sequence across updates for other orders without disclosing those aggregate IDs. Clients deduplicate aggregate versions and token `(inference,attempt,sequence)`. Heartbeats are SSE comments. Every frame has a finite write deadline; a slow or disconnected client is closed without affecting durable work. The handler uses direct synchronous writes and bounded feed pages, with no per-client token/history queue. Cross-origin CORS is disabled by default; any future browser cross-origin access requires an explicit origin allowlist. Authentication uses cookies with CSRF/origin protections or a fetch streaming client with Bearer header; tokens must not appear in query strings.
 
-If replay retention is exceeded, emit `resync_required` and close. If provider content is interrupted, emit `model.interrupted` with result status and retry policy; a fresh generation requires a new logical request or an explicitly bounded recovery action. Slow consumers close without abandoning the durable job.
+If replay retention is exceeded, emit `resync_required` and close; the client reloads the authorized order snapshot before reconnecting. If provider content is interrupted, emit `model.interrupted` with result status and retry policy; a fresh generation requires a new logical request or an explicitly bounded recovery action. No production inference executor currently publishes token or interruption events.
 
 ## 5. Rate, timeout and compatibility contracts
 
