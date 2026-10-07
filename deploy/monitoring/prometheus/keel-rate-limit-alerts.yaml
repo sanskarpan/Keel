@@ -1,0 +1,42 @@
+groups:
+  - name: keel.rate-limits
+    rules:
+      - alert: KeelDegradedAdmissionDatabaseError
+        expr: sum(increase(keel_rate_limit_degraded_admissions_total{result="db_error"}[5m])) > 0
+        labels:
+          severity: page
+          service: keel
+        annotations:
+          summary: Keel safe-read degraded admission cannot reach its database authority
+          description: PostgreSQL fallback admission failed during the last five minutes. Keep fallback disabled if policy or database health is uncertain.
+          runbook_url: https://github.com/sanskarpan/Keel/blob/main/docs/SRE.md
+
+      - alert: KeelDegradedAdmissionWindowExpired
+        expr: sum(increase(keel_rate_limit_degraded_admissions_total{result="window_expired"}[5m])) > 0
+        labels:
+          severity: page
+          service: keel
+        annotations:
+          summary: Keel safe-read degraded admission window expired
+          description: New fallback admissions are fenced until the isolated recovery observer records five consecutive seconds of healthy home-region Redis probes.
+          runbook_url: https://github.com/sanskarpan/Keel/blob/main/docs/SRE.md
+
+      - alert: KeelHomeRegionRedisCommandFailure
+        expr: sum(increase(keel_rate_limit_primary_admissions_total{result="redis_failure"}[5m])) > 0
+        labels:
+          severity: page
+          service: keel
+        annotations:
+          summary: Keel home-region Redis returned a permanent admission failure
+          description: The limiter failed closed on a Redis error that is not classified as transient availability loss. Check authentication, ACL, routing, protocol and script compatibility.
+          runbook_url: https://github.com/sanskarpan/Keel/blob/main/docs/SRE.md
+
+      - alert: KeelSafeReadFallbackInUse
+        expr: sum(increase(keel_rate_limit_degraded_admissions_total{result="allowed"}[5m])) > 0
+        labels:
+          severity: warning
+          service: keel
+        annotations:
+          summary: Keel admitted safe reads through PostgreSQL fallback
+          description: Approved safe-read fallback admissions occurred during the last five minutes. Verify the Redis incident, configured limits and rollback posture; model and write routes must remain fail-closed.
+          runbook_url: https://github.com/sanskarpan/Keel/blob/main/docs/SRE.md
