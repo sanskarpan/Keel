@@ -23,6 +23,7 @@ const (
 	RoleWebhookWorker      Role = "webhook-worker"
 	RoleBillingWorker      Role = "billing-worker"
 	RoleNotificationWorker Role = "notification-worker"
+	RoleRateLimitObserver  Role = "rate-limit-observer"
 )
 
 const (
@@ -94,7 +95,7 @@ func valueOrDefault(value, fallback string) string {
 
 func supportedRole(role Role) bool {
 	switch role {
-	case RoleAPI, RoleRelay, RoleProjector, RoleAIExecutor, RoleTemporalWorker, RoleWebhookWorker, RoleBillingWorker, RoleNotificationWorker:
+	case RoleAPI, RoleRelay, RoleProjector, RoleAIExecutor, RoleTemporalWorker, RoleWebhookWorker, RoleBillingWorker, RoleNotificationWorker, RoleRateLimitObserver:
 		return true
 	default:
 		return false
