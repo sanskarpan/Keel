@@ -83,7 +83,7 @@ func (h *Handler) streamOrderState(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cursor, hasCursor, ok := parseRequestStateCursor(r, orderID)
+	cursor, ok, hasCursor := parseRequestStateCursor(r, orderID)
 	if !ok {
 		h.fail(w, r, http.StatusBadRequest, "invalid_state_cursor", "The state cursor is invalid.")
 		return
