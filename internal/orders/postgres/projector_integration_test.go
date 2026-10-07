@@ -106,9 +106,10 @@ func TestPostgreSQLProjectorDefersReplaysAndDeduplicates(t *testing.T) {
 		t.Fatalf("same-ID conflicting content result=%+v err=%v", result, err)
 	}
 	differentID := versionTwo
-	differentID.Headers = []projector.Header{
-		{Key: "event_id", Value: []byte("cccccccc-cccc-4ccc-8ccc-cccccccccccc")},
-		{Key: "schema_version", Value: []byte("1")}, {Key: "aggregate_version", Value: []byte("2")},
+	for i := range differentID.Headers {
+		if differentID.Headers[i].Key == "event_id" {
+			differentID.Headers[i].Value = []byte("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+		}
 	}
 	changedEnvelope["event_id"] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 	differentID.Value, err = json.Marshal(changedEnvelope)
