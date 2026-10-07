@@ -109,6 +109,17 @@ func TestDegradedWindowStatusRefreshDoesNotCountShutdownCancellation(t *testing.
 	}
 }
 
+func TestDegradedWindowStatusObservedReadinessSignal(t *testing.T) {
+	metrics := NewDegradedMetrics()
+	if metrics.WindowStatusObserved() {
+		t.Fatal("new metrics reported an unobserved status as ready")
+	}
+	metrics.setWindowStatus(DegradedWindowStatus{ObservedAt: time.Now().UTC()})
+	if !metrics.WindowStatusObserved() {
+		t.Fatal("successful status snapshot did not open the readiness signal")
+	}
+}
+
 func TestDegradedWindowStatusRefreshRejectsInvalidConfiguration(t *testing.T) {
 	for name, args := range map[string]struct {
 		ctx          context.Context
