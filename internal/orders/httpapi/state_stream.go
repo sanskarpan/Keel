@@ -86,8 +86,7 @@ func (h *Handler) streamOrderState(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, http.StatusBadRequest, "invalid_state_cursor", "The state cursor is invalid.")
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		h.fail(w, r, http.StatusInternalServerError, "stream_unavailable", "The state stream is unavailable.")
 		return
 	}
@@ -124,7 +123,9 @@ func (h *Handler) streamOrderState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	if err := writeStateFrame(w, ": connected\n\n"); err != nil {
+		return
+	}
 	if !hasCursor {
 		if err := writeStateEvent(w, "snapshot", stateCursorID(orderID, uint64(cursor)), snapshot); err != nil {
 			return
