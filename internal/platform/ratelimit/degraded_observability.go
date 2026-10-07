@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -73,8 +74,14 @@ func runDegradedWindowStatusRefresh(ctx context.Context, interval, queryTimeout 
 	refresh := func() {
 		callCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
-		if err := observe(callCtx); err != nil && ctx.Err() == nil {
-			onError()
+		if err := observe(callCtx); err != nil {
+			queryDeadline, hasQueryDeadline := callCtx.Deadline()
+			parentDeadline, hasParentDeadline := ctx.Deadline()
+			queryTimedOut := errors.Is(err, context.DeadlineExceeded) && hasQueryDeadline &&
+				(!hasParentDeadline || queryDeadline.Before(parentDeadline))
+			if ctx.Err() == nil || queryTimedOut {
+				onError()
+			}
 		}
 	}
 	refresh()
