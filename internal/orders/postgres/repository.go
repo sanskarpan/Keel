@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sanskarpan/keel/internal/orders"
+	"github.com/sanskarpan/keel/internal/platform/observability"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
 
@@ -55,6 +56,7 @@ func NewRepository(db *sql.DB) (*Repository, error) {
 // appends version one, stores the command snapshot and response, and retains a permanent dedup
 // tombstone linked to the order. principalBinding must be the trusted authenticated actor ref.
 func (r *Repository) Create(ctx context.Context, tenant tenancy.TenantID, command orders.CreateOrder, metadata orders.EventMetadata, idempotencyKey, principalBinding string) (Result, error) {
+	metadata.Traceparent = trustedTraceparent(ctx)
 	canonical, err := orders.CanonicalizeCreateOrder(command)
 	if err != nil {
 		return Result{}, err
@@ -120,6 +122,7 @@ func (r *Repository) Create(ctx context.Context, tenant tenancy.TenantID, comman
 // Submit serializes on the order head, checks the expected aggregate version, and atomically
 // appends the submit event with both the current snapshot and idempotency result.
 func (r *Repository) Submit(ctx context.Context, tenant tenancy.TenantID, orderID string, expectedVersion uint64, command orders.SubmitOrder, metadata orders.EventMetadata, idempotencyKey, principalBinding string) (Result, error) {
+	metadata.Traceparent = trustedTraceparent(ctx)
 	canonical, _, err := orders.CanonicalizeSubmitOrder(command)
 	if err != nil {
 		return Result{}, err
@@ -191,6 +194,14 @@ func (r *Repository) Submit(ctx context.Context, tenant tenancy.TenantID, orderI
 		return Result{}, commandErr
 	}
 	return result, nil
+}
+
+func trustedTraceparent(ctx context.Context) string {
+	value, ok := observability.TraceparentFromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return value
 }
 
 // Load returns the current authoritative command snapshot under the caller's tenant context.
@@ -455,6 +466,10 @@ func insertEvent(ctx context.Context, tx *sql.Tx, event orders.Event) error {
 // the same transaction as the aggregate event, snapshot and idempotency result.
 func appendCommandSideEffects(ctx context.Context, tx *sql.Tx, event orders.Event, snapshot orders.Snapshot) error {
 	tenant := event.Metadata.TenantID
+	schemaVersion := 1
+	if event.Metadata.Traceparent != "" {
+		schemaVersion = 2
+	}
 	envelope := struct {
 		SchemaVersion    int              `json:"schema_version"`
 		EventID          string           `json:"event_id"`
@@ -463,15 +478,16 @@ func appendCommandSideEffects(ctx context.Context, tx *sql.Tx, event orders.Even
 		AggregateVersion uint64           `json:"aggregate_version"`
 		EventType        orders.EventType `json:"event_type"`
 		OccurredAt       time.Time        `json:"occurred_at"`
-	}{1, event.Metadata.EventID, tenant, event.Metadata.OrderID, event.Version, event.Type, event.Metadata.OccurredAt}
+		Traceparent      string           `json:"traceparent,omitempty"`
+	}{schemaVersion, event.Metadata.EventID, tenant, event.Metadata.OrderID, event.Version, event.Type, event.Metadata.OccurredAt, event.Metadata.Traceparent}
 	envelopeJSON, err := json.Marshal(envelope)
 	if err != nil {
 		return fmt.Errorf("encode safe outbox envelope: %w", err)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO keel_meta.event_outbox
 		(tenant_id,event_id,aggregate_id,aggregate_version,event_type,schema_version,safe_envelope)
-		VALUES ($1,$2,$3,$4,$5,1,$6::jsonb)`, tenant, event.Metadata.EventID, event.Metadata.OrderID,
-		event.Version, string(event.Type), envelopeJSON)
+		VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`, tenant, event.Metadata.EventID, event.Metadata.OrderID,
+		event.Version, string(event.Type), schemaVersion, envelopeJSON)
 	if err != nil {
 		return err
 	}
