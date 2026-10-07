@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sanskarpan/keel/internal/platform/observability"
 	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
 
@@ -75,6 +76,7 @@ type Broker interface {
 type Config struct {
 	LeaseDuration  time.Duration
 	PublishTimeout time.Duration
+	Observer       observability.Observer
 }
 
 type Publisher struct {
@@ -82,6 +84,7 @@ type Publisher struct {
 	broker         Broker
 	leaseDuration  time.Duration
 	publishTimeout time.Duration
+	observer       observability.Observer
 }
 
 func NewPublisher(store Store, broker Broker, config Config) (*Publisher, error) {
@@ -100,7 +103,7 @@ func NewPublisher(store Store, broker Broker, config Config) (*Publisher, error)
 	if config.PublishTimeout <= 0 || config.PublishTimeout >= config.LeaseDuration {
 		return nil, errors.New("publish timeout must be positive and shorter than the lease")
 	}
-	return &Publisher{store: store, broker: broker, leaseDuration: config.LeaseDuration, publishTimeout: config.PublishTimeout}, nil
+	return &Publisher{store: store, broker: broker, leaseDuration: config.LeaseDuration, publishTimeout: config.PublishTimeout, observer: config.Observer}, nil
 }
 
 type Result struct {
@@ -114,12 +117,37 @@ type Result struct {
 
 // RunOnce sends at most one event. Broker I/O happens outside a database transaction; the
 // publish-head epoch fences final state changes if this worker pauses past its lease.
-func (p *Publisher) RunOnce(ctx context.Context, tenantID, workerID string) (Result, error) {
+func (p *Publisher) RunOnce(ctx context.Context, tenantID, workerID string) (result Result, returnedErr error) {
+	started := time.Now()
+	var schemaVersion, retryCount int
+	var traceID string
+	defer func() {
+		outcome := "error"
+		if result.Blocked {
+			outcome = "blocked"
+		} else if returnedErr == nil {
+			switch {
+			case !result.Claimed:
+				outcome = "no_work"
+			case result.Published:
+				outcome = "published"
+			case result.RetryScheduled:
+				outcome = "retry_scheduled"
+			case result.Blocked:
+				outcome = "blocked"
+			}
+		}
+		observability.ObserveSafely(p.observer, observability.Event{
+			Operation: "outbox.publish", Outcome: outcome, Duration: time.Since(started),
+			SchemaVersion: schemaVersion, RetryCount: retryCount, TraceID: traceID,
+		})
+	}()
 	claim, ok, err := p.store.ClaimNext(ctx, tenantID, workerID, p.leaseDuration)
 	if err != nil || !ok {
 		return Result{}, err
 	}
-	result := Result{Claimed: true, EventID: claim.EventID}
+	result = Result{Claimed: true, EventID: claim.EventID}
+	retryCount = claim.AttemptCount
 	message, err := p.store.LoadClaimed(ctx, claim)
 	if err != nil {
 		if errors.Is(err, ErrPoisonEnvelope) {
@@ -130,6 +158,13 @@ func (p *Publisher) RunOnce(ctx context.Context, tenantID, workerID string) (Res
 			result.ErrorCode = "outbox_corrupt"
 		}
 		return result, err
+	}
+	schemaVersion = message.SchemaVersion
+	if message.SchemaVersion == 2 {
+		parsed, ok := tracecontext.Parse(message.Traceparent)
+		if ok {
+			traceID = parsed.TraceID
+		}
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, p.publishTimeout)
 	err = p.broker.Publish(publishCtx, message)

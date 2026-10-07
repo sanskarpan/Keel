@@ -105,6 +105,61 @@ func TestProcessCreatesChildCorrelationContextForV2(t *testing.T) {
 		t.Fatalf("child correlation=%q parent span=%q", store.childTraceparent, store.childParentSpanID)
 	}
 }
+
+func TestProcessorEmitsOnlyValidatedTraceTelemetry(t *testing.T) {
+	const parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	raw, err := json.Marshal(Envelope{SchemaVersion: 2, EventID: testEvent, TenantID: testTenant, AggregateID: testOrder,
+		AggregateVersion: 1, EventType: orders.OrderCreated, OccurredAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Traceparent: parent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testRecord(raw, "1")
+	record.Headers[1].Value = []byte("2")
+	record.Headers = append(record.Headers, Header{Key: "traceparent", Value: []byte(parent)})
+	observer := &projectorEventObserver{}
+	processor, err := NewWithObserver(&fakeStore{result: Result{Disposition: Applied}}, "", observer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := processor.Process(context.Background(), testTenant, record); err != nil || result.Disposition != Applied {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(observer.events) != 1 {
+		t.Fatalf("observed %d events, want one", len(observer.events))
+	}
+	event := observer.events[0]
+	if event.Operation != "projector.process" || event.Outcome != "applied" || event.SchemaVersion != 2 || event.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("unexpected telemetry event: %+v", event)
+	}
+	v1Observer := &projectorEventObserver{}
+	v1Processor, err := NewWithObserver(&fakeStore{result: Result{Disposition: Applied}}, "", v1Observer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := v1Processor.Process(context.Background(), testTenant, testRecord(validEnvelope(t, 1, orders.OrderCreated), "1")); err != nil || result.Disposition != Applied {
+		t.Fatalf("v1 result=%+v err=%v", result, err)
+	}
+	if got := v1Observer.events[0]; got.SchemaVersion != 1 || got.TraceID != "" {
+		t.Fatalf("v1 projector telemetry must omit trace correlation: %+v", got)
+	}
+	panicProcessor, err := NewWithObserver(&fakeStore{result: Result{Disposition: Applied}}, "", panicProjectorEventObserver{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := panicProcessor.Process(context.Background(), testTenant, record); err != nil || result.Disposition != Applied {
+		t.Fatalf("observer panic changed projection outcome: result=%+v err=%v", result, err)
+	}
+}
+
+type projectorEventObserver struct{ events []observability.Event }
+
+func (o *projectorEventObserver) Observe(event observability.Event) {
+	o.events = append(o.events, event)
+}
+
+type panicProjectorEventObserver struct{}
+
+func (panicProjectorEventObserver) Observe(observability.Event) { panic("observer failure") }
 func (s *fakeStore) ReplayGaps(_ context.Context, tenant, consumer string, limit int) (int, error) {
 	s.tenant, s.consumer, s.limit = tenant, consumer, limit
 	return 2, s.err
