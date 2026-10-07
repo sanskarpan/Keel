@@ -185,6 +185,9 @@ type fakeReader struct {
 	lastTenant string
 	readCalls  int
 	pageCalls  int
+	stateBatches []orders.StateFeedBatch
+	stateErr error
+	stateCalls int
 }
 
 func (f *fakeReader) ReadOrder(_ context.Context, tenant tenancy.TenantID, _ string) (orders.ReadView, error) {
@@ -206,6 +209,22 @@ func (f *fakeReader) ReadOrderWithHistory(ctx context.Context, tenant tenancy.Te
 	}
 	page, err := f.PageEvents(ctx, tenant, orderID, 0, limit)
 	return view, page, err
+}
+
+func (f *fakeReader) ReadStateUpdates(_ context.Context, tenant tenancy.TenantID, after uint64, _ int) (orders.StateFeedBatch, error) {
+	f.stateCalls++
+	f.lastTenant = string(tenant)
+	if f.stateErr != nil {
+		return orders.StateFeedBatch{}, f.stateErr
+	}
+	if len(f.stateBatches) == 0 {
+		return orders.StateFeedBatch{Latest: after}, nil
+	}
+	index := f.stateCalls - 1
+	if index >= len(f.stateBatches) {
+		index = len(f.stateBatches) - 1
+	}
+	return f.stateBatches[index], nil
 }
 
 type fakeAuthorizer struct {
