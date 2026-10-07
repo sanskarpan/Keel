@@ -74,7 +74,7 @@ func runDegradedWindowStatusRefresh(ctx context.Context, interval, queryTimeout 
 	refresh := func() {
 		callCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
-		if err := observe(callCtx); err != nil {
+		if err := observe(callCtx); err != nil && ctx.Err() == nil {
 			onError()
 		}
 	}
