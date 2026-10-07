@@ -55,9 +55,10 @@ func TestStateStreamResumeUsesCursorWithoutSnapshot(t *testing.T) {
 		Updates: []orders.StateFeedUpdate{{Sequence: 3, EventID: "other-event", AggregateID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", Version: 2, Kind: "order.changed", Status: orders.Submitted}},
 	}}}
 	handler := testHandler(t, reader, &fakeAuthorizer{allow: true})
-	ctx, cancel := context.WithCancel(context.Background())
+	baseRequest := authenticatedRequest(http.MethodGet, "/v1/orders/"+httpTestOrder+"/stream")
+	ctx, cancel := context.WithCancel(baseRequest.Context())
 	cancel()
-	request := authenticatedRequest(http.MethodGet, "/v1/orders/"+httpTestOrder+"/stream").WithContext(ctx)
+	request := baseRequest.WithContext(ctx)
 	request.Header.Set("Last-Event-ID", "state:"+httpTestOrder+":2")
 	response := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 	handler.ServeHTTP(response, request)
