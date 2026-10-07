@@ -29,7 +29,7 @@ The module creates no resources by default. `enable_provisioning` must be set to
 
 ## Validation and plan workflow
 
-From this directory, run `terraform init -backend=false`, `terraform validate`, and `terraform fmt -check`. A non-provisioning validation plan requires provider configuration but no AWS changes. A real plan must use the approved remote state backend, account, and region, be reviewed for resource replacement and cost, and be retained with its approval record. Never use local state for an applied environment.
+From this directory, run `terraform init -backend=false`, `terraform validate`, and `terraform fmt -check`. The validation script verifies that the default-disabled example plans zero resource actions and that enabling it without approval/network/deployment-context inputs fails before VPC, subnet, or security-group data lookups. These checks require no AWS credentials or AWS API resource calls. A real plan must use the approved remote state backend, account, and region, be reviewed for resource replacement and cost, and be retained with its approval record. Never use local state for an applied environment.
 
 Destroy is not the default cleanup path. A reviewed destroy plan must create the configured final snapshot, preserve its KMS key and required retention, and include a restore verification and explicit snapshot expiry. Do not delete the final snapshot or KMS key as part of the same cleanup step.
 

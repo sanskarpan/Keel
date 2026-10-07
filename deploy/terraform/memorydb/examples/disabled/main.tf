@@ -17,6 +17,12 @@ provider "aws" {
   skip_requesting_account_id  = true
 }
 
+variable "enable_provisioning" {
+  description = "Used by the validation script to exercise the explicit provisioning gate."
+  type        = bool
+  default     = false
+}
+
 module "memorydb" {
   source = "../.."
 
@@ -32,7 +38,7 @@ module "memorydb" {
   final_snapshot_name           = "keel-local-plan-final"
   snapshot_window               = "03:00-04:00"
   maintenance_window            = "sun:05:00-sun:06:00"
-  enable_provisioning           = false
+  enable_provisioning           = var.enable_provisioning
   tags = {
     Owner              = "local-validation"
     Environment        = "test"
