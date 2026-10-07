@@ -10,6 +10,8 @@ Mutations require `Idempotency-Key`; aggregate changes require `If-Match: "<vers
 
 Problem response: `{type,title,status,code,detail,request_id,retry_after_seconds}`. Stable codes distinguish `not_authorized`, `resource_not_found`, `version_conflict`, `idempotency_conflict`, `idempotency_record_expired`, `currency_mismatch`, `budget_exceeded`, `dependency_unavailable`, `resync_required`. Cross-tenant IDs return 404; unauthenticated callers get 401. Errors never include raw SQL, provider keys, document text or unredacted URLs.
 
+The Kafka order outbox is an internal versioned transport contract, not a customer API. Schema v1 remains trace-free; internal schema v2 may carry only a validated W3C traceparent for correlation and requires an identical Kafka header. Public order responses, history, event APIs and state-feed messages do not expose that value. Trace context has no authorization or tenancy meaning; see `docs/K5.3-OUTBOX-CORRELATION.md`.
+
 ## 2. Resource endpoints
 
 | Method and path | Permission / behavior |
