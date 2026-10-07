@@ -1033,8 +1033,9 @@ func TestPostgresDegradedWindowStatusHasReadOnlyRoleAndReflectsRecovery(t *testi
 		t.Fatal("ordinary application role read the degraded-window table directly")
 	}
 
-	if _, err := admin.ExecContext(ctx, `INSERT INTO keel_meta.rate_limit_degraded_windows(home_region,outage_id,started_at,expires_at,active)
-		VALUES($1,gen_random_uuid(),clock_timestamp(),clock_timestamp()+interval '60 seconds',true)`, region); err != nil {
+	if _, err := admin.ExecContext(ctx, `WITH instant AS MATERIALIZED (SELECT clock_timestamp() AS started_at)
+		INSERT INTO keel_meta.rate_limit_degraded_windows(home_region,outage_id,started_at,expires_at,active)
+		SELECT $1,gen_random_uuid(),instant.started_at,instant.started_at+interval '60 seconds',true FROM instant`, region); err != nil {
 		t.Fatal(err)
 	}
 	if err := ObserveDegradedWindowStatus(ctx, rateStatus, region, metrics); err != nil {
