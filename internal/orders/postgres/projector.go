@@ -274,11 +274,16 @@ func decodeCanonicalEnvelope(tenantID string, raw []byte) (projector.Envelope, [
 	record := projector.Record{
 		Topic: "keel.internal.orders.v1", Partition: 0, Offset: 0,
 		Key: []byte(envelope.TenantID + "/" + envelope.AggregateID), Value: canonical,
-		Headers: []projector.Header{
+		Headers: append([]projector.Header{
 			{Key: "event_id", Value: []byte(envelope.EventID)},
 			{Key: "schema_version", Value: []byte(fmt.Sprint(envelope.SchemaVersion))},
 			{Key: "aggregate_version", Value: []byte(fmt.Sprint(envelope.AggregateVersion))},
-		},
+		}, func() []projector.Header {
+			if envelope.Traceparent == "" {
+				return nil
+			}
+			return []projector.Header{{Key: "traceparent", Value: []byte(envelope.Traceparent)}}
+		}()...),
 	}
 	validated, hash, err := projector.Decode(tenantID, record)
 	return validated, hash, err
