@@ -29,7 +29,9 @@ type repairEnvelope struct {
 	Traceparent      string           `json:"traceparent,omitempty"`
 }
 
-func (r *Repository) ListBlocked(ctx context.Context, tenant tenancy.TenantID, aggregateID string) ([]outbox.BlockedEvent, error) {
+func (r *Repository) ListBlocked(ctx context.Context, tenant tenancy.TenantID, aggregateID string) (returned []outbox.BlockedEvent, returnedErr error) {
+	done := r.begin(ctx, "outbox.repair.list")
+	defer func() { done(returnedErr) }()
 	blocked := make([]outbox.BlockedEvent, 0, 1)
 	err := tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `SELECT d.tenant_id::text,d.aggregate_id::text,d.event_id::text,
@@ -54,7 +56,9 @@ func (r *Repository) ListBlocked(ctx context.Context, tenant tenancy.TenantID, a
 	return blocked, err
 }
 
-func (r *Repository) RepairBlocked(ctx context.Context, tenant tenancy.TenantID, aggregateID string, identity outbox.RepairIdentity, request outbox.RepairRequest) error {
+func (r *Repository) RepairBlocked(ctx context.Context, tenant tenancy.TenantID, aggregateID string, identity outbox.RepairIdentity, request outbox.RepairRequest) (returnedErr error) {
+	done := r.begin(ctx, "outbox.repair.apply")
+	defer func() { done(returnedErr) }()
 	if identity.TenantID != tenant || identity.ActorRef == "" || identity.RequestID == "" {
 		return outbox.ErrRepairUnauthorized
 	}
