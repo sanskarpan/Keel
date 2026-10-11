@@ -16,6 +16,7 @@ import (
 	"github.com/sanskarpan/keel/internal/orders"
 	"github.com/sanskarpan/keel/internal/platform/observability"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
+	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
 
 const (
@@ -43,19 +44,64 @@ type Result struct {
 	DetailsExpired bool            `json:"details_expired"`
 }
 
-type Repository struct{ db *sql.DB }
+type Repository struct {
+	db       *sql.DB
+	observer observability.Observer
+}
 
-func NewRepository(db *sql.DB) (*Repository, error) {
+// RepositoryOption configures optional collaborators. Omitted options keep no-op defaults.
+type RepositoryOption func(*Repository)
+
+// WithObserver installs an optional privacy-safe operation observer. It never changes a
+// transaction, authorization, idempotency or ordering decision, and may be nil.
+func WithObserver(observer observability.Observer) RepositoryOption {
+	return func(r *Repository) { r.observer = observer }
+}
+
+func NewRepository(db *sql.DB, options ...RepositoryOption) (*Repository, error) {
 	if db == nil {
 		return nil, errors.New("order database is required")
 	}
-	return &Repository{db: db}, nil
+	repository := &Repository{db: db}
+	for _, option := range options {
+		if option != nil {
+			option(repository)
+		}
+	}
+	return repository, nil
+}
+
+// begin starts timing one public repository operation and returns the completion callback that
+// classifies its outcome. The callback runs after any transaction has finished, the observer is
+// optional, and it cannot change the value or error the operation returns.
+func (r *Repository) begin(ctx context.Context, operation string) func(error) {
+	started := time.Now()
+	traceID := ""
+	if value, ok := observability.TraceparentFromContext(ctx); ok {
+		if parsed, valid := tracecontext.Parse(value); valid {
+			traceID = parsed.TraceID
+		}
+	}
+	return func(err error) {
+		outcome := "ok"
+		if err != nil {
+			outcome = "error"
+			if errors.Is(err, orders.ErrNotFound) {
+				outcome = "not_found"
+			}
+		}
+		observability.ObserveSafely(r.observer, observability.Event{
+			Operation: operation, Outcome: outcome, Duration: time.Since(started), TraceID: traceID,
+		})
+	}
 }
 
 // Create atomically claims an idempotency key, enforces the tenant's stable natural reference,
 // appends version one, stores the command snapshot and response, and retains a permanent dedup
 // tombstone linked to the order. principalBinding must be the trusted authenticated actor ref.
-func (r *Repository) Create(ctx context.Context, tenant tenancy.TenantID, command orders.CreateOrder, metadata orders.EventMetadata, idempotencyKey, principalBinding string) (Result, error) {
+func (r *Repository) Create(ctx context.Context, tenant tenancy.TenantID, command orders.CreateOrder, metadata orders.EventMetadata, idempotencyKey, principalBinding string) (returned Result, returnedErr error) {
+	done := r.begin(ctx, "order.create")
+	defer func() { done(returnedErr) }()
 	metadata.Traceparent = trustedTraceparent(ctx)
 	canonical, err := orders.CanonicalizeCreateOrder(command)
 	if err != nil {
@@ -121,7 +167,9 @@ func (r *Repository) Create(ctx context.Context, tenant tenancy.TenantID, comman
 
 // Submit serializes on the order head, checks the expected aggregate version, and atomically
 // appends the submit event with both the current snapshot and idempotency result.
-func (r *Repository) Submit(ctx context.Context, tenant tenancy.TenantID, orderID string, expectedVersion uint64, command orders.SubmitOrder, metadata orders.EventMetadata, idempotencyKey, principalBinding string) (Result, error) {
+func (r *Repository) Submit(ctx context.Context, tenant tenancy.TenantID, orderID string, expectedVersion uint64, command orders.SubmitOrder, metadata orders.EventMetadata, idempotencyKey, principalBinding string) (returned Result, returnedErr error) {
+	done := r.begin(ctx, "order.submit")
+	defer func() { done(returnedErr) }()
 	metadata.Traceparent = trustedTraceparent(ctx)
 	canonical, _, err := orders.CanonicalizeSubmitOrder(command)
 	if err != nil {
@@ -205,7 +253,9 @@ func trustedTraceparent(ctx context.Context) string {
 }
 
 // Load returns the current authoritative command snapshot under the caller's tenant context.
-func (r *Repository) Load(ctx context.Context, tenant tenancy.TenantID, orderID string) (orders.Snapshot, error) {
+func (r *Repository) Load(ctx context.Context, tenant tenancy.TenantID, orderID string) (returned orders.Snapshot, returnedErr error) {
+	done := r.begin(ctx, "order.read")
+	defer func() { done(returnedErr) }()
 	var snapshot orders.Snapshot
 	err := tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
 		var err error
@@ -217,7 +267,9 @@ func (r *Repository) Load(ctx context.Context, tenant tenancy.TenantID, orderID 
 
 // Events reads and integrity-checks the immutable aggregate history. Callers must already be
 // authorized to read that order; PostgreSQL RLS still enforces tenant containment.
-func (r *Repository) Events(ctx context.Context, tenant tenancy.TenantID, orderID string) ([]orders.Event, error) {
+func (r *Repository) Events(ctx context.Context, tenant tenancy.TenantID, orderID string) (returned []orders.Event, returnedErr error) {
+	done := r.begin(ctx, "order.history")
+	defer func() { done(returnedErr) }()
 	var events []orders.Event
 	err := tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `SELECT aggregate_version,event_id::text,event_type,occurred_at,event_data,event_hash
