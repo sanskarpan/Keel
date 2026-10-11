@@ -81,9 +81,15 @@ type Store interface {
 type Processor struct {
 	store      Store
 	consumerID string
+	observer   observability.Observer
 }
 
 func New(store Store, consumerID string) (*Processor, error) {
+	return NewWithObserver(store, consumerID, nil)
+}
+
+// NewWithObserver configures a privacy-safe optional observer for processing outcomes.
+func NewWithObserver(store Store, consumerID string, observer observability.Observer) (*Processor, error) {
 	if store == nil {
 		return nil, errors.New("projector store is required")
 	}
@@ -93,12 +99,34 @@ func New(store Store, consumerID string) (*Processor, error) {
 	if consumerID != DefaultConsumerID {
 		return nil, fmt.Errorf("this projection requires the single active consumer ID %q", DefaultConsumerID)
 	}
-	return &Processor{store: store, consumerID: consumerID}, nil
+	return &Processor{store: store, consumerID: consumerID, observer: observer}, nil
 }
 
 // Process validates broker identity and commits inbox/projection/quarantine state atomically.
 // The Kafka caller must commit its offset only when this method returns nil error.
-func (p *Processor) Process(ctx context.Context, tenantID string, record Record) (Result, error) {
+func (p *Processor) Process(ctx context.Context, tenantID string, record Record) (result Result, returnedErr error) {
+	started := time.Now()
+	var schemaVersion int
+	var traceID string
+	defer func() {
+		outcome := "error"
+		if returnedErr == nil {
+			switch result.Disposition {
+			case Applied:
+				outcome = "applied"
+			case Duplicate:
+				outcome = "duplicate"
+			case Deferred:
+				outcome = "deferred"
+			case Quarantined:
+				outcome = "quarantined"
+			}
+		}
+		observability.ObserveSafely(p.observer, observability.Event{
+			Operation: "projector.process", Outcome: outcome, Duration: time.Since(started),
+			SchemaVersion: schemaVersion, TraceID: traceID,
+		})
+	}()
 	envelope, digest, err := Decode(tenantID, record)
 	if err != nil {
 		if !topicPattern.MatchString(record.Topic) || record.Partition < 0 || record.Offset < 0 {
@@ -114,12 +142,16 @@ func (p *Processor) Process(ctx context.Context, tenantID string, record Record)
 		}
 		return Result{Disposition: Quarantined, ReasonCode: reason}, nil
 	}
+	schemaVersion = envelope.SchemaVersion
+	if parsed, ok := tracecontext.Parse(envelope.Traceparent); ok {
+		traceID = parsed.TraceID
+	}
 	if envelope.Traceparent != "" {
 		if childContext, ok := observability.WithRemoteTraceparent(ctx, envelope.Traceparent); ok {
 			ctx = childContext
 		}
 	}
-	result, err := p.store.Apply(ctx, p.consumerID, envelope, digest)
+	result, err = p.store.Apply(ctx, p.consumerID, envelope, digest)
 	if err != nil {
 		return Result{}, err
 	}
@@ -149,7 +181,17 @@ func (p *Processor) ProcessRecord(ctx context.Context, record Record) (Result, e
 	return p.Process(ctx, claim.TenantID, record)
 }
 
-func (p *Processor) quarantineInvalidTransport(ctx context.Context, record Record) (Result, error) {
+func (p *Processor) quarantineInvalidTransport(ctx context.Context, record Record) (result Result, returnedErr error) {
+	started := time.Now()
+	defer func() {
+		outcome := "error"
+		if returnedErr == nil && result.Disposition == Quarantined {
+			outcome = "quarantined"
+		}
+		observability.ObserveSafely(p.observer, observability.Event{
+			Operation: "projector.process", Outcome: outcome, Duration: time.Since(started),
+		})
+	}()
 	if !topicPattern.MatchString(record.Topic) || record.Partition < 0 || record.Offset < 0 {
 		return Result{}, fmt.Errorf("%w: invalid broker coordinates", ErrInvalidRecord)
 	}
