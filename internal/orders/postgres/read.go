@@ -16,6 +16,8 @@ import (
 // ReadOrder reads command authority and projector progress from one repeatable-read snapshot.
 // A missing projection is normal lag and is represented as watermark zero.
 func (r *Repository) ReadOrder(ctx context.Context, tenant tenancy.TenantID, orderID string) (view orders.ReadView, err error) {
+	done := r.begin(ctx, "order.view")
+	defer func() { done(err) }()
 	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
 		var readErr error
 		view, readErr = readOrderInTx(ctx, tx, tenant, orderID)
@@ -27,6 +29,8 @@ func (r *Repository) ReadOrder(ctx context.Context, tenant tenancy.TenantID, ord
 // ReadOrderStateStreamSnapshot returns the authorized order head and durable feed high-water
 // mark from one repeatable-read transaction, so reconnect snapshots cannot skip later updates.
 func (r *Repository) ReadOrderStateStreamSnapshot(ctx context.Context, tenant tenancy.TenantID, orderID string) (snapshot orders.StateStreamSnapshot, err error) {
+	done := r.begin(ctx, "order.stream.snapshot")
+	defer func() { done(err) }()
 	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
 		view, err := readOrderInTx(ctx, tx, tenant, orderID)
 		if err != nil {
@@ -50,6 +54,8 @@ func (r *Repository) ReadOrderStateStreamSnapshot(ctx context.Context, tenant te
 // ReadStateUpdates returns a bounded tenant sequence page and retention bounds from one
 // repeatable-read snapshot. The caller receives typed allowlisted fields, never raw JSON.
 func (r *Repository) ReadStateUpdates(ctx context.Context, tenant tenancy.TenantID, after uint64, limit int) (batch orders.StateFeedBatch, err error) {
+	done := r.begin(ctx, "order.stream.updates")
+	defer func() { done(err) }()
 	if limit < 1 || limit > 100 {
 		return orders.StateFeedBatch{}, errors.New("state feed page limit must be in [1,100]")
 	}
@@ -118,6 +124,8 @@ func validFeedStatus(status orders.Status) bool {
 // ReadOrderWithHistory returns the detail view and its first history page from one database
 // snapshot, so concurrent commands cannot produce a timeline newer than its displayed head.
 func (r *Repository) ReadOrderWithHistory(ctx context.Context, tenant tenancy.TenantID, orderID string, beforeVersion uint64, limit int) (view orders.ReadView, page orders.HistoryPage, err error) {
+	done := r.begin(ctx, "order.readpage")
+	defer func() { done(err) }()
 	if limit < 1 || limit > 100 {
 		return orders.ReadView{}, orders.HistoryPage{}, errors.New("history page limit must be in [1,100]")
 	}
@@ -157,6 +165,8 @@ func readOrderInTx(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, ord
 // PageEvents returns an integrity-checked descending page from immutable aggregate history.
 // beforeVersion is exclusive; zero starts at the authoritative command head.
 func (r *Repository) PageEvents(ctx context.Context, tenant tenancy.TenantID, orderID string, beforeVersion uint64, limit int) (page orders.HistoryPage, err error) {
+	done := r.begin(ctx, "order.page")
+	defer func() { done(err) }()
 	if limit < 1 || limit > 100 {
 		return orders.HistoryPage{}, errors.New("history page limit must be in [1,100]")
 	}
