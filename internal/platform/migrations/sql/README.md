@@ -120,5 +120,17 @@ context, requires capability membership and returns the existing delivery on a d
 are immutable. Attempts, retry state, endpoint registration and delivery execution remain
 K6.3-K6.5 work.
 
+Migration `0041_webhook_delivery_attempts` adds the durable attempt scheduler behind the delivery
+ledger: one mutable state row per delivery (`pending`, `in_flight`, `delivered`, `failed`,
+`exhausted`) and an append-only attempt log of outcome class, HTTP status, latency and the fenced
+lease epoch. A capability-gated security-definer function leases due deliveries with
+`FOR UPDATE SKIP LOCKED`, a bounded expiry and a strictly increasing lease epoch; a second fenced
+function records one classified attempt and moves the state, returning an expired lease to
+re-delivery while rejecting a stale epoch or attempt number. State rows cannot be deleted, terminal
+states cannot change, counters are monotonic and attempts cannot be rewritten. The database owns the
+fence and the state machine, not the retry delay or exhaustion policy; per-endpoint circuit
+breaking, the delivery worker, endpoint registration and the capped replay UI remain K6.3-K6.5
+work.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
