@@ -127,7 +127,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K5.4` | task | K5.4 Add encrypted context-vault retention, authorized read-only replay and Langfuse adapter. | [Open issue](https://github.com/sanskarpan/Keel/issues/42) |
 
-| `K5.5` | task | K5.5 Implement tenant cost dashboard, confirmed/estimated/unknown breakdowns and rollup watermarks. | [Open issue](https://github.com/sanskarpan/Keel/issues/43) |
+| `K5.5` | task | K5.5 Implement tenant cost dashboard, confirmed/estimated/unknown breakdowns and rollup watermarks. Cost read model slice: [issue #323](https://github.com/sanskarpan/Keel/issues/323), [PR #324](https://github.com/sanskarpan/Keel/pull/324); parent remains open for alerting, entitlements and a mounted route. | [Open parent issue](https://github.com/sanskarpan/Keel/issues/43) |
 
 | `K5.6` | task | K5.6 Add threshold/budget alerts and history-qualified spend anomalies. | [Open issue](https://github.com/sanskarpan/Keel/issues/44) |
 
