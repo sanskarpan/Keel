@@ -28,6 +28,9 @@ The Kafka order outbox is an internal versioned transport contract, not a custom
 | `POST /v1/documents/uploads/{id}/complete` | owner of upload; verify size/hash/type/object version, enqueue scan; 202 |
 | `GET /v1/documents/{id}/versions/{version}` | document reader; immutable cited version metadata |
 | `POST /v1/search` | reader; query/mode/filters/top_k; references, ranks, degraded flag and index versions |
+| `GET /v1/costs` | tenant cost reader; current budget-period confirmed/estimated/unknown/outstanding amounts in micro-USD, hard limit, blocked flag and ledger watermark |
+| `GET /v1/costs/{period_id}` | tenant cost reader; one period breakdown; a denied or unknown period is a non-enumerating 404 |
+| `GET /v1/costs/{period_id}/entries` | tenant cost reader; bounded per-inference cost rows, limit defaults to 25 and is capped at 100 |
 | `POST /v1/orders` | requester; draft order, external reference, supported currency/minor amount, positive decimal quantities; every line shares order currency |
 | `POST /v1/orders/{id}/submit` | requester; expected version and evidence references |
 | `POST /v1/orders/{id}/cancel` | permitted actor; nonterminal state only |
