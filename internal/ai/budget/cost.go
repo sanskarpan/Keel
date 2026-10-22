@@ -17,6 +17,8 @@ const (
 	CostScopeInference = "inference"
 	// MaxCostEntries bounds the per-inference rows a single dashboard read may return.
 	MaxCostEntries = 100
+	// MaxCostHistoryPeriods bounds how many past periods one history read may return.
+	MaxCostHistoryPeriods = 24
 )
 
 var (
@@ -40,6 +42,9 @@ type CostWatermark struct {
 //
 // ConfirmedMicroUSD is the exact settled cost: the sum of the confirmed, reconciled and
 // adjusted ledger entries, which is the same liability the budget account enforces.
+// CarriedMicroUSD is the part of that confirmed total that was settled in an earlier period
+// and carried into this account, so the per-inference rows of this period can be smaller than
+// the confirmed total.
 // EstimatedMicroUSD is the cost of attempts that carry a current estimate and no settled
 // outcome yet. UnknownMicroUSD is the exposure of attempts whose outcome is unknown.
 // OutstandingMicroUSD is the exposure of admitted attempts that have not settled at all.
@@ -54,6 +59,7 @@ type CostBreakdown struct {
 	Currency            string
 	HardLimitMicroUSD   int64
 	ConfirmedMicroUSD   int64
+	CarriedMicroUSD     int64
 	EstimatedMicroUSD   int64
 	UnknownMicroUSD     int64
 	OutstandingMicroUSD int64
@@ -188,6 +194,63 @@ func (r *CostReader) CostEntries(ctx context.Context, tenant tenancy.TenantID, p
 	return entries, nil
 }
 
+// CostPeriod is one past budget period and the exact spend settled in it.
+type CostPeriod struct {
+	PeriodID          string
+	PeriodStart       time.Time
+	PeriodEnd         time.Time
+	ConfirmedMicroUSD int64
+	HardLimitMicroUSD int64
+	AccountVersion    int64
+}
+
+// CostHistory returns the tenant's most recent budget periods, newest first, with the exact
+// spend settled in each period. It is the evidence an anomaly check needs, so a history read
+// never mixes periods with different currencies or scopes.
+func (r *CostReader) PeriodHistory(ctx context.Context, tenant tenancy.TenantID, limit int) ([]CostPeriod, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("AI cost reader is required")
+	}
+	if !budgetUUID.MatchString(string(tenant)) {
+		return nil, ErrCostUnavailable
+	}
+	if limit < 1 || limit > MaxCostHistoryPeriods {
+		return nil, fmt.Errorf("cost history limit must be in [1,%d]", MaxCostHistoryPeriods)
+	}
+	history := make([]CostPeriod, 0, limit)
+	err := tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT period_id::text,period_start,period_end,committed_micro_usd::text,hard_limit_micro_usd,version
+			FROM keel_meta.ai_budget_accounts
+			WHERE tenant_id=$1 AND scope=$2
+			ORDER BY period_start DESC
+			LIMIT $3`, string(tenant), CostScopeInference, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var period CostPeriod
+			var committed string
+			if err := rows.Scan(&period.PeriodID, &period.PeriodStart, &period.PeriodEnd, &committed, &period.HardLimitMicroUSD, &period.AccountVersion); err != nil {
+				return err
+			}
+			amount, err := costAmount(committed)
+			if err != nil {
+				return err
+			}
+			period.ConfirmedMicroUSD = amount
+			period.PeriodStart = period.PeriodStart.UTC()
+			period.PeriodEnd = period.PeriodEnd.UTC()
+			history = append(history, period)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return history, nil
+}
+
 // resolveCostPeriod selects the requested budget period or the tenant's current period head.
 func resolveCostPeriod(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, periodID string) (string, error) {
 	if periodID != "" {
@@ -224,11 +287,11 @@ func requireCostAccount(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID
 // watermark from one consistent snapshot.
 func readCostSummary(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, periodID string) (CostBreakdown, error) {
 	breakdown := CostBreakdown{TenantID: tenant, Scope: CostScopeInference, PeriodID: periodID}
-	var committed, reserved, unknownTotal, outstanding, estimated string
+	var committed, carried, reserved, unknownTotal, outstanding, estimated string
 	var entries int64
 	var lastEntry sql.NullTime
 	err := tx.QueryRowContext(ctx, `SELECT b.period_start,b.period_end,b.currency,b.hard_limit_micro_usd,
-		b.committed_micro_usd::text,b.reserved_micro_usd::text,b.overrun_blocked,b.version,
+		b.committed_micro_usd::text,b.opening_committed_micro_usd::text,b.reserved_micro_usd::text,b.overrun_blocked,b.version,
 		COALESCE((SELECT SUM(r.amount_micro_usd) FROM keel_meta.ai_budget_reservations r
 			WHERE r.tenant_id=b.tenant_id AND r.scope=b.scope AND r.period_id=b.period_id AND r.liability_state='unknown'),0)::text,
 		COALESCE((SELECT SUM(r.amount_micro_usd) FROM keel_meta.ai_budget_reservations r
@@ -252,7 +315,7 @@ func readCostSummary(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, p
 		WHERE b.tenant_id=$1 AND b.scope=$2 AND b.period_id=$3`,
 		string(tenant), CostScopeInference, periodID).Scan(
 		&breakdown.PeriodStart, &breakdown.PeriodEnd, &breakdown.Currency, &breakdown.HardLimitMicroUSD,
-		&committed, &reserved, &breakdown.OverrunBlocked, &breakdown.Watermark.AccountVersion,
+		&committed, &carried, &reserved, &breakdown.OverrunBlocked, &breakdown.Watermark.AccountVersion,
 		&unknownTotal, &outstanding, &estimated, &entries, &lastEntry)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CostBreakdown{}, ErrCostUnavailable
@@ -261,6 +324,9 @@ func readCostSummary(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, p
 		return CostBreakdown{}, err
 	}
 	if breakdown.ConfirmedMicroUSD, err = costAmount(committed); err != nil {
+		return CostBreakdown{}, err
+	}
+	if breakdown.CarriedMicroUSD, err = costAmount(carried); err != nil {
 		return CostBreakdown{}, err
 	}
 	accountReserved, err := costAmount(reserved)
