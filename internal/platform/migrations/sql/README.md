@@ -102,8 +102,8 @@ transaction; an exact redelivery is a duplicate, while a same-ID/different-diges
 tenant delivery is a conflict recorded in an append-only ledger. A dedicated `keel_callback`
 capability has no direct table privileges; security-definer claim/confirm functions derive the
 tenant from the authorized transaction context and require capability membership. The inbox stores
-no payload. Signature verification, key rotation, HTTP routing, provider adapters and a callback
-runtime remain K6.2-K6.5 work.
+no payload. Signature verification and key rotation are delivered by `internal/delivery/webhook`
+(K6.2); HTTP routing, provider adapters and a callback runtime remain K6.3-K6.5 work.
 Migration `0038_context_vault_replay_audit` adds a dedicated `keel_context_replay` capability and
 one-use, content-free replay audit state/events. Its begin function can read only one exact,
 unexpired context version and denies records with an active hold. Before plaintext delivery, a
@@ -111,6 +111,14 @@ second function rechecks expiry/hold state while holding a shared lock on the re
 and deletion take the conflicting lock. The service has no model/tool/business mutation port and
 requires a five-second caller deadline. The local capability is synthetic, the public replay route
 stays unmounted, and production identity/KMS/deployment qualification remains outstanding.
+
+Migration `0040_webhook_deliveries` adds the outbound webhook delivery ledger: one row per tenant,
+event, endpoint and subscription revision, with a globally unique delivery ID and a
+database-derived creation time. A dedicated `keel_webhook` capability has no direct table
+privileges; a security-definer claim function derives the tenant from the authorized transaction
+context, requires capability membership and returns the existing delivery on a duplicate claim. Rows
+are immutable. Attempts, retry state, endpoint registration and delivery execution remain
+K6.3-K6.5 work.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
