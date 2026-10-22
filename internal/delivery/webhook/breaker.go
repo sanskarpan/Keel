@@ -89,7 +89,7 @@ func (p BreakerPolicy) Allow(now time.Time, state BreakerState) (BreakerState, b
 	if err := p.Validate(); err != nil {
 		return BreakerState{}, false, err
 	}
-	if err := state.validate(); err != nil {
+	if err := state.Validate(); err != nil {
 		return BreakerState{}, false, err
 	}
 	state = normalizeBreakerState(state)
@@ -121,7 +121,7 @@ func (p BreakerPolicy) Observe(now time.Time, state BreakerState, outcome Outcom
 	if err := p.Validate(); err != nil {
 		return BreakerState{}, err
 	}
-	if err := state.validate(); err != nil {
+	if err := state.Validate(); err != nil {
 		return BreakerState{}, err
 	}
 	state = normalizeBreakerState(state)
@@ -181,7 +181,9 @@ func normalizeBreakerState(state BreakerState) BreakerState {
 	return state
 }
 
-func (s BreakerState) validate() error {
+// Validate checks the structural invariants of a persistable breaker state. The zero value is a valid
+// closed breaker.
+func (s BreakerState) Validate() error {
 	switch s.Status {
 	case "":
 		if s.Failures != 0 || s.Probes != 0 || !s.OpenedAt.IsZero() || s.OpenFor != 0 {
