@@ -144,5 +144,15 @@ DNS and address vetting still happen on every delivery dial; registration enforc
 fragment, character, host and length rules. No HTTP worker, secret storage, breaker persistence or
 replay record is added.
 
+Migration `0043_webhook_endpoint_breakers` persists the shared per-endpoint breaker keyed by
+tenant/endpoint with a foreign key to the endpoint registry: status (`closed`, `open`, `half_open`),
+consecutive failures, cooldown start and length, admitted half-open probes, and a monotonic version.
+Check constraints enforce the state shape, the guard trigger refuses deletes and identity changes and
+requires a single-step version, forced RLS applies and direct grants are revoked. Load and save are
+security-definer functions gated on the webhook capability; save inserts at expected version zero or
+updates only on an exact match, so concurrent workers produce one winner and one version conflict.
+The policy stays in Go: PostgreSQL owns the compare-and-swap, not the breaker decision. No worker
+consultation, operator reset or metric is added.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
