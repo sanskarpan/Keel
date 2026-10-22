@@ -65,6 +65,8 @@ Config/secrets are validated at startup. Provider, OIDC and webhook keys rotate 
 | Extraction sandbox failure | Quarantine document and retry safely; never publish unscanned content |
 | Worker loss | Lease expires/reclaim; stale commit rejected; external unknown charges reconciled |
 
+The K6.3 retry slice implements the durable half of the webhook outage posture: due and expired deliveries are leased under a monotonic epoch with a 5-300 second expiry, one fenced attempt record moves the delivery between `pending`, `in_flight`, `delivered`, `failed` and `exhausted`, and a re-issued lease invalidates the previous holder. The policy is full jitter in `[0,min(6h,5s*2^retry)]` with 12 attempts in 24 hours. Exhaustion is terminal and visible as state, not a silent drop. No worker, circuit breaker, quota or metric series is wired yet, so the webhook SLI (`99%` first attempt within 30 seconds) is a design target only until K6.3 execution and alerting are complete. See `docs/K6.3-RETRY-EVIDENCE.md`.
+
 ### Safe-read degraded admission runbook status
 
 K4.7.2 provides shared PostgreSQL admission and recovery-fence primitives, fixed-label admission counters/durations, and a dedicated read-only `keel_rate_status` identity for the window-status query. The `rate-limit-observer` process role refreshes the snapshot with per-query deadlines and exposes unlabeled gauges and refresh errors on its management endpoint. The deployment profile does not yet launch this role or configure a scraper, so deployed alerts remain incomplete. This procedure is a code-level operational contract, not production qualification. Keep all fleet and tenant policies disabled and the application fallback switch off until issues #198 and #199 pass.

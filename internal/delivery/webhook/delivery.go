@@ -114,6 +114,14 @@ func (h Headers) Values() map[string]string {
 	}
 }
 
+// ValidateAttemptID checks the fresh per-attempt wire identity.
+func ValidateAttemptID(attemptID string) error {
+	if !attemptIDPattern.MatchString(attemptID) {
+		return ErrInvalidDelivery
+	}
+	return nil
+}
+
 // Prepare validates one attempt and signs its exact body bytes. A retry or replay calls Prepare
 // again with a fresh attempt ID and timestamp: the event, delivery and logical identity stay fixed
 // while the attempt ID and signature change.
@@ -121,8 +129,8 @@ func (k *Keyring) Prepare(delivery Delivery, attemptID string, body []byte, now 
 	if err := delivery.Validate(); err != nil {
 		return Headers{}, err
 	}
-	if !attemptIDPattern.MatchString(attemptID) {
-		return Headers{}, ErrInvalidDelivery
+	if err := ValidateAttemptID(attemptID); err != nil {
+		return Headers{}, err
 	}
 	signature, err := k.Sign(now, body)
 	if err != nil {
