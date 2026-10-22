@@ -61,7 +61,7 @@ Config/secrets are validated at startup. Provider, OIDC and webhook keys rotate 
 | Redis unavailable | Model/budgeted/sensitive admission fails closed; streams degrade to durable status/final result. Approved safe reads may use the optional PostgreSQL fallback only when separately enabled and provisioned. It is shared across replicas, has fleet and tenant/route caps, and rejects new admissions after 60 seconds until a separately credentialed observer verifies home-region Redis health for five consecutive seconds. Redis failover ambiguity can add bounded fallback admissions; the two authorities are not atomic. No production route currently enables this fallback. |
 | Temporal unavailable | Case/approval intents persist; UI shows pending synchronization; deadline decision records remain authoritative |
 | Provider unavailable | Bounded pre-stream fallback; reservations/accounting per attempt; interrupted streams show explicit state |
-| Webhook outage | Per-endpoint circuit breaker, jitter retry and durable exhaustion; no core order outage |
+| Webhook outage | Per-endpoint circuit breaker, jitter retry and durable exhaustion; no core order outage. Egress fails closed when a destination is non-public or resolves inconsistently, and never falls back to another address |
 | Extraction sandbox failure | Quarantine document and retry safely; never publish unscanned content |
 | Worker loss | Lease expires/reclaim; stale commit rejected; external unknown charges reconciled |
 
