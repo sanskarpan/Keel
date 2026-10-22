@@ -16,6 +16,7 @@ tags:
   - name: orders
   - name: supplier intake
   - name: supplier cases
+  - name: costs
 paths:
   /health/live:
     get:
@@ -503,6 +504,84 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '500': { $ref: '#/components/responses/Problem' }
       x-keel-phase: K2.5
+  /v1/costs:
+    get:
+      tags: [costs]
+      operationId: getCurrentCostBreakdown
+      summary: Read the authenticated tenant's current budget-period cost breakdown.
+      description: Tenant identity is derived from current authorization, never accepted from this request.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The current period cost breakdown and its ledger watermark.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostBreakdown'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+      x-keel-phase: K5
+  /v1/costs/{period_id}:
+    parameters:
+      - $ref: '#/components/parameters/PeriodID'
+    get:
+      tags: [costs]
+      operationId: getPeriodCostBreakdown
+      summary: Read one budget-period cost breakdown for the authenticated tenant.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The period cost breakdown and its ledger watermark.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostBreakdown'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+      x-keel-phase: K5
+  /v1/costs/{period_id}/entries:
+    parameters:
+      - $ref: '#/components/parameters/PeriodID'
+    get:
+      tags: [costs]
+      operationId: getCostEntries
+      summary: Read the bounded per-inference cost rows of one budget period.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of inference rows to return.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      responses:
+        '200':
+          description: The bounded per-inference cost rows.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostEntries'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+      x-keel-phase: K5
   /v1/public/tenants/{tenant_id}/supplier-invitations/accept:
     parameters:
       - $ref: '#/components/parameters/TenantID'
@@ -645,6 +724,11 @@ components:
       scheme: bearer
       description: One-upload capability bound to the exact tenant, upload, size and checksum.
   parameters:
+    PeriodID:
+      name: period_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     OrderID:
       name: order_id
       in: path
@@ -681,6 +765,54 @@ components:
           schema:
             $ref: '#/components/schemas/Problem'
   schemas:
+    CostWatermark:
+      type: object
+      additionalProperties: false
+      required: [account_version, entries]
+      properties:
+        account_version: { type: integer, format: int64, minimum: 0 }
+        entries: { type: integer, format: int64, minimum: 0 }
+        last_entry_at: { type: string, format: date-time }
+    CostBreakdown:
+      type: object
+      additionalProperties: false
+      required: [period_id, scope, currency, period_start, period_end, hard_limit_micro_usd, confirmed_micro_usd, carried_micro_usd, estimated_micro_usd, unknown_micro_usd, outstanding_micro_usd, overrun_blocked, watermark]
+      properties:
+        period_id: { type: string, format: uuid }
+        scope: { type: string, const: inference }
+        currency: { type: string, const: USD }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        hard_limit_micro_usd: { type: integer, format: int64, minimum: 0 }
+        confirmed_micro_usd: { type: integer, format: int64, minimum: 0 }
+        carried_micro_usd: { type: integer, format: int64, minimum: 0 }
+        estimated_micro_usd: { type: integer, format: int64, minimum: 0 }
+        unknown_micro_usd: { type: integer, format: int64, minimum: 0 }
+        outstanding_micro_usd: { type: integer, format: int64, minimum: 0 }
+        overrun_blocked: { type: boolean }
+        watermark: { $ref: '#/components/schemas/CostWatermark' }
+    CostEntry:
+      type: object
+      additionalProperties: false
+      required: [inference_id, confirmed_micro_usd, estimated_micro_usd, unknown_micro_usd, reserved_micro_usd, liability_state, last_activity_at]
+      properties:
+        inference_id: { type: string, format: uuid }
+        confirmed_micro_usd: { type: integer, format: int64, minimum: 0 }
+        estimated_micro_usd: { type: integer, format: int64, minimum: 0 }
+        unknown_micro_usd: { type: integer, format: int64, minimum: 0 }
+        reserved_micro_usd: { type: integer, format: int64, minimum: 0 }
+        liability_state: { type: string, enum: [reserved, unknown, settled, released] }
+        last_activity_at: { type: string, format: date-time }
+    CostEntries:
+      type: object
+      additionalProperties: false
+      required: [period_id, entries]
+      properties:
+        period_id: { type: string, format: uuid }
+        entries:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/CostEntry' }
     Liveness:
       type: object
       additionalProperties: false
