@@ -95,6 +95,15 @@ policies, hold tables, or erasure receipts directly. This is a database lifecycl
 legal workflow endpoint or actor-identity provider is wired, and hosted backup/restore qualification
 remains unclaimed.
 
+Migration `0039_callback_inbox` adds the authenticated provider callback inbox: a global
+provider/event identity, canonical payload digest, event type and key ID, with a database-derived
+received/applied timestamp. A recorded event and its domain effect commit in one tenant
+transaction; an exact redelivery is a duplicate, while a same-ID/different-digest or same-ID/other-
+tenant delivery is a conflict recorded in an append-only ledger. A dedicated `keel_callback`
+capability has no direct table privileges; security-definer claim/confirm functions derive the
+tenant from the authorized transaction context and require capability membership. The inbox stores
+no payload. Signature verification, key rotation, HTTP routing, provider adapters and a callback
+runtime remain K6.2-K6.5 work.
 Migration `0038_context_vault_replay_audit` adds a dedicated `keel_context_replay` capability and
 one-use, content-free replay audit state/events. Its begin function can read only one exact,
 unexpired context version and denies records with an active hold. Before plaintext delivery, a

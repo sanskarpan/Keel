@@ -64,6 +64,10 @@ Inspect per-client buffer usage, API RSS, Redis notification/token transport and
 
 Inspect endpoint health, verified DNS/IP/egress policy, response classifications, retry schedule and secret rotation. Run signed test-fire under rate limit after endpoint repair. Preview selected exhausted deliveries in dry-run; replay capped batches preserving event IDs. Verify receiver deduplication and reconciliation watermark. Never disable SSRF or signature checks to make a replay succeed. Exit when backlog drains without duplicate business effects.
 
+## KB-07A: Inbound provider callback conflict or replay
+
+Confirm the provider event ID, the digest the sender presented and the caller tenant. A repeated event ID with the same digest and tenant is a harmless duplicate: the inbox already applied it once and returns the recorded application time. A repeated ID with a different digest, or the same ID under another tenant, is a conflict: nothing was applied, and the append-only callback_conflicts row records payload_mismatch or 	enant_mismatch under the caller tenant. Never retry a conflict with a rewritten payload or under a different tenant, and never delete the original inbox row; inbox rows are immutable. If a conflict repeats, consider a captured delivery being replayed and check the provider's own event history before contacting the integration owner. A failed application is different: it recorded nothing, so a plain provider retry is the correct recovery. Direct table access is not granted to any runtime role; use the admin connection or the future operator surface. See docs/K6.1-CALLBACK-INBOX.md.
+
 ## KB-08: Database failover/recovery
 
 Stop write admission and confirm single-writer fencing. Establish the backup/recovery cut and restore point; preserve pre-failure external effect IDs. Verify schema checksums, event/inbox/idempotency data, budget reservations, role bindings, erasure journal and Temporal consistency. Run invariant probes and read-only smoke. Resume writes gradually, then projections, then external effects after reconciliation. Record actual RPO/RTO and unrecoverable/unknown effects.

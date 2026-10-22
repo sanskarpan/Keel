@@ -68,7 +68,7 @@ Retry full jitter uses `min(6h, 5s * 2^attempt)` within maximum 12 attempts/24h.
 
 ## 7. Reconciliation contract
 
-Inbound callbacks persist a provider event ID and hash before application. Duplicate same ID/different hash is a security/data-integrity conflict. Adapter reconciliation fetches remote status under rate and spend limits, compares to canonical state and records missing/late/conflicting observations. Cursors advance only when pages and effects are durably accounted. External reads happen outside DB transactions; state is revalidated inside the effect transaction.
+Inbound callbacks persist a provider event ID and hash before application. The K6.1 inbox (`internal/delivery/callbackinbox`, migration `0039`) implements this: an injected verifier produces the only trusted event, the tenant comes only from that event, the record and its effect commit in one tenant transaction, and the provider event ID is unique across tenants. Duplicate same ID/different hash is a security/data-integrity conflict. Adapter reconciliation fetches remote status under rate and spend limits, compares to canonical state and records missing/late/conflicting observations. Cursors advance only when pages and effects are durably accounted. External reads happen outside DB transactions; state is revalidated inside the effect transaction.
 
 Repair actions carry stable logical repair IDs. They may redeliver a missing notification or quarantine a mismatch; they cannot rewrite an approved/rejected order or manufacture a supplier approval. A report links source cursor, observed version, intended repair and final effect.
 

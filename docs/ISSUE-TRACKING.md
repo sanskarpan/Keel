@@ -138,7 +138,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | Checklist ID | Type | Checklist item | GitHub issue |
 |---|---|---|---|
-| `K6.1` | task | K6.1 Implement authenticated callback inbox and provider event/payload conflict handling. | [Open issue](https://github.com/sanskarpan/Keel/issues/46) |
+| `K6.1` | task | K6.1 Implement authenticated callback inbox and provider event/payload conflict handling. Slice: [issue #332](https://github.com/sanskarpan/Keel/issues/332), [PR #333](https://github.com/sanskarpan/Keel/pull/333); parent #46 stays open for K6.2-K6.5. | [Open issue](https://github.com/sanskarpan/Keel/issues/46) |
 
 | `K6.2` | task | K6.2 Add logical delivery uniqueness, signing/key rotation and SSRF-safe egress. | [Open issue](https://github.com/sanskarpan/Keel/issues/47) |
 
