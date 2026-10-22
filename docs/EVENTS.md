@@ -66,7 +66,7 @@ Headers include event ID, delivery ID, attempt ID, timestamp and signature key I
 
 Persist attempt classification, latency, redacted response snippet and next retry. Never persist Authorization/Set-Cookie headers or unrestricted external response bodies. SSRF protection denies metadata/private/loopback/reserved destinations, redirects to disallowed networks, ambiguous IP forms and DNS rebinding; approved private endpoints require a separate reviewed network connector.
 
-Retry full jitter uses `min(6h, 5s * 2^attempt)` within maximum 12 attempts/24h. A bounded endpoint circuit breaker and tenant delivery quota prevent outages causing storms. DLQ/exhaustion state is durable. Manual replay is capped (500 selected deliveries), audited and rechecks endpoint policy/signature configuration.
+Retry full jitter uses `min(6h, 5s * 2^attempt)` within maximum 12 attempts/24h. The implemented breaker policy opens after five consecutive retryable failures, denies attempts during a 30-second cooldown that doubles after each failed half-open probe up to ten minutes, admits one probe at a time, and resets on a delivered or permanent response; outcomes observed while open are ignored. It is pure and unwired, so a bounded per-endpoint breaker with endpoint-scoped state, a tenant delivery quota and the worker that consults it remain open. DLQ/exhaustion state is durable. Manual replay is capped (500 selected deliveries), audited and rechecks endpoint policy/signature configuration.
 
 ## 7. Reconciliation contract
 
