@@ -140,7 +140,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 |---|---|---|---|
 | `K6.1` | task | K6.1 Implement authenticated callback inbox and provider event/payload conflict handling. Slice: [issue #332](https://github.com/sanskarpan/Keel/issues/332), [PR #333](https://github.com/sanskarpan/Keel/pull/333) merged as `1eac655925d45aae98354370f1567e71cd14f81d` (contract CI #548); parent #46 stays open for K6.2-K6.5. | [Open issue](https://github.com/sanskarpan/Keel/issues/46) |
 
-| `K6.2` | task | K6.2 Add logical delivery uniqueness, signing/key rotation and SSRF-safe egress. Slice: [issue #335](https://github.com/sanskarpan/Keel/issues/335), [PR #336](https://github.com/sanskarpan/Keel/pull/336) merged as `a05978da89989eca4f51d6d8a463a7aaf889bb95` (contract CI #553); parent #46 stays open for K6.3-K6.5. | [Open issue](https://github.com/sanskarpan/Keel/issues/46) |
+| `K6.2` | task | K6.2 Add logical delivery uniqueness, signing/key rotation and SSRF-safe egress. Slice: [issue #335](https://github.com/sanskarpan/Keel/issues/335), [PR #336](https://github.com/sanskarpan/Keel/pull/336) merged as `a05978da89989eca4f51d6d8a463a7aaf889bb95` (contract CI #553); ledger slice: [issue #338](https://github.com/sanskarpan/Keel/issues/338), [PR #339](https://github.com/sanskarpan/Keel/pull/339). Parent #46 stays open for K6.3-K6.5. | [Open issue](https://github.com/sanskarpan/Keel/issues/46) |
 
 | `K6.3` | task | K6.3 Implement jitter retry, per-endpoint circuit breaker, exhaustion and capped replay UI. | [Open issue](https://github.com/sanskarpan/Keel/issues/48) |
 
