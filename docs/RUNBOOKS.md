@@ -64,6 +64,24 @@ Inspect per-client buffer usage, API RSS, Redis notification/token transport and
 
 Inspect endpoint health, verified DNS/IP/egress policy, response classifications, retry schedule and secret rotation. Run signed test-fire under rate limit after endpoint repair. Preview selected exhausted deliveries in dry-run; replay capped batches preserving event IDs. Verify receiver deduplication and reconciliation watermark. Confirm the delivery ledger holds one row for the tenant/event/endpoint/subscription identity before replaying; a second delivery ID means a different logical identity, not a duplicate to suppress. Check the failed attempt's key ID against the active and previous keyring entries and its resolved address against the public-address policy; `ErrEgressDenied` means the destination is not allowed, and `ErrEgressUnavailable` means resolution failed transiently, so neither is a reason to relax policy. Never disable SSRF or signature checks to make a replay succeed. Exit when backlog drains without duplicate business effects.
 
+K6.3 records the schedule read-only through the webhook capability; use the admin connection for inspection. Check state, attempt count and next due time per delivery, then the attempt log for classification, HTTP status and latency:
+
+```sql
+SELECT d.event_id,d.endpoint_id,s.state,s.attempts,s.first_attempt_at,
+       s.next_attempt_at,s.lease_epoch,s.lease_expires_at,s.finished_at
+  FROM keel_meta.webhook_delivery_state s
+  JOIN keel_meta.webhook_deliveries d USING (tenant_id,delivery_id)
+ WHERE s.tenant_id=$1 ORDER BY s.updated_at DESC LIMIT 50;
+```
+
+```sql
+SELECT attempt_number,attempt_id,outcome,http_status,latency_ms,lease_epoch,recorded_at
+  FROM keel_meta.webhook_delivery_attempts
+ WHERE tenant_id=$1 AND delivery_id=$2 ORDER BY attempt_number;
+```
+
+An `in_flight` row whose `lease_expires_at` is past means the worker stopped after leasing; the next lease reclaims it automatically with a higher epoch and a new attempt number, and the old worker's record call fails with "not leased by this epoch" exactly as intended. Do not edit `state`, `attempts`, `lease_epoch` or attempt rows to force progress: terminal rows cannot be changed, deletes are refused and attempts are append-only. `exhausted` and `failed` are deliberate outcomes; a replay must go through the audited, capped replay path once it exists, not by flipping state. A pending row with a future `next_attempt_at` is the caller's jittered schedule, not a stuck lease. See `docs/K6.3-RETRY-EVIDENCE.md`.
+
 ## KB-07A: Inbound provider callback conflict or replay
 
 Confirm the provider event ID, the digest the sender presented and the caller tenant. A repeated event ID with the same digest and tenant is a harmless duplicate: the inbox already applied it once and returns the recorded application time. A repeated ID with a different digest, or the same ID under another tenant, is a conflict: nothing was applied, and the append-only callback_conflicts row records payload_mismatch or 	enant_mismatch under the caller tenant. Never retry a conflict with a rewritten payload or under a different tenant, and never delete the original inbox row; inbox rows are immutable. If a conflict repeats, consider a captured delivery being replayed and check the provider's own event history before contacting the integration owner. A failed application is different: it recorded nothing, so a plain provider retry is the correct recovery. Direct table access is not granted to any runtime role; use the admin connection or the future operator surface. See docs/K6.1-CALLBACK-INBOX.md.
