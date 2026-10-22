@@ -129,7 +129,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K5.5` | task | K5.5 Implement tenant cost dashboard, confirmed/estimated/unknown breakdowns and rollup watermarks. Cost read model slice: [issue #323](https://github.com/sanskarpan/Keel/issues/323), [PR #324](https://github.com/sanskarpan/Keel/pull/324); parent remains open for alerting, entitlements and a mounted route. | [Open parent issue](https://github.com/sanskarpan/Keel/issues/43) |
 
-| `K5.6` | task | K5.6 Add threshold/budget alerts and history-qualified spend anomalies. | [Open issue](https://github.com/sanskarpan/Keel/issues/44) |
+| `K5.6` | task | K5.6 Add threshold/budget alerts and history-qualified spend anomalies. Spend alert evaluation slice: [issue #326](https://github.com/sanskarpan/Keel/issues/326), [PR #327](https://github.com/sanskarpan/Keel/pull/327); parent remains open for delivery, durable per-tenant thresholds, on-call ownership and qualification. | [Open parent issue](https://github.com/sanskarpan/Keel/issues/44) |
 
 | `K5-GATE` | gate | K5 gate: slow clients do not exhaust memory; telemetry PII scan passes; every attempt is attributable. | [Open issue](https://github.com/sanskarpan/Keel/issues/45) |
 
