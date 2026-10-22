@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/sanskarpan/keel/internal/orders"
+	"github.com/sanskarpan/keel/internal/platform/dbquery"
 	"github.com/sanskarpan/keel/internal/platform/observability"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
-	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
 
 const (
@@ -72,17 +72,17 @@ func NewRepository(db *sql.DB, options ...RepositoryOption) (*Repository, error)
 }
 
 // begin starts timing one public repository operation and returns the completion callback that
-// classifies its outcome. The callback runs after any transaction has finished, the observer is
-// optional, and it cannot change the value or error the operation returns.
-func (r *Repository) begin(ctx context.Context, operation string) func(error) {
+// classifies its outcome together with the context that carries statement observation. The
+// callback runs after any transaction has finished, so buffered statement timings are published
+// only after the transaction released its locks. The observer is optional, and it cannot change
+// the value or error the operation returns.
+func (r *Repository) begin(ctx context.Context, operation string) (context.Context, func(error)) {
 	started := time.Now()
-	traceID := ""
-	if value, ok := observability.TraceparentFromContext(ctx); ok {
-		if parsed, valid := tracecontext.Parse(value); valid {
-			traceID = parsed.TraceID
-		}
-	}
-	return func(err error) {
+	traceID, _ := observability.TraceIDFromContext(ctx)
+	recorder := observability.NewStatementRecorder(r.observer, ctx)
+	ctx = observability.WithStatementRecorder(ctx, recorder)
+	return ctx, func(err error) {
+		recorder.Flush()
 		outcome := "ok"
 		if err != nil {
 			outcome = "error"
@@ -100,7 +100,7 @@ func (r *Repository) begin(ctx context.Context, operation string) func(error) {
 // appends version one, stores the command snapshot and response, and retains a permanent dedup
 // tombstone linked to the order. principalBinding must be the trusted authenticated actor ref.
 func (r *Repository) Create(ctx context.Context, tenant tenancy.TenantID, command orders.CreateOrder, metadata orders.EventMetadata, idempotencyKey, principalBinding string) (returned Result, returnedErr error) {
-	done := r.begin(ctx, "order.create")
+	ctx, done := r.begin(ctx, "order.create")
 	defer func() { done(returnedErr) }()
 	metadata.Traceparent = trustedTraceparent(ctx)
 	canonical, err := orders.CanonicalizeCreateOrder(command)
@@ -168,7 +168,7 @@ func (r *Repository) Create(ctx context.Context, tenant tenancy.TenantID, comman
 // Submit serializes on the order head, checks the expected aggregate version, and atomically
 // appends the submit event with both the current snapshot and idempotency result.
 func (r *Repository) Submit(ctx context.Context, tenant tenancy.TenantID, orderID string, expectedVersion uint64, command orders.SubmitOrder, metadata orders.EventMetadata, idempotencyKey, principalBinding string) (returned Result, returnedErr error) {
-	done := r.begin(ctx, "order.submit")
+	ctx, done := r.begin(ctx, "order.submit")
 	defer func() { done(returnedErr) }()
 	metadata.Traceparent = trustedTraceparent(ctx)
 	canonical, _, err := orders.CanonicalizeSubmitOrder(command)
@@ -254,7 +254,7 @@ func trustedTraceparent(ctx context.Context) string {
 
 // Load returns the current authoritative command snapshot under the caller's tenant context.
 func (r *Repository) Load(ctx context.Context, tenant tenancy.TenantID, orderID string) (returned orders.Snapshot, returnedErr error) {
-	done := r.begin(ctx, "order.read")
+	ctx, done := r.begin(ctx, "order.read")
 	defer func() { done(returnedErr) }()
 	var snapshot orders.Snapshot
 	err := tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
@@ -268,11 +268,11 @@ func (r *Repository) Load(ctx context.Context, tenant tenancy.TenantID, orderID 
 // Events reads and integrity-checks the immutable aggregate history. Callers must already be
 // authorized to read that order; PostgreSQL RLS still enforces tenant containment.
 func (r *Repository) Events(ctx context.Context, tenant tenancy.TenantID, orderID string) (returned []orders.Event, returnedErr error) {
-	done := r.begin(ctx, "order.history")
+	ctx, done := r.begin(ctx, "order.history")
 	defer func() { done(returnedErr) }()
 	var events []orders.Event
 	err := tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT aggregate_version,event_id::text,event_type,occurred_at,event_data,event_hash
+		rows, err := dbquery.Read(ctx, tx, `SELECT aggregate_version,event_id::text,event_type,occurred_at,event_data,event_hash
 			FROM keel_meta.order_events WHERE tenant_id=$1 AND order_id=$2 ORDER BY aggregate_version`, string(tenant), orderID)
 		if err != nil {
 			return err
@@ -335,7 +335,7 @@ func (r *Repository) PruneExpiredResponses(ctx context.Context, tenant tenancy.T
 	}
 	var deleted int64
 	err := tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `WITH expired AS (
+		result, err := dbquery.Write(ctx, tx, `WITH expired AS (
 			SELECT tenant_id,route,key_digest FROM keel_meta.idempotency_requests
 			WHERE tenant_id=$1 AND expires_at <= clock_timestamp()
 			ORDER BY expires_at, route, key_digest
@@ -360,7 +360,7 @@ func (r *Repository) PruneExpiredStateUpdates(ctx context.Context, tenant tenanc
 	}
 	var deleted int64
 	err := tenancy.WithTenantTx(ctx, r.db, tenant, nil, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `WITH expired AS (
+		result, err := dbquery.Write(ctx, tx, `WITH expired AS (
 			SELECT tenant_id,sequence FROM keel_meta.state_updates
 			WHERE tenant_id=$1 AND created_at <= statement_timestamp()-interval '24 hours'
 			ORDER BY created_at,sequence
@@ -406,7 +406,7 @@ func digest(value []byte) []byte { sum := sha256.Sum256(value); return sum[:] }
 
 func claimOrReplay(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, route string, keyHash, principalHash, requestHash []byte) (bool, Result, error) {
 	var claimed []byte
-	err := tx.QueryRowContext(ctx, `INSERT INTO keel_meta.idempotency_dedup
+	err := dbquery.WriteRow(ctx, tx, `INSERT INTO keel_meta.idempotency_dedup
 		(tenant_id,route,key_digest,principal_binding_hash,request_hash,outcome_state)
 		VALUES ($1,$2,$3,$4,$5,'in_progress')
 		ON CONFLICT (tenant_id,route,key_digest) DO NOTHING
@@ -420,7 +420,7 @@ func claimOrReplay(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, rou
 	var storedPrincipal, storedHash []byte
 	var operationRef sql.NullString
 	var outcome string
-	err = tx.QueryRowContext(ctx, `SELECT principal_binding_hash,request_hash,operation_ref::text,outcome_state
+	err = dbquery.ReadRow(ctx, tx, `SELECT principal_binding_hash,request_hash,operation_ref::text,outcome_state
 		FROM keel_meta.idempotency_dedup WHERE tenant_id=$1 AND route=$2 AND key_digest=$3 FOR UPDATE`, string(tenant), route, keyHash).
 		Scan(&storedPrincipal, &storedHash, &operationRef, &outcome)
 	if err != nil {
@@ -440,7 +440,7 @@ func replayExisting(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, ro
 	var storedHash, responseBody []byte
 	var errorCode sql.NullString
 	var valid bool
-	err := tx.QueryRowContext(ctx, `SELECT request_hash,response_body,error_code,(expires_at > clock_timestamp())
+	err := dbquery.ReadRow(ctx, tx, `SELECT request_hash,response_body,error_code,(expires_at > clock_timestamp())
 		FROM keel_meta.idempotency_requests WHERE tenant_id=$1 AND route=$2 AND key_digest=$3`, string(tenant), route, keyHash).
 		Scan(&storedHash, &responseBody, &errorCode, &valid)
 	if err == nil && !bytes.Equal(storedHash, requestHash) {
@@ -481,7 +481,7 @@ func insertOrder(ctx context.Context, tx *sql.Tx, snapshot orders.Snapshot, even
 		return false, err
 	}
 	var inserted string
-	err = tx.QueryRowContext(ctx, `INSERT INTO keel_meta.order_heads
+	err = dbquery.WriteRow(ctx, tx, `INSERT INTO keel_meta.order_heads
 		(tenant_id,order_id,external_reference,supplier_id,status,version,command_snapshot,snapshot_hash)
 		VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
 		ON CONFLICT (tenant_id,external_reference) DO NOTHING
@@ -507,7 +507,7 @@ func insertEvent(ctx context.Context, tx *sql.Tx, event orders.Event) error {
 		return fmt.Errorf("encode order event: %w", err)
 	}
 	eventHash := digest(data)
-	_, err = tx.ExecContext(ctx, `INSERT INTO keel_meta.order_events
+	_, err = dbquery.Write(ctx, tx, `INSERT INTO keel_meta.order_events
 		(tenant_id,order_id,aggregate_version,event_id,event_type,event_data,event_hash,occurred_at)
 		VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`, event.Metadata.TenantID, event.Metadata.OrderID, event.Version,
 		event.Metadata.EventID, string(event.Type), data, eventHash, event.Metadata.OccurredAt)
@@ -536,29 +536,29 @@ func appendCommandSideEffects(ctx context.Context, tx *sql.Tx, event orders.Even
 	if err != nil {
 		return fmt.Errorf("encode safe outbox envelope: %w", err)
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO keel_meta.event_outbox
+	_, err = dbquery.Write(ctx, tx, `INSERT INTO keel_meta.event_outbox
 		(tenant_id,event_id,aggregate_id,aggregate_version,event_type,schema_version,safe_envelope)
 		VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`, tenant, event.Metadata.EventID, event.Metadata.OrderID,
 		event.Version, string(event.Type), schemaVersion, envelopeJSON)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.outbox_delivery
+	if _, err := dbquery.Write(ctx, tx, `INSERT INTO keel_meta.outbox_delivery
 		(tenant_id,event_id,aggregate_id,aggregate_version)
 		VALUES ($1,$2,$3,$4)`, tenant, event.Metadata.EventID, event.Metadata.OrderID, event.Version); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.outbox_publish_heads
+	if _, err := dbquery.Write(ctx, tx, `INSERT INTO keel_meta.outbox_publish_heads
 		(tenant_id,aggregate_id,next_version)
 		VALUES ($1,$2,1) ON CONFLICT (tenant_id,aggregate_id) DO NOTHING`, tenant, event.Metadata.OrderID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.state_feed_counters (tenant_id,last_sequence)
+	if _, err := dbquery.Write(ctx, tx, `INSERT INTO keel_meta.state_feed_counters (tenant_id,last_sequence)
 		VALUES ($1,0) ON CONFLICT (tenant_id) DO NOTHING`, tenant); err != nil {
 		return err
 	}
 	var sequence int64
-	if err := tx.QueryRowContext(ctx, `UPDATE keel_meta.state_feed_counters SET last_sequence=last_sequence+1,updated_at=clock_timestamp()
+	if err := dbquery.WriteRow(ctx, tx, `UPDATE keel_meta.state_feed_counters SET last_sequence=last_sequence+1,updated_at=clock_timestamp()
 		WHERE tenant_id=$1 RETURNING last_sequence`, tenant).Scan(&sequence); err != nil {
 		return err
 	}
@@ -573,7 +573,7 @@ func appendCommandSideEffects(ctx context.Context, tx *sql.Tx, event orders.Even
 	if err != nil {
 		return fmt.Errorf("encode safe state update: %w", err)
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO keel_meta.state_updates
+	_, err = dbquery.Write(ctx, tx, `INSERT INTO keel_meta.state_updates
 		(tenant_id,sequence,event_id,aggregate_id,aggregate_version,update_kind,safe_payload)
 		VALUES ($1,$2,$3,$4,$5,'order.changed',$6::jsonb)`, tenant, sequence, event.Metadata.EventID,
 		event.Metadata.OrderID, event.Version, payloadJSON)
@@ -596,7 +596,7 @@ func loadSnapshotWithLock(ctx context.Context, tx *sql.Tx, tenant tenancy.Tenant
 	var version int64
 	var storedStatus string
 	var raw, storedHash []byte
-	if err := tx.QueryRowContext(ctx, query, string(tenant), orderID).Scan(&version, &storedStatus, &raw, &storedHash); err != nil {
+	if err := dbquery.ReadRow(ctx, tx, query, string(tenant), orderID).Scan(&version, &storedStatus, &raw, &storedHash); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return orders.Snapshot{}, ErrNotFound
 		}
@@ -628,7 +628,7 @@ func updateSnapshot(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, cu
 	if err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE keel_meta.order_heads SET version=$1,status=$2,command_snapshot=$3::jsonb,snapshot_hash=$4,updated_at=clock_timestamp()
+	result, err := dbquery.Write(ctx, tx, `UPDATE keel_meta.order_heads SET version=$1,status=$2,command_snapshot=$3::jsonb,snapshot_hash=$4,updated_at=clock_timestamp()
 		WHERE tenant_id=$5 AND order_id=$6 AND version=$7`, next.Version, string(next.Status), data, snapshotHash, string(tenant), current.OrderID, current.Version)
 	if err != nil {
 		return err
@@ -644,7 +644,7 @@ func updateSnapshot(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, cu
 }
 
 func completeClaim(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, route string, keyHash []byte, operationRef string) error {
-	result, err := tx.ExecContext(ctx, `UPDATE keel_meta.idempotency_dedup SET outcome_state='completed',operation_ref=$1,completed_at=clock_timestamp()
+	result, err := dbquery.Write(ctx, tx, `UPDATE keel_meta.idempotency_dedup SET outcome_state='completed',operation_ref=$1,completed_at=clock_timestamp()
 		WHERE tenant_id=$2 AND route=$3 AND key_digest=$4 AND outcome_state='in_progress'`, operationRef, string(tenant), route, keyHash)
 	if err != nil {
 		return err
@@ -664,7 +664,7 @@ func storeResponse(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, rou
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO keel_meta.idempotency_requests
+	_, err = dbquery.Write(ctx, tx, `INSERT INTO keel_meta.idempotency_requests
 		(tenant_id,route,key_digest,request_hash,response_body,error_code,expires_at)
 		VALUES ($1,$2,$3,$4,$5::jsonb,NULLIF($6,''),clock_timestamp()+interval '7 days')`, string(tenant), route, keyHash, requestHash, body, errorCode)
 	return err
@@ -674,7 +674,7 @@ func storeRejected(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, rou
 	if code == "" {
 		return ErrCorruptState
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE keel_meta.idempotency_dedup SET outcome_state='rejected',completed_at=clock_timestamp()
+	result, err := dbquery.Write(ctx, tx, `UPDATE keel_meta.idempotency_dedup SET outcome_state='rejected',completed_at=clock_timestamp()
 		WHERE tenant_id=$1 AND route=$2 AND key_digest=$3 AND outcome_state='in_progress'`, string(tenant), route, keyHash)
 	if err != nil {
 		return err
@@ -686,7 +686,7 @@ func storeRejected(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, rou
 	if rows != 1 {
 		return ErrCorruptState
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO keel_meta.idempotency_requests
+	_, err = dbquery.Write(ctx, tx, `INSERT INTO keel_meta.idempotency_requests
 		(tenant_id,route,key_digest,request_hash,response_body,error_code,expires_at)
 		VALUES ($1,$2,$3,$4,'{}'::jsonb,$5,clock_timestamp()+interval '7 days')`, string(tenant), route, keyHash, requestHash, code)
 	return err

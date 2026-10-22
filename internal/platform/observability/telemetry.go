@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"time"
@@ -75,6 +76,21 @@ func ObserveSafely(observer Observer, event Event) {
 	observer.Observe(sanitizeEvent(event))
 }
 
+// TraceIDFromContext returns the trace ID of the trusted server correlation context. It is
+// reported only when the context carries a strictly parsed traceparent, so an untrusted or
+// absent correlation value never produces a trace ID.
+func TraceIDFromContext(ctx context.Context) (string, bool) {
+	value, ok := TraceparentFromContext(ctx)
+	if !ok {
+		return "", false
+	}
+	parsed, valid := tracecontext.Parse(value)
+	if !valid {
+		return "", false
+	}
+	return parsed.TraceID, true
+}
+
 // allowedOutcomes maps every published operation to the only outcomes that may be reported for it.
 // An operation absent from this map, or an outcome absent from its entry, becomes "unknown".
 var allowedOutcomes = map[string]map[string]bool{
@@ -95,6 +111,8 @@ var allowedOutcomes = map[string]map[string]bool{
 	"order.stream.updates":  {"ok": true, "error": true},
 	"outbox.repair.list":    {"ok": true, "error": true},
 	"outbox.repair.apply":   {"ok": true, "error": true},
+	"query.read":            {"ok": true, "error": true},
+	"query.write":           {"ok": true, "error": true},
 }
 
 func sanitizeEvent(event Event) Event {

@@ -123,7 +123,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K5.2` | task | K5.2 Add per-client queue/write-timeout limits, reconnect snapshots and interrupted-result handling. | [Open issue](https://github.com/sanskarpan/Keel/issues/40) |
 
-| `K5.3` | task | K5.3 Trace HTTP/query/event/workflow/model/delivery boundaries with links and safe attributes. | [Open issue](https://github.com/sanskarpan/Keel/issues/41) |
+| `K5.3` | task | K5.3 Trace HTTP/query/event/workflow/model/delivery boundaries with links and safe attributes. Query instrumentation slice: [issue #320](https://github.com/sanskarpan/Keel/issues/320), [PR #321](https://github.com/sanskarpan/Keel/pull/321); parent remains open for per-statement identity, workflow/model/delivery propagation and exporter/runtime qualification. | [Open parent issue](https://github.com/sanskarpan/Keel/issues/41) |
 
 | `K5.4` | task | K5.4 Add encrypted context-vault retention, authorized read-only replay and Langfuse adapter. | [Open issue](https://github.com/sanskarpan/Keel/issues/42) |
 

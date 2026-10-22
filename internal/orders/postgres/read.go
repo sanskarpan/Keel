@@ -10,13 +10,14 @@ import (
 	"time"
 
 	"github.com/sanskarpan/keel/internal/orders"
+	"github.com/sanskarpan/keel/internal/platform/dbquery"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
 
 // ReadOrder reads command authority and projector progress from one repeatable-read snapshot.
 // A missing projection is normal lag and is represented as watermark zero.
 func (r *Repository) ReadOrder(ctx context.Context, tenant tenancy.TenantID, orderID string) (view orders.ReadView, err error) {
-	done := r.begin(ctx, "order.view")
+	ctx, done := r.begin(ctx, "order.view")
 	defer func() { done(err) }()
 	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
 		var readErr error
@@ -29,7 +30,7 @@ func (r *Repository) ReadOrder(ctx context.Context, tenant tenancy.TenantID, ord
 // ReadOrderStateStreamSnapshot returns the authorized order head and durable feed high-water
 // mark from one repeatable-read transaction, so reconnect snapshots cannot skip later updates.
 func (r *Repository) ReadOrderStateStreamSnapshot(ctx context.Context, tenant tenancy.TenantID, orderID string) (snapshot orders.StateStreamSnapshot, err error) {
-	done := r.begin(ctx, "order.stream.snapshot")
+	ctx, done := r.begin(ctx, "order.stream.snapshot")
 	defer func() { done(err) }()
 	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
 		view, err := readOrderInTx(ctx, tx, tenant, orderID)
@@ -37,7 +38,7 @@ func (r *Repository) ReadOrderStateStreamSnapshot(ctx context.Context, tenant te
 			return err
 		}
 		var cursor int64
-		err = tx.QueryRowContext(ctx, `SELECT last_sequence FROM keel_meta.state_feed_counters WHERE tenant_id=$1`, string(tenant)).Scan(&cursor)
+		err = dbquery.ReadRow(ctx, tx, `SELECT last_sequence FROM keel_meta.state_feed_counters WHERE tenant_id=$1`, string(tenant)).Scan(&cursor)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -54,7 +55,7 @@ func (r *Repository) ReadOrderStateStreamSnapshot(ctx context.Context, tenant te
 // ReadStateUpdates returns a bounded tenant sequence page and retention bounds from one
 // repeatable-read snapshot. The caller receives typed allowlisted fields, never raw JSON.
 func (r *Repository) ReadStateUpdates(ctx context.Context, tenant tenancy.TenantID, after uint64, limit int) (batch orders.StateFeedBatch, err error) {
-	done := r.begin(ctx, "order.stream.updates")
+	ctx, done := r.begin(ctx, "order.stream.updates")
 	defer func() { done(err) }()
 	if limit < 1 || limit > 100 {
 		return orders.StateFeedBatch{}, errors.New("state feed page limit must be in [1,100]")
@@ -65,7 +66,7 @@ func (r *Repository) ReadStateUpdates(ctx context.Context, tenant tenancy.Tenant
 	err = tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead}, func(tx *sql.Tx) error {
 		var oldest sql.NullInt64
 		var latest int64
-		if err := tx.QueryRowContext(ctx, `SELECT
+		if err := dbquery.ReadRow(ctx, tx, `SELECT
 			(SELECT min(sequence) FROM keel_meta.state_updates WHERE tenant_id=$1),
 			COALESCE((SELECT last_sequence FROM keel_meta.state_feed_counters WHERE tenant_id=$1),0)`, string(tenant)).Scan(&oldest, &latest); err != nil {
 			return err
@@ -84,7 +85,7 @@ func (r *Repository) ReadStateUpdates(ctx context.Context, tenant tenancy.Tenant
 			// stream can request a snapshot instead of silently appearing current.
 			batch.Oldest = batch.Latest + 1
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT sequence,event_id,aggregate_id,aggregate_version,update_kind,safe_payload->>'status'
+		rows, err := dbquery.Read(ctx, tx, `SELECT sequence,event_id,aggregate_id,aggregate_version,update_kind,safe_payload->>'status'
 			FROM keel_meta.state_updates WHERE tenant_id=$1 AND sequence>$2
 			ORDER BY sequence LIMIT $3`, string(tenant), int64(after), limit)
 		if err != nil {
@@ -124,7 +125,7 @@ func validFeedStatus(status orders.Status) bool {
 // ReadOrderWithHistory returns the detail view and its first history page from one database
 // snapshot, so concurrent commands cannot produce a timeline newer than its displayed head.
 func (r *Repository) ReadOrderWithHistory(ctx context.Context, tenant tenancy.TenantID, orderID string, beforeVersion uint64, limit int) (view orders.ReadView, page orders.HistoryPage, err error) {
-	done := r.begin(ctx, "order.readpage")
+	ctx, done := r.begin(ctx, "order.readpage")
 	defer func() { done(err) }()
 	if limit < 1 || limit > 100 {
 		return orders.ReadView{}, orders.HistoryPage{}, errors.New("history page limit must be in [1,100]")
@@ -147,12 +148,12 @@ func readOrderInTx(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, ord
 		return orders.ReadView{}, err
 	}
 	var updatedAt time.Time
-	if err := tx.QueryRowContext(ctx, `SELECT updated_at FROM keel_meta.order_heads WHERE tenant_id=$1 AND order_id=$2`, string(tenant), orderID).Scan(&updatedAt); err != nil {
+	if err := dbquery.ReadRow(ctx, tx, `SELECT updated_at FROM keel_meta.order_heads WHERE tenant_id=$1 AND order_id=$2`, string(tenant), orderID).Scan(&updatedAt); err != nil {
 		return orders.ReadView{}, err
 	}
 	var watermark int64
 	var projectedStatus sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT applied_version,status FROM keel_meta.order_projections WHERE tenant_id=$1 AND aggregate_id=$2`, string(tenant), orderID).Scan(&watermark, &projectedStatus)
+	err = dbquery.ReadRow(ctx, tx, `SELECT applied_version,status FROM keel_meta.order_projections WHERE tenant_id=$1 AND aggregate_id=$2`, string(tenant), orderID).Scan(&watermark, &projectedStatus)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return orders.ReadView{}, err
 	}
@@ -165,7 +166,7 @@ func readOrderInTx(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, ord
 // PageEvents returns an integrity-checked descending page from immutable aggregate history.
 // beforeVersion is exclusive; zero starts at the authoritative command head.
 func (r *Repository) PageEvents(ctx context.Context, tenant tenancy.TenantID, orderID string, beforeVersion uint64, limit int) (page orders.HistoryPage, err error) {
-	done := r.begin(ctx, "order.page")
+	ctx, done := r.begin(ctx, "order.page")
 	defer func() { done(err) }()
 	if limit < 1 || limit > 100 {
 		return orders.HistoryPage{}, errors.New("history page limit must be in [1,100]")
@@ -192,7 +193,7 @@ func pageEventsInTx(ctx context.Context, tx *sql.Tx, tenant tenancy.TenantID, or
 	if upper < 2 || upper > headVersion+1 {
 		return orders.HistoryPage{}, errors.New("history cursor is outside the order version range")
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT aggregate_version,event_id::text,event_type,occurred_at,event_data,event_hash
+	rows, err := dbquery.Read(ctx, tx, `SELECT aggregate_version,event_id::text,event_type,occurred_at,event_data,event_hash
 		FROM keel_meta.order_events WHERE tenant_id=$1 AND order_id=$2 AND aggregate_version<$3
 		ORDER BY aggregate_version DESC LIMIT $4`, string(tenant), orderID, int64(upper), limit+1)
 	if err != nil {
