@@ -51,7 +51,8 @@ K3.4 is an in-process retrieval contract in `internal/retrieval/hybrid`; it adds
 | `webhook_endpoints` | tenant/id, URL, key reference, status, subscription version | Integration managers |
 | `webhook_deliveries` | unique tenant/event/endpoint/subscription-version; state, next_attempt, lease_epoch | Scoped worker |
 | `delivery_attempts` | tenant/delivery/attempt unique; timing, response classification, redacted snippets | Append only |
-| `callback_inbox` | tenant/provider/provider_event_id unique, verified hash, receipt/apply state | Verified adapters |
+| `callback_inbox` | `(tenant,provider,provider_event_id)` primary key and a global `(provider,provider_event_id)` unique claim; canonical payload digest, event type, key ID, provider occurrence time, database received/applied times; only `received`→`applied` is allowed | Capability-gated security-definer claim/confirm only; forced RLS; no direct runtime access |
+| `callback_conflicts` | append-only `(tenant,provider,provider_event_id,presented_digest,reason)` where reason is `payload_mismatch` or `tenant_mismatch`; records the caller tenant only | Capability-gated security-definer insert; forced RLS; no direct runtime read |
 | `reconciliation_runs` | tenant/id, adapter, cursor/watermark, diff references, result | Audited operators |
 | `state_feed_counters` | `(tenant)` primary key and last committed feed sequence | App transaction locks/increments once per accepted aggregate event |
 | `state_updates` | `(tenant,sequence)` primary key plus event/aggregate/version/kind and allowlisted payload; no raw PII | App inserts/selects; worker selects and RLS limits deletes to rows older than 24h; per-tenant replay feed |

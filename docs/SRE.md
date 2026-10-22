@@ -93,6 +93,8 @@ K4.7.2 provides shared PostgreSQL admission and recovery-fence primitives, fixed
 
 No production traffic is authorized by this procedure. Deployment-specific dashboards, tested role-recovery exercises, production-small load/lock results and named on-call ownership remain prerequisites tracked by #198 and #199.
 
+The K6.1 callback inbox has no runtime, route or schedule, so it has no SLO or dashboard. Operationally it defines the ordering to preserve once a receiver exists: authenticate first, then record and apply in one tenant transaction, then acknowledge. A failed application returns an error and records nothing, so the provider retry is the recovery mechanism rather than a local replay. A conflict is terminal for that delivery; do not retry it against another tenant or with a rewritten payload, and treat repeated conflicts for one provider event as a possible replay or a second integration holding the same provider event. Inspect the append-only callback_conflicts ledger, which carries only the caller tenant, provider/event identity, presented digest and reason. See docs/K6.1-CALLBACK-INBOX.md.
+
 ## 6. Backup and disaster recovery
 
 PostgreSQL PITR/WAL backups and tested full restores; Temporal persistence backups according to qualified deployment; object-store versioning/lifecycle with erasure controls; infrastructure and schema/catalog definitions versioned. Kafka is transport, not the only copy of business history. Restoring PostgreSQL includes event histories, inbox/delivery dedupe and cost liabilities.
