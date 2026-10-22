@@ -49,7 +49,7 @@ K3.4 is an in-process retrieval contract in `internal/retrieval/hybrid`; it adds
 | `usage_ledger` | logical_source/attempt/type unique; signed amount, confidence, quote/provider invoice ref | Append-only accounting |
 | `usage_rollups` | tenant/time/endpoint/model bounded dimensions; watermark | Rebuildable derived data |
 | `webhook_endpoints` | tenant/id, URL, key reference, status, subscription version | Integration managers |
-| `webhook_deliveries` | unique tenant/event/endpoint/subscription-version; state, next_attempt, lease_epoch | Scoped worker |
+| `webhook_deliveries` | `(tenant,delivery_id)` primary key, global `delivery_id` unique, unique tenant/event/endpoint/subscription-version, database `created_at`; immutable in K6.2 | Capability-gated security-definer claim only; forced RLS; no direct runtime access. State, attempts, next_attempt and lease are K6.3 |
 | `delivery_attempts` | tenant/delivery/attempt unique; timing, response classification, redacted snippets | Append only |
 | `callback_inbox` | `(tenant,provider,provider_event_id)` primary key and a global `(provider,provider_event_id)` unique claim; canonical payload digest, event type, key ID, provider occurrence time, database received/applied times; only `received`→`applied` is allowed | Capability-gated security-definer claim/confirm only; forced RLS; no direct runtime access |
 | `callback_conflicts` | append-only `(tenant,provider,provider_event_id,presented_digest,reason)` where reason is `payload_mismatch` or `tenant_mismatch`; records the caller tenant only | Capability-gated security-definer insert; forced RLS; no direct runtime read |
