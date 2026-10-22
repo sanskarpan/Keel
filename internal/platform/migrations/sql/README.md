@@ -132,5 +132,17 @@ fence and the state machine, not the retry delay or exhaustion policy; per-endpo
 breaking, the delivery worker, endpoint registration and the capped replay UI remain K6.3-K6.5
 work.
 
+Migration `0042_webhook_endpoints` adds the versioned endpoint registry: the tenant-visible endpoint
+identity, HTTPS URL, signing-key reference, subscription revision, active/inactive status and a
+monotonic `version` used for optimistic concurrency. Registration and status changes require the
+application capability and an expected version (zero creates, a positive value updates only on an
+exact match); delivery resolves the URL and key only for an active endpoint at the requested
+subscription revision under the webhook capability. Identity and creation time are immutable, rows
+cannot be deleted, direct grants are revoked and forced RLS applies. The URL may embed a receiver
+token, so it is returned only to the resolving capability and is never stored in an attempt row.
+DNS and address vetting still happen on every delivery dial; registration enforces the static HTTPS,
+fragment, character, host and length rules. No HTTP worker, secret storage, breaker persistence or
+replay record is added.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
