@@ -12,6 +12,7 @@ import (
 
 	"github.com/sanskarpan/keel/internal/orders"
 	"github.com/sanskarpan/keel/internal/orders/outbox"
+	"github.com/sanskarpan/keel/internal/platform/dbquery"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 	"github.com/sanskarpan/keel/internal/platform/tracecontext"
 )
@@ -30,11 +31,11 @@ type repairEnvelope struct {
 }
 
 func (r *Repository) ListBlocked(ctx context.Context, tenant tenancy.TenantID, aggregateID string) (returned []outbox.BlockedEvent, returnedErr error) {
-	done := r.begin(ctx, "outbox.repair.list")
+	ctx, done := r.begin(ctx, "outbox.repair.list")
 	defer func() { done(returnedErr) }()
 	blocked := make([]outbox.BlockedEvent, 0, 1)
 	err := tenancy.WithTenantTx(ctx, r.db, tenant, &sql.TxOptions{ReadOnly: true}, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `SELECT d.tenant_id::text,d.aggregate_id::text,d.event_id::text,
+		rows, err := dbquery.Read(ctx, tx, `SELECT d.tenant_id::text,d.aggregate_id::text,d.event_id::text,
 			d.aggregate_version,d.last_error_code,d.attempt_count
 			FROM keel_meta.outbox_publish_heads h
 			JOIN keel_meta.outbox_delivery d ON d.tenant_id=h.tenant_id AND d.aggregate_id=h.aggregate_id AND d.aggregate_version=h.next_version
@@ -57,7 +58,7 @@ func (r *Repository) ListBlocked(ctx context.Context, tenant tenancy.TenantID, a
 }
 
 func (r *Repository) RepairBlocked(ctx context.Context, tenant tenancy.TenantID, aggregateID string, identity outbox.RepairIdentity, request outbox.RepairRequest) (returnedErr error) {
-	done := r.begin(ctx, "outbox.repair.apply")
+	ctx, done := r.begin(ctx, "outbox.repair.apply")
 	defer func() { done(returnedErr) }()
 	if identity.TenantID != tenant || identity.ActorRef == "" || identity.RequestID == "" {
 		return outbox.ErrRepairUnauthorized
@@ -76,7 +77,7 @@ func (r *Repository) RepairBlocked(ctx context.Context, tenant tenancy.TenantID,
 		var indexedEventID, indexedAggregateID, indexedEventType string
 		var indexedVersion int64
 		var occurredAt time.Time
-		err := tx.QueryRowContext(ctx, `SELECT h.next_version,h.claim_owner,h.lease_expires_at,
+		err := dbquery.ReadRow(ctx, tx, `SELECT h.next_version,h.claim_owner,h.lease_expires_at,
 			d.delivery_state,d.last_error_code,d.attempt_count,d.event_id::text,o.event_type,o.schema_version,o.safe_envelope,
 			e.event_id::text,e.order_id::text,e.aggregate_version,e.event_type,e.event_data,e.event_hash,e.occurred_at
 			FROM keel_meta.outbox_publish_heads h
@@ -108,7 +109,7 @@ func (r *Repository) RepairBlocked(ctx context.Context, tenant tenancy.TenantID,
 			return err
 		}
 		var earlierUnpublished, laterPublished int
-		if err := tx.QueryRowContext(ctx, `SELECT
+		if err := dbquery.ReadRow(ctx, tx, `SELECT
 			(SELECT count(*) FROM keel_meta.outbox_delivery WHERE tenant_id=$1 AND aggregate_id=$2 AND aggregate_version<$3 AND delivery_state<>'published'),
 			(SELECT count(*) FROM keel_meta.outbox_delivery WHERE tenant_id=$1 AND aggregate_id=$2 AND aggregate_version>$3 AND delivery_state='published')`,
 			string(tenant), aggregateID, nextVersion).Scan(&earlierUnpublished, &laterPublished); err != nil {
@@ -120,13 +121,13 @@ func (r *Repository) RepairBlocked(ctx context.Context, tenant tenancy.TenantID,
 		if err := verifyStoredAggregateHistory(ctx, tx, tenant, aggregateID, nextVersion, eventID, eventType, occurredAt); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO keel_meta.outbox_repair_audit
+		if _, err := dbquery.Write(ctx, tx, `INSERT INTO keel_meta.outbox_repair_audit
 			(request_id,tenant_id,aggregate_id,event_id,aggregate_version,actor_ref,reason_code,evidence_ref,prior_error_code,prior_attempt_count)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, identity.RequestID, string(tenant), aggregateID, eventID,
 			nextVersion, identity.ActorRef, request.ReasonCode, request.EvidenceRef, errorCode.String, attempts); err != nil {
 			return fmt.Errorf("record outbox repair audit: %w", err)
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE keel_meta.outbox_delivery SET delivery_state='pending',next_attempt_at=clock_timestamp(),updated_at=clock_timestamp()
+		result, err := dbquery.Write(ctx, tx, `UPDATE keel_meta.outbox_delivery SET delivery_state='pending',next_attempt_at=clock_timestamp(),updated_at=clock_timestamp()
 			WHERE tenant_id=$1 AND aggregate_id=$2 AND event_id=$3 AND aggregate_version=$4 AND delivery_state='blocked'
 			AND last_error_code=$5 AND attempt_count=$6`, string(tenant), aggregateID, eventID, nextVersion, errorCode.String, attempts)
 		if err != nil {
@@ -148,7 +149,7 @@ func verifyStoredAggregateHistory(ctx context.Context, tx *sql.Tx, tenant tenanc
 	if targetVersion < 1 || targetVersion > maxOutboxRepairHistory {
 		return fmt.Errorf("%w: blocked event version exceeds the repair validation bound", ErrCorruptState)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT aggregate_version,event_id::text,event_type,event_data,event_hash,occurred_at
+	rows, err := dbquery.Read(ctx, tx, `SELECT aggregate_version,event_id::text,event_type,event_data,event_hash,occurred_at
 		FROM keel_meta.order_events WHERE tenant_id=$1 AND order_id=$2 ORDER BY aggregate_version`, string(tenant), aggregateID)
 	if err != nil {
 		return err
