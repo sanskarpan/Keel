@@ -36,10 +36,10 @@ type Store interface {
 	RecordAttempt(ctx context.Context, lease postgres.Lease, result postgres.AttemptResult) (postgres.DeliveryState, error)
 }
 
-// PayloadSource returns the exact event bytes to sign. It must be tenant-scoped by the caller and
-// must not derive the tenant from the delivery identity.
+// PayloadSource returns the exact event bytes to sign for one trusted tenant. Implementations must
+// scope the read to tenant and must not derive it from the delivery identity.
 type PayloadSource interface {
-	Payload(ctx context.Context, delivery webhook.Delivery) ([]byte, error)
+	Payload(ctx context.Context, tenant tenancy.TenantID, delivery webhook.Delivery) ([]byte, error)
 }
 
 // Sender signs and performs one attempt. *webhook.Executor implements it.
@@ -252,7 +252,7 @@ func (r *Runner) attempt(ctx context.Context, tenant tenancy.TenantID, lease pos
 		return dispositionSkipped, err
 	}
 
-	payload, err := r.payloads.Payload(ctx, lease.Delivery)
+	payload, err := r.payloads.Payload(ctx, tenant, lease.Delivery)
 	if err != nil && ctx.Err() != nil {
 		return dispositionSkipped, ctx.Err()
 	}

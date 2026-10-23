@@ -89,7 +89,7 @@ type fakePayloads struct {
 	err  error
 }
 
-func (p fakePayloads) Payload(context.Context, webhook.Delivery) ([]byte, error) {
+func (p fakePayloads) Payload(context.Context, tenancy.TenantID, webhook.Delivery) ([]byte, error) {
 	return p.body, p.err
 }
 
