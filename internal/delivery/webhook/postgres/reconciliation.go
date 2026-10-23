@@ -121,3 +121,52 @@ func (s *Store) RepairReconciliation(ctx context.Context, request webhook.Repair
 	}
 	return result, nil
 }
+
+// ResetReconciliationCursor records an audited backward cursor move for one trusted tenant. The
+// store must be constructed over the operator capability's connection.
+func (s *Store) ResetReconciliationCursor(ctx context.Context, request webhook.CursorResetRequest) (webhook.CursorResetResult, error) {
+	var result webhook.CursorResetResult
+	if s == nil || s.db == nil {
+		return result, errors.New("webhook delivery store database is required")
+	}
+	if ctx == nil {
+		return result, errors.New("webhook delivery context is required")
+	}
+	if err := request.Validate(); err != nil {
+		return result, err
+	}
+
+	err := inTenantTx(ctx, s.db, request.Tenant, func(ctx context.Context, tx *sql.Tx) error {
+		var resetID, priorEventID, newEventID string
+		var priorAt, newAt time.Time
+		if err := tx.QueryRowContext(ctx,
+			`SELECT r_reset_id,r_prior_created_at,r_prior_event_id,r_new_created_at,r_new_event_id
+			   FROM keel_meta.reset_webhook_reconciliation_cursor($1,$2,$3,$4)`,
+			request.ResetID, request.RequestedBy, request.To, request.Reason).
+			Scan(&resetID, &priorAt, &priorEventID, &newAt, &newEventID); err != nil {
+			return fmt.Errorf("reset webhook reconciliation cursor: %w", err)
+		}
+		prior, err := uuid.Parse(priorEventID)
+		if err != nil || prior == uuid.Nil || resetID != request.ResetID ||
+			priorAt.IsZero() || newAt.IsZero() || newEventID != uuid.Nil.String() ||
+			newAt.After(priorAt) {
+			return webhook.ErrInvalidReconciliation
+		}
+		result = webhook.CursorResetResult{
+			ResetID: resetID, PriorAt: priorAt, PriorEventID: priorEventID, NewAt: newAt,
+		}
+		return nil
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "reset already exists") {
+			return webhook.CursorResetResult{}, webhook.ErrReconciliationConflict
+		}
+		if strings.Contains(err.Error(), "reset request is invalid") ||
+			strings.Contains(err.Error(), "cursor was not found") ||
+			strings.Contains(err.Error(), "must move backward") {
+			return webhook.CursorResetResult{}, webhook.ErrInvalidReconciliation
+		}
+		return webhook.CursorResetResult{}, err
+	}
+	return result, nil
+}

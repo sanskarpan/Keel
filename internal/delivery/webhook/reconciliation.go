@@ -118,3 +118,44 @@ type RepairResult struct {
 	GapEvents          int
 	InsertedDeliveries int
 }
+
+// CursorResetRequest moves a tenant reconciliation cursor backward to a bounded past time. The
+// planner then rescans events from that time on its next run.
+type CursorResetRequest struct {
+	Tenant      tenancy.TenantID
+	ResetID     string
+	RequestedBy string
+	To          time.Time
+	Reason      string
+}
+
+// Validate checks the tenant, reset identity, audit actor, target time and reason.
+func (r CursorResetRequest) Validate() error {
+	if string(r.Tenant) == "" || string(r.Tenant) == zeroTenant {
+		return ErrInvalidReconciliation
+	}
+	if _, err := tenancy.ParseTenantID(string(r.Tenant)); err != nil {
+		return ErrInvalidReconciliation
+	}
+	if !reconciliationIDPattern.MatchString(r.ResetID) {
+		return ErrInvalidReconciliation
+	}
+	if !reconciliationActorPattern.MatchString(r.RequestedBy) {
+		return ErrInvalidReconciliation
+	}
+	if r.To.IsZero() {
+		return ErrInvalidReconciliation
+	}
+	if err := validateReplayReason(r.Reason); err != nil {
+		return ErrInvalidReconciliation
+	}
+	return nil
+}
+
+// CursorResetResult is the audited before/after watermark of one cursor reset.
+type CursorResetResult struct {
+	ResetID      string
+	PriorAt      time.Time
+	PriorEventID string
+	NewAt        time.Time
+}

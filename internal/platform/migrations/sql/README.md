@@ -212,14 +212,21 @@ tenant, scans at most 500 outbox events above the cursor, compares current activ
 current subscription revision with the delivery ledger, records the run/gaps/cursor atomically and
 returns event IDs with missing delivery counts. It creates no deliveries, exposes no endpoint,
 URL, payload or receiver data, keeps cursor/run/gap tables behind forced RLS and revoked direct
-grants, and refuses duplicate run IDs and cursor rewinds. Migration
+grants, and refuses duplicate run IDs and un-audited cursor rewinds. Migration
 `0052_webhook_reconciliation_repair` adds append-only repair-run and repair-item history plus a
 `keel_operator`-gated `repair_webhook_reconciliation_run(repair_id,run_id,requested_by,limit)`
 function. Repair selects a bounded set of recorded gaps, revalidates current active endpoints at
 their current subscription revision, inserts only missing delivery identities with the normal
 pending state, and fails closed above 10,000 candidates. It records gap-event and inserted-delivery
 counts and item IDs only; it exposes no endpoint, URL, payload or receiver data, keeps all repair
-tables behind forced RLS and revoked direct grants, and refuses duplicate repair IDs.
+tables behind forced RLS and revoked direct grants, and refuses duplicate repair IDs. Migration
+`0053_webhook_reconciliation_cursor_reset` adds an append-only reset audit and a
+`keel_operator`-gated `reset_webhook_reconciliation_cursor(reset_id,requested_by,to,reason)`
+function. A reset must move to a non-future time strictly before the current cursor, records the
+prior/new watermark, operator and bounded reason, and updates the cursor to `(to,zero UUID)` so the
+next planner rescans from that time. The cursor guard accepts a backward move only when the matching
+reset row exists. It creates no deliveries, does not change run/gap history, and keeps the reset
+table behind forced RLS and revoked direct grants.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
