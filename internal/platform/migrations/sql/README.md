@@ -175,5 +175,16 @@ UUID event, adds the schema-owner read policy on `event_outbox`, and revokes dir
 worker port now receives the trusted tenant explicitly; no producer, body store or per-event webhook
 schema is added.
 
+Migration `0047_webhook_replay_requeue` adds the operator-authorized replay requeue: a forced-RLS,
+append-only transition row binds the prior `failed`/`exhausted` state, attempts, finish time and lease
+epoch to the recorded replay and delivery, with a guard trigger that refuses update/delete. One
+operator-gated security-definer function reuses an exact replay request idempotently, records the
+replay and transition, and returns the delivery to `pending` in the same transaction without changing
+`attempts`, `first_attempt_at` or `lease_epoch`; the delivery-state guard accepts only that audited
+transition and still refuses unaudited terminal updates, including `delivered` to `pending`. Endpoint
+eligibility requires the same active registration revision and a signing-key reference. The function
+grants execution to `keel_operator` only and exposes no direct transition-table access. Known-key
+membership, selection and execution remain outside the database contract.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
