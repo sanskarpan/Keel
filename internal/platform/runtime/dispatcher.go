@@ -19,12 +19,18 @@ type Registry map[config.Role]Runner
 // RegistryFor returns implementations that are wired into this binary. Roles
 // without a production runner remain absent and continue to fail closed.
 func RegistryFor(cfg config.Config) Registry {
-	if cfg.Role != config.RoleRateLimitObserver {
+	switch cfg.Role {
+	case config.RoleRateLimitObserver:
+		return Registry{config.RoleRateLimitObserver: func(ctx context.Context) error {
+			return runRateLimitObserver(ctx, cfg, os.Getenv)
+		}}
+	case config.RoleWebhookWorker:
+		return Registry{config.RoleWebhookWorker: func(ctx context.Context) error {
+			return runWebhookWorker(ctx, cfg, os.Getenv)
+		}}
+	default:
 		return Registry{}
 	}
-	return Registry{config.RoleRateLimitObserver: func(ctx context.Context) error {
-		return runRateLimitObserver(ctx, cfg, os.Getenv)
-	}}
 }
 
 // Dispatch fails closed for roles that are recognized by configuration but not yet wired.
