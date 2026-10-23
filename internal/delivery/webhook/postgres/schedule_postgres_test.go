@@ -58,6 +58,10 @@ func TestPostgreSQLWebhookDeliveryLeaseAndRecord(t *testing.T) {
 		lease.LeaseExpiresAt.After(started.Add(31*time.Second)) {
 		t.Fatalf("lease expiry %s is outside the requested 30s window", lease.LeaseExpiresAt)
 	}
+	if lease.FirstAttemptAt.Before(started.Add(-time.Second)) ||
+		lease.FirstAttemptAt.After(started.Add(time.Second)) {
+		t.Fatalf("lease first attempt %s is outside the lease start", lease.FirstAttemptAt)
+	}
 	if leases, err := store.Lease(context.Background(), identity.Tenant, 10, 30*time.Second); err != nil {
 		t.Fatalf("second Lease: %v", err)
 	} else if len(leases) != 0 {
@@ -293,6 +297,7 @@ func TestPostgreSQLWebhookDeliveryScheduleRequiresCapability(t *testing.T) {
 		AttemptID:      uuid.NewString(),
 		LeaseEpoch:     1,
 		LeaseExpiresAt: time.Now().Add(time.Minute),
+		FirstAttemptAt: time.Now().UTC(),
 	}
 	if _, err := store.RecordAttempt(context.Background(), lease, AttemptResult{
 		Outcome:    webhook.OutcomeDelivered,
