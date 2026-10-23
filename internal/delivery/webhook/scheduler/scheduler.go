@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sanskarpan/keel/internal/delivery/webhook"
 	"github.com/sanskarpan/keel/internal/delivery/webhook/worker"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
@@ -26,14 +27,35 @@ const (
 	maxInterval = time.Minute
 )
 
-// TenantSource returns tenants with due or expired deliveries. It returns tenant IDs only.
+// TenantSource returns tenants with due or expired deliveries. It carries no delivery content.
 type TenantSource interface {
-	DueTenants(ctx context.Context, limit int) ([]tenancy.TenantID, error)
+	DueTenants(ctx context.Context, limit int) ([]webhook.DueTenant, error)
 }
 
 // Runner processes one batch for one trusted tenant. *worker.Runner implements it.
 type Runner interface {
 	Run(ctx context.Context, tenant tenancy.TenantID, batch int) (worker.Report, error)
+}
+
+// PassObservation describes one discovery pass without tenant or delivery identifiers.
+type PassObservation struct {
+	Tenants         int
+	DueDeliveries   int64
+	OldestDue       time.Duration
+	DiscoveryFailed bool
+}
+
+// TenantObservation describes one tenant batch without the tenant identifier.
+type TenantObservation struct {
+	Report worker.Report
+	Failed bool
+}
+
+// Observer receives content-free scheduler observations. Implementations must not retain tenant,
+// endpoint, event, URL or error strings.
+type Observer interface {
+	ObservePass(PassObservation)
+	ObserveTenant(TenantObservation)
 }
 
 // Report aggregates one scheduler pass.
@@ -67,6 +89,7 @@ type Scheduler struct {
 	limit    int
 	batch    int
 	interval time.Duration
+	observer Observer
 	lastPoll atomic.Int64
 }
 
@@ -102,6 +125,17 @@ func WithInterval(interval time.Duration) Option {
 			return errors.New("webhook scheduler interval is invalid")
 		}
 		s.interval = interval
+		return nil
+	}
+}
+
+// WithObserver records content-free pass and tenant observations. A nil observer is rejected.
+func WithObserver(observer Observer) Option {
+	return func(s *Scheduler) error {
+		if observer == nil {
+			return errors.New("webhook scheduler observer is invalid")
+		}
+		s.observer = observer
 		return nil
 	}
 }
@@ -144,20 +178,49 @@ func (s *Scheduler) RunOnce(ctx context.Context) (Report, error) {
 	}
 	tenants, err := s.source.DueTenants(ctx, s.limit)
 	if err != nil {
+		if s.observer != nil {
+			s.observer.ObservePass(PassObservation{DiscoveryFailed: true})
+		}
 		return report, fmt.Errorf("discover webhook delivery tenants: %w", err)
 	}
-	s.lastPoll.Store(time.Now().UnixNano())
-	var failures []error
+	now := time.Now()
+	s.lastPoll.Store(now.UnixNano())
+	var dueDeliveries int64
+	var oldest time.Time
 	for _, tenant := range tenants {
+		dueDeliveries += tenant.DueCount
+		if oldest.IsZero() || tenant.DueAt.Before(oldest) {
+			oldest = tenant.DueAt
+		}
+	}
+	oldestAge := time.Duration(0)
+	if !oldest.IsZero() {
+		oldestAge = now.Sub(oldest)
+		if oldestAge < 0 {
+			oldestAge = 0
+		}
+	}
+	if s.observer != nil {
+		s.observer.ObservePass(PassObservation{
+			Tenants:       len(tenants),
+			DueDeliveries: dueDeliveries,
+			OldestDue:     oldestAge,
+		})
+	}
+	var failures []error
+	for _, dueTenant := range tenants {
 		if err := ctx.Err(); err != nil {
 			failures = append(failures, err)
 			break
 		}
-		result, err := s.runner.Run(ctx, tenant, s.batch)
+		result, err := s.runner.Run(ctx, dueTenant.Tenant, s.batch)
 		report.add(result)
 		if err != nil {
 			report.Failures++
 			failures = append(failures, err)
+		}
+		if s.observer != nil {
+			s.observer.ObserveTenant(TenantObservation{Report: result, Failed: err != nil})
 		}
 	}
 	return report, errors.Join(failures...)
