@@ -74,3 +74,40 @@ func TestReconciliationPageAccounting(t *testing.T) {
 		t.Fatalf("unexpected page accounting: %+v", page)
 	}
 }
+
+func testRepairRequest(t *testing.T) RepairRequest {
+	t.Helper()
+	request := testReconciliationRequest(t)
+	return RepairRequest{
+		Tenant:      request.Tenant,
+		RepairID:    "rep_0123456789abcdef",
+		RunID:       request.RunID,
+		RequestedBy: "operator@example.com",
+		EventLimit:  100,
+	}
+}
+
+func TestRepairRequestValidate(t *testing.T) {
+	if err := testRepairRequest(t).Validate(); err != nil {
+		t.Fatalf("valid repair rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*RepairRequest)
+	}{
+		{"zero tenant", func(r *RepairRequest) { r.Tenant = "" }},
+		{"bad repair", func(r *RepairRequest) { r.RepairID = "not a repair" }},
+		{"bad run", func(r *RepairRequest) { r.RunID = "short" }},
+		{"bad actor", func(r *RepairRequest) { r.RequestedBy = " operator" }},
+		{"zero limit", func(r *RepairRequest) { r.EventLimit = 0 }},
+		{"large limit", func(r *RepairRequest) { r.EventLimit = MaxReconciliationPage + 1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := testRepairRequest(t)
+			test.mutate(&request)
+			if err := request.Validate(); !errors.Is(err, ErrInvalidReconciliation) {
+				t.Fatalf("error = %v, want invalid reconciliation", err)
+			}
+		})
+	}
+}
