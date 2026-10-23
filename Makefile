@@ -1,4 +1,4 @@
-.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-rate-limit-observer local-monitoring-up local-monitoring-down local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
+.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-rate-limit-observer local-webhook-worker local-monitoring-up local-monitoring-down local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
 
 COMPOSE_FILE := deploy/compose/compose.yaml
 
@@ -80,6 +80,19 @@ local-rate-limit-observer: local-migrate
 	KEEL_RATE_LIMIT_HOME_REGION=local-dev \
 	KEEL_RATE_LIMIT_STATUS_REFRESH_INTERVAL=5s \
 	KEEL_RATE_LIMIT_STATUS_QUERY_TIMEOUT=1s \
+	GOTOOLCHAIN=local go run ./cmd/keel
+
+local-webhook-worker: local-migrate
+	KEEL_ROLE=webhook-worker \
+	KEEL_ENVIRONMENT=development \
+	KEEL_LISTEN_ADDRESS=127.0.0.1:18082 \
+	KEEL_WEBHOOK_DATABASE_URL='postgres://keel_local_webhook:keel-webhook-local-only@127.0.0.1:54329/postgres?sslmode=disable' \
+	KEEL_WEBHOOK_ACTIVE_KEY_ID=key_local_2026 \
+	KEEL_WEBHOOK_ACTIVE_KEY_SECRET_B64='a2VlbC13ZWJob29rLWxvY2FsLXNpZ25pbmctc2VjcmV0LTMy' \
+	KEEL_WEBHOOK_POLL_INTERVAL=1s \
+	KEEL_WEBHOOK_TENANT_LIMIT=100 \
+	KEEL_WEBHOOK_BATCH=5 \
+	KEEL_WEBHOOK_LEASE_DURATION=120s \
 	GOTOOLCHAIN=local go run ./cmd/keel
 
 local-monitoring-up: local-up
