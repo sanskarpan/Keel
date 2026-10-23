@@ -514,8 +514,9 @@ func insertEvent(ctx context.Context, tx *sql.Tx, event orders.Event) error {
 	return err
 }
 
-// appendCommandSideEffects writes the privacy-safe relay envelope and tenant stream update in
-// the same transaction as the aggregate event, snapshot and idempotency result.
+// appendCommandSideEffects writes the privacy-safe relay envelope, fans out webhook deliveries and
+// writes the tenant stream update in the same transaction as the aggregate event, snapshot and
+// idempotency result.
 func appendCommandSideEffects(ctx context.Context, tx *sql.Tx, event orders.Event, snapshot orders.Snapshot) error {
 	tenant := event.Metadata.TenantID
 	schemaVersion := 1
@@ -541,6 +542,10 @@ func appendCommandSideEffects(ctx context.Context, tx *sql.Tx, event orders.Even
 		VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`, tenant, event.Metadata.EventID, event.Metadata.OrderID,
 		event.Version, string(event.Type), schemaVersion, envelopeJSON)
 	if err != nil {
+		return err
+	}
+	if _, err := dbquery.Write(ctx, tx,
+		`SELECT keel_meta.fanout_webhook_deliveries($1)`, event.Metadata.EventID); err != nil {
 		return err
 	}
 	if _, err := dbquery.Write(ctx, tx, `INSERT INTO keel_meta.outbox_delivery
