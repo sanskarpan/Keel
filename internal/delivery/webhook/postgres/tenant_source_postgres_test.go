@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sanskarpan/keel/internal/delivery/webhook"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
 
@@ -55,15 +56,21 @@ func insertScheduledDelivery(t *testing.T, adminDB *sql.DB, tenant tenancy.Tenan
 	return deliveryID
 }
 
-func dueTenantIDs(t *testing.T, source *TenantSource, limit int) []string {
+func dueTenants(t *testing.T, source *TenantSource, limit int) []webhook.DueTenant {
 	t.Helper()
 	tenants, err := source.DueTenants(context.Background(), limit)
 	if err != nil {
 		t.Fatalf("DueTenants: %v", err)
 	}
+	return tenants
+}
+
+func dueTenantIDs(t *testing.T, source *TenantSource, limit int) []string {
+	t.Helper()
+	tenants := dueTenants(t, source, limit)
 	ids := make([]string, len(tenants))
 	for i, tenant := range tenants {
-		ids[i] = string(tenant)
+		ids[i] = string(tenant.Tenant)
 	}
 	return ids
 }
@@ -114,6 +121,21 @@ func TestPostgreSQLTenantSourceReturnsDueAndExpiredTenants(t *testing.T) {
 	}
 	if limited := dueTenantIDs(t, source, 2); len(limited) != 2 {
 		t.Fatalf("limit 2 returned %d tenants", len(limited))
+	}
+	for _, entry := range dueTenants(t, source, 1000) {
+		switch entry.Tenant {
+		case first:
+			if entry.DueCount != 2 {
+				t.Fatalf("first tenant due count = %d, want 2", entry.DueCount)
+			}
+			if entry.DueAt.After(now.Add(-9*time.Minute)) || entry.DueAt.Before(now.Add(-11*time.Minute)) {
+				t.Fatalf("first tenant earliest due = %v", entry.DueAt)
+			}
+		case second, third:
+			if entry.DueCount != 1 {
+				t.Fatalf("tenant %s due count = %d, want 1", entry.Tenant, entry.DueCount)
+			}
+		}
 	}
 }
 

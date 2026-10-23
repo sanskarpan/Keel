@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sanskarpan/keel/internal/delivery/webhook"
 	"github.com/sanskarpan/keel/internal/delivery/webhook/worker"
 	"github.com/sanskarpan/keel/internal/platform/tenancy"
 )
@@ -20,18 +21,23 @@ func schedulerTenant(t *testing.T, raw string) tenancy.TenantID {
 	return tenant
 }
 
+func schedulerDue(t *testing.T, raw string, dueAt time.Time, count int64) webhook.DueTenant {
+	t.Helper()
+	return webhook.DueTenant{Tenant: schedulerTenant(t, raw), DueAt: dueAt, DueCount: count}
+}
+
 type recordingSource struct {
 	mu      sync.Mutex
-	tenants []tenancy.TenantID
+	tenants []webhook.DueTenant
 	err     error
 	limits  []int
 	called  chan struct{}
 }
 
-func (s *recordingSource) DueTenants(ctx context.Context, limit int) ([]tenancy.TenantID, error) {
+func (s *recordingSource) DueTenants(ctx context.Context, limit int) ([]webhook.DueTenant, error) {
 	s.mu.Lock()
 	s.limits = append(s.limits, limit)
-	tenants, err := append([]tenancy.TenantID(nil), s.tenants...), s.err
+	tenants, err := append([]webhook.DueTenant(nil), s.tenants...), s.err
 	s.mu.Unlock()
 	if s.called != nil {
 		select {
@@ -63,10 +69,32 @@ func (r *recordingRunner) Run(ctx context.Context, tenant tenancy.TenantID, batc
 	return report, err
 }
 
+type recordingObserver struct {
+	mu      sync.Mutex
+	passes  []PassObservation
+	tenants []TenantObservation
+}
+
+func (o *recordingObserver) ObservePass(observation PassObservation) {
+	o.mu.Lock()
+	o.passes = append(o.passes, observation)
+	o.mu.Unlock()
+}
+
+func (o *recordingObserver) ObserveTenant(observation TenantObservation) {
+	o.mu.Lock()
+	o.tenants = append(o.tenants, observation)
+	o.mu.Unlock()
+}
+
 func TestSchedulerRunOnceProcessesEveryDueTenant(t *testing.T) {
 	first := schedulerTenant(t, "11111111-1111-4111-8111-111111111111")
 	second := schedulerTenant(t, "22222222-2222-4222-8222-222222222222")
-	source := &recordingSource{tenants: []tenancy.TenantID{first, second}}
+	now := time.Now()
+	source := &recordingSource{tenants: []webhook.DueTenant{
+		schedulerDue(t, string(first), now.Add(-2*time.Minute), 2),
+		schedulerDue(t, string(second), now.Add(-time.Minute), 1),
+	}}
 	runner := &recordingRunner{
 		reports: map[string]worker.Report{
 			string(first):  {Leased: 2, Delivered: 1, RetryScheduled: 1},
@@ -74,7 +102,8 @@ func TestSchedulerRunOnceProcessesEveryDueTenant(t *testing.T) {
 		},
 		errors: map[string]error{string(second): errors.New("tenant failed")},
 	}
-	s, err := New(source, runner, WithTenantLimit(10), WithBatch(3))
+	observer := &recordingObserver{}
+	s, err := New(source, runner, WithTenantLimit(10), WithBatch(3), WithObserver(observer))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,12 +127,21 @@ func TestSchedulerRunOnceProcessesEveryDueTenant(t *testing.T) {
 	if len(source.limits) != 1 || source.limits[0] != 10 {
 		t.Fatalf("source limits = %v, want [10]", source.limits)
 	}
+	if len(observer.passes) != 1 || observer.passes[0].Tenants != 2 ||
+		observer.passes[0].DueDeliveries != 3 || observer.passes[0].DiscoveryFailed ||
+		observer.passes[0].OldestDue < 119*time.Second {
+		t.Fatalf("pass observations = %+v", observer.passes)
+	}
+	if len(observer.tenants) != 2 || !observer.tenants[1].Failed {
+		t.Fatalf("tenant observations = %+v", observer.tenants)
+	}
 }
 
 func TestSchedulerRunOnceReturnsDiscoveryError(t *testing.T) {
 	source := &recordingSource{err: errors.New("database unavailable")}
 	runner := &recordingRunner{}
-	s, err := New(source, runner)
+	observer := &recordingObserver{}
+	s, err := New(source, runner, WithObserver(observer))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +150,9 @@ func TestSchedulerRunOnceReturnsDiscoveryError(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("runner was called %d times after a discovery error", len(runner.calls))
+	}
+	if len(observer.passes) != 1 || !observer.passes[0].DiscoveryFailed {
+		t.Fatalf("pass observations = %+v", observer.passes)
 	}
 }
 
@@ -141,8 +182,8 @@ func TestSchedulerRunStopsOnCancellation(t *testing.T) {
 }
 
 func TestSchedulerRunOnceRejectsCancelledContextBeforeWork(t *testing.T) {
-	source := &recordingSource{tenants: []tenancy.TenantID{
-		schedulerTenant(t, "11111111-1111-4111-8111-111111111111"),
+	source := &recordingSource{tenants: []webhook.DueTenant{
+		schedulerDue(t, "11111111-1111-4111-8111-111111111111", time.Now(), 1),
 	}}
 	runner := &recordingRunner{}
 	s, err := New(source, runner)
@@ -175,6 +216,7 @@ func TestSchedulerConfigurationBounds(t *testing.T) {
 		WithBatch(worker.MaxBatch + 1),
 		WithInterval(0),
 		WithInterval(2 * time.Minute),
+		WithObserver(nil),
 		nil,
 	} {
 		if _, err := New(source, runner, option); err == nil {
@@ -187,8 +229,8 @@ func TestSchedulerConfigurationBounds(t *testing.T) {
 }
 
 func TestSchedulerLastPollTracksSuccessfulDiscovery(t *testing.T) {
-	source := &recordingSource{tenants: []tenancy.TenantID{
-		schedulerTenant(t, "11111111-1111-4111-8111-111111111111"),
+	source := &recordingSource{tenants: []webhook.DueTenant{
+		schedulerDue(t, "11111111-1111-4111-8111-111111111111", time.Now(), 1),
 	}}
 	s, err := New(source, &recordingRunner{})
 	if err != nil {
