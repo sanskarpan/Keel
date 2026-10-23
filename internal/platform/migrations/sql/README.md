@@ -201,7 +201,9 @@ security-definer function returns only tenant IDs that have a pending delivery d
 in-flight lease expired now, grouped per tenant, ordered by earliest due time and bounded to
 1-1000 rows. It exposes no delivery, endpoint, URL, payload, attempt or state data, and grants
 execute only to `keel_webhook`; the scheduler process uses it to choose tenants for the existing
-tenant-scoped lease.
+tenant-scoped lease. Migration `0050_webhook_delivery_metrics` replaces that function with the same
+capability and ordering plus the earliest due time and due delivery count, so the worker can expose
+content-free backlog and age gauges. It adds no label values, identifiers or delivery content.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

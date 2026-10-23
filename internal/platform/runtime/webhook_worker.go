@@ -13,6 +13,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/sanskarpan/keel/internal/delivery/webhook"
+	webhookmetrics "github.com/sanskarpan/keel/internal/delivery/webhook/metrics"
 	webhookpostgres "github.com/sanskarpan/keel/internal/delivery/webhook/postgres"
 	"github.com/sanskarpan/keel/internal/delivery/webhook/scheduler"
 	"github.com/sanskarpan/keel/internal/delivery/webhook/worker"
@@ -197,10 +198,12 @@ func runWebhookWorker(ctx context.Context, cfg config.Config, lookup func(string
 	if err != nil {
 		return err
 	}
+	recorder := webhookmetrics.New()
 	sched, err := scheduler.New(tenants, runner,
 		scheduler.WithTenantLimit(settings.tenantLimit),
 		scheduler.WithBatch(settings.batch),
-		scheduler.WithInterval(settings.interval))
+		scheduler.WithInterval(settings.interval),
+		scheduler.WithObserver(recorder))
 	if err != nil {
 		return err
 	}
@@ -211,7 +214,7 @@ func runWebhookWorker(ctx context.Context, cfg config.Config, lookup func(string
 	serveDone := make(chan error, 1)
 	go func() { runDone <- sched.Run(serviceCtx) }()
 	go func() {
-		serveDone <- health.Run(serviceCtx, cfg.ListenAddress, buildinfo.Current(), func(probeCtx context.Context) error {
+		serveDone <- health.RunWithMetrics(serviceCtx, cfg.ListenAddress, buildinfo.Current(), recorder, func(probeCtx context.Context) error {
 			if err := db.PingContext(probeCtx); err != nil {
 				return err
 			}
