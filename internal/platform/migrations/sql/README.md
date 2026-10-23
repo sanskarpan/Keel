@@ -162,5 +162,11 @@ functions record idempotently by replay ID and expose a tenant-scoped existence 
 reuse and a second replay for the same delivery are refused. No selection, authorization, state
 transition or execution is added.
 
+Migration `0045_webhook_lease_first_attempt` re-creates `lease_webhook_deliveries` because its
+return type gains the delivery's `first_attempt_at`. Selection, capability gating, `SKIP LOCKED`,
+the monotonic epoch and the 5-300 second fence are unchanged; the worker uses the returned time to
+enforce the 24-hour retry window across re-leases. The drop/recreate is transactional and re-issues
+the webhook grant.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
