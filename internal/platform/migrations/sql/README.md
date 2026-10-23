@@ -195,5 +195,13 @@ endpoint URL or key, grants execute only to `keel_app`, and does not backfill ev
 event type. Endpoints registered after an event do not receive it; the current registry has no
 per-event subscription filter.
 
+Migration `0049_webhook_tenant_scheduling` adds global partial indexes for due pending and expired
+in-flight state plus `list_webhook_delivery_tenants(limit)`. The `keel_webhook`-gated
+security-definer function returns only tenant IDs that have a pending delivery due now or an
+in-flight lease expired now, grouped per tenant, ordered by earliest due time and bounded to
+1-1000 rows. It exposes no delivery, endpoint, URL, payload, attempt or state data, and grants
+execute only to `keel_webhook`; the scheduler process uses it to choose tenants for the existing
+tenant-scoped lease.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
