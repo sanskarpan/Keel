@@ -167,5 +167,13 @@ the monotonic epoch and the 5-300 second fence are unchanged; the worker uses th
 enforce the 24-hour retry window across re-leases. The drop/recreate is transactional and re-issues
 the webhook grant.
 
+Migration `0046_webhook_payload_source` adds the first production webhook body read: a
+webhook-gated security-definer function resolves the delivery's event to the outbox `safe_envelope`
+and returns canonical JSON text, bounded to 1 MiB, without exposing the URL, secret, private event
+data or receiver response. It derives the tenant from the authorized context, requires a canonical
+UUID event, adds the schema-owner read policy on `event_outbox`, and revokes direct grants. The
+worker port now receives the trusted tenant explicitly; no producer, body store or per-event webhook
+schema is added.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
