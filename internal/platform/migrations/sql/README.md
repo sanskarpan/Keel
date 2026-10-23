@@ -172,8 +172,8 @@ webhook-gated security-definer function resolves the delivery's event to the out
 and returns canonical JSON text, bounded to 1 MiB, without exposing the URL, secret, private event
 data or receiver response. It derives the tenant from the authorized context, requires a canonical
 UUID event, adds the schema-owner read policy on `event_outbox`, and revokes direct grants. The
-worker port now receives the trusted tenant explicitly; no producer, body store or per-event webhook
-schema is added.
+worker port now receives the trusted tenant explicitly; no body store or per-event webhook schema is
+added. The producer/fanout is added by migration `0048` below.
 
 Migration `0047_webhook_replay_requeue` adds the operator-authorized replay requeue: a forced-RLS,
 append-only transition row binds the prior `failed`/`exhausted` state, attempts, finish time and lease
