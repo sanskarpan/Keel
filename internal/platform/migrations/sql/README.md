@@ -186,5 +186,14 @@ eligibility requires the same active registration revision and a signing-key ref
 grants execution to `keel_operator` only and exposes no direct transition-table access. Known-key
 membership, selection and execution remain outside the database contract.
 
+Migration `0048_webhook_delivery_fanout` adds `fanout_webhook_deliveries(event_id)`, called in the
+same transaction as the outbox append. The `keel_app`-gated security-definer function derives the
+tenant from context, requires the event to exist in the tenant outbox, and inserts one delivery per
+active endpoint at its current subscription revision. The delivery identity constraint makes a
+repeated or concurrent call a no-op, so the function returns only the inserted count. It returns no
+endpoint URL or key, grants execute only to `keel_app`, and does not backfill events or filter by
+event type. Endpoints registered after an event do not receive it; the current registry has no
+per-event subscription filter.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
