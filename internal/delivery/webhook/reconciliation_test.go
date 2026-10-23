@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +105,43 @@ func TestRepairRequestValidate(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := testRepairRequest(t)
+			test.mutate(&request)
+			if err := request.Validate(); !errors.Is(err, ErrInvalidReconciliation) {
+				t.Fatalf("error = %v, want invalid reconciliation", err)
+			}
+		})
+	}
+}
+
+func testCursorResetRequest(t *testing.T) CursorResetRequest {
+	t.Helper()
+	return CursorResetRequest{
+		Tenant:      testReconciliationRequest(t).Tenant,
+		ResetID:     "rst_0123456789abcdef",
+		RequestedBy: "operator@example.com",
+		To:          time.Now().Add(-2 * time.Minute),
+		Reason:      "rescan the known gap window",
+	}
+}
+
+func TestCursorResetRequestValidate(t *testing.T) {
+	if err := testCursorResetRequest(t).Validate(); err != nil {
+		t.Fatalf("valid reset rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*CursorResetRequest)
+	}{
+		{"zero tenant", func(r *CursorResetRequest) { r.Tenant = "" }},
+		{"bad reset", func(r *CursorResetRequest) { r.ResetID = "not a reset" }},
+		{"bad actor", func(r *CursorResetRequest) { r.RequestedBy = " operator" }},
+		{"zero time", func(r *CursorResetRequest) { r.To = time.Time{} }},
+		{"empty reason", func(r *CursorResetRequest) { r.Reason = "" }},
+		{"control reason", func(r *CursorResetRequest) { r.Reason = "bad\nreason" }},
+		{"long reason", func(r *CursorResetRequest) { r.Reason = strings.Repeat("r", MaxReplayReasonBytes+1) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := testCursorResetRequest(t)
 			test.mutate(&request)
 			if err := request.Validate(); !errors.Is(err, ErrInvalidReconciliation) {
 				t.Fatalf("error = %v, want invalid reconciliation", err)
