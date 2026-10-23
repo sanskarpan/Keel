@@ -73,3 +73,51 @@ func (s *Store) PlanReconciliation(ctx context.Context, request webhook.Reconcil
 	}
 	return page, nil
 }
+
+// RepairReconciliation applies one recorded reconciliation run to the still-missing deliveries for
+// current active endpoints. The store must be constructed over the operator capability's
+// connection.
+func (s *Store) RepairReconciliation(ctx context.Context, request webhook.RepairRequest) (webhook.RepairResult, error) {
+	var result webhook.RepairResult
+	if s == nil || s.db == nil {
+		return result, errors.New("webhook delivery store database is required")
+	}
+	if ctx == nil {
+		return result, errors.New("webhook delivery context is required")
+	}
+	if err := request.Validate(); err != nil {
+		return result, err
+	}
+
+	err := inTenantTx(ctx, s.db, request.Tenant, func(ctx context.Context, tx *sql.Tx) error {
+		var repairID string
+		var gaps, inserted int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT r_repair_id,r_gap_events,r_inserted_deliveries
+			   FROM keel_meta.repair_webhook_reconciliation_run($1,$2,$3,$4)`,
+			request.RepairID, request.RunID, request.RequestedBy, request.EventLimit).
+			Scan(&repairID, &gaps, &inserted); err != nil {
+			return fmt.Errorf("repair webhook reconciliation: %w", err)
+		}
+		if repairID != request.RepairID || gaps < 0 || gaps > webhook.MaxReconciliationPage ||
+			inserted < 0 || inserted > 10000 {
+			return webhook.ErrInvalidReconciliation
+		}
+		result = webhook.RepairResult{RepairID: repairID, GapEvents: gaps, InsertedDeliveries: inserted}
+		return nil
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "repair already exists") {
+			return webhook.RepairResult{}, webhook.ErrReconciliationConflict
+		}
+		if strings.Contains(err.Error(), "exceeds the delivery bound") {
+			return webhook.RepairResult{}, webhook.ErrReconciliationRepairLimit
+		}
+		if strings.Contains(err.Error(), "run was not found") ||
+			strings.Contains(err.Error(), "repair request is invalid") {
+			return webhook.RepairResult{}, webhook.ErrInvalidReconciliation
+		}
+		return webhook.RepairResult{}, err
+	}
+	return result, nil
+}

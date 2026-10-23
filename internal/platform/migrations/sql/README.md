@@ -212,8 +212,14 @@ tenant, scans at most 500 outbox events above the cursor, compares current activ
 current subscription revision with the delivery ledger, records the run/gaps/cursor atomically and
 returns event IDs with missing delivery counts. It creates no deliveries, exposes no endpoint,
 URL, payload or receiver data, keeps cursor/run/gap tables behind forced RLS and revoked direct
-grants, and refuses duplicate run IDs and cursor rewinds. Repair remains outside the database
-contract.
+grants, and refuses duplicate run IDs and cursor rewinds. Migration
+`0052_webhook_reconciliation_repair` adds append-only repair-run and repair-item history plus a
+`keel_operator`-gated `repair_webhook_reconciliation_run(repair_id,run_id,requested_by,limit)`
+function. Repair selects a bounded set of recorded gaps, revalidates current active endpoints at
+their current subscription revision, inserts only missing delivery identities with the normal
+pending state, and fails closed above 10,000 candidates. It records gap-event and inserted-delivery
+counts and item IDs only; it exposes no endpoint, URL, payload or receiver data, keeps all repair
+tables behind forced RLS and revoked direct grants, and refuses duplicate repair IDs.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
