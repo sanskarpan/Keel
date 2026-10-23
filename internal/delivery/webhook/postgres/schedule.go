@@ -22,12 +22,14 @@ const (
 
 // Lease is one fenced attempt grant. AttemptNumber is the attempt the worker must record, and
 // LeaseEpoch fences the grant so a worker whose lease expired cannot record its result.
+// FirstAttemptAt is the delivery's first lease time, used to enforce the retry window.
 type Lease struct {
 	Delivery       webhook.Delivery
 	AttemptNumber  int
 	AttemptID      string
 	LeaseEpoch     int64
 	LeaseExpiresAt time.Time
+	FirstAttemptAt time.Time
 }
 
 // Validate checks that the lease can be sent and recorded.
@@ -45,6 +47,9 @@ func (l Lease) Validate() error {
 		return webhook.ErrInvalidAttempt
 	}
 	if l.LeaseExpiresAt.IsZero() {
+		return webhook.ErrInvalidAttempt
+	}
+	if l.FirstAttemptAt.IsZero() || l.FirstAttemptAt.After(l.LeaseExpiresAt) {
 		return webhook.ErrInvalidAttempt
 	}
 	return nil
@@ -109,7 +114,7 @@ func (s *Store) Lease(ctx context.Context, tenant tenancy.TenantID, limit int, l
 
 	rows, err := tx.QueryContext(ctx,
 		`SELECT event_id,endpoint_id,subscription_version,delivery_id,attempt_number,
-		        attempt_id,lease_epoch,lease_expires_at
+		        attempt_id,lease_epoch,lease_expires_at,first_attempt_at
 		   FROM keel_meta.lease_webhook_deliveries($1,$2)`, limit, seconds)
 	if err != nil {
 		return nil, fmt.Errorf("lease webhook deliveries: %w", err)
@@ -119,9 +124,9 @@ func (s *Store) Lease(ctx context.Context, tenant tenancy.TenantID, limit int, l
 		var eventID, endpointID, deliveryID, attemptID string
 		var version, attemptNumber int64
 		var epoch int64
-		var expiresAt time.Time
+		var expiresAt, firstAttemptAt time.Time
 		if err := rows.Scan(&eventID, &endpointID, &version, &deliveryID, &attemptNumber,
-			&attemptID, &epoch, &expiresAt); err != nil {
+			&attemptID, &epoch, &expiresAt, &firstAttemptAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan webhook delivery lease: %w", err)
 		}
@@ -143,6 +148,7 @@ func (s *Store) Lease(ctx context.Context, tenant tenancy.TenantID, limit int, l
 			AttemptID:      attemptID,
 			LeaseEpoch:     epoch,
 			LeaseExpiresAt: expiresAt.UTC(),
+			FirstAttemptAt: firstAttemptAt.UTC(),
 		}
 		if err := lease.Validate(); err != nil {
 			rows.Close()

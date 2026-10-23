@@ -39,6 +39,7 @@ func validLease(t *testing.T) Lease {
 		AttemptID:      uuid.NewString(),
 		LeaseEpoch:     1,
 		LeaseExpiresAt: time.Now().Add(time.Minute).UTC(),
+		FirstAttemptAt: time.Now().UTC(),
 	}
 }
 
@@ -62,6 +63,7 @@ func TestLeaseValidate(t *testing.T) {
 		"bad attempt id":    func(l *Lease) { l.AttemptID = "../attempt" },
 		"zero epoch":        func(l *Lease) { l.LeaseEpoch = 0 },
 		"zero expiry":       func(l *Lease) { l.LeaseExpiresAt = time.Time{} },
+		"zero first try":    func(l *Lease) { l.FirstAttemptAt = time.Time{} },
 		"bad delivery id":   func(l *Lease) { l.Delivery.ID = "x" },
 		"zero tenant":       func(l *Lease) { l.Delivery.Identity.Tenant = "" },
 		"bad event id":      func(l *Lease) { l.Delivery.Identity.EventID = "short" },
