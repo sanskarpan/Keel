@@ -205,5 +205,15 @@ tenant-scoped lease. Migration `0050_webhook_delivery_metrics` replaces that fun
 capability and ordering plus the earliest due time and due delivery count, so the worker can expose
 content-free backlog and age gauges. It adds no label values, identifiers or delivery content.
 
+Migration `0051_webhook_reconciliation` adds the first K6.4 dry-run foundation: a tenant event
+cursor, append-only run and per-event gap history, and an outbox cursor index. The
+`keel_operator`-gated `plan_webhook_reconciliation(run_id,requested_by,from,limit)` serializes per
+tenant, scans at most 500 outbox events above the cursor, compares current active endpoints at their
+current subscription revision with the delivery ledger, records the run/gaps/cursor atomically and
+returns event IDs with missing delivery counts. It creates no deliveries, exposes no endpoint,
+URL, payload or receiver data, keeps cursor/run/gap tables behind forced RLS and revoked direct
+grants, and refuses duplicate run IDs and cursor rewinds. Repair remains outside the database
+contract.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
