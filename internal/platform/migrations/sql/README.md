@@ -151,8 +151,7 @@ Check constraints enforce the state shape, the guard trigger refuses deletes and
 requires a single-step version, forced RLS applies and direct grants are revoked. Load and save are
 security-definer functions gated on the webhook capability; save inserts at expected version zero or
 updates only on an exact match, so concurrent workers produce one winner and one version conflict.
-The policy stays in Go: PostgreSQL owns the compare-and-swap, not the breaker decision. No worker
-consultation, operator reset or metric is added.
+The policy stays in Go: PostgreSQL owns the compare-and-swap, not the breaker decision. The worker consults the breaker before each send; no operator reset or metric is added.
 
 Migration `0044_webhook_replays` records manual replay requests before execution: one immutable row
 per tenant/delivery with a caller-supplied replay ID, operator principal and a bounded non-control
