@@ -154,5 +154,13 @@ updates only on an exact match, so concurrent workers produce one winner and one
 The policy stays in Go: PostgreSQL owns the compare-and-swap, not the breaker decision. No worker
 consultation, operator reset or metric is added.
 
+Migration `0044_webhook_replays` records manual replay requests before execution: one immutable row
+per tenant/delivery with a caller-supplied replay ID, operator principal and a bounded non-control
+reason, a foreign key to the delivery ledger, a unique tenant/delivery constraint, a guard trigger
+that refuses update/delete, forced RLS and revoked direct grants. Operator-gated security-definer
+functions record idempotently by replay ID and expose a tenant-scoped existence check; conflicting
+reuse and a second replay for the same delivery are refused. No selection, authorization, state
+transition or execution is added.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
