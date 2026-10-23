@@ -18,8 +18,10 @@ const (
 var (
 	// ErrInvalidReconciliation means a reconciliation request violates the bounded contract.
 	ErrInvalidReconciliation = errors.New("webhook reconciliation request is invalid")
-	// ErrReconciliationConflict means a run ID already recorded a different page.
+	// ErrReconciliationConflict means a run or repair ID already recorded a different result.
 	ErrReconciliationConflict = errors.New("webhook reconciliation run conflicts with an existing run")
+	// ErrReconciliationRepairLimit means one repair would create more deliveries than allowed.
+	ErrReconciliationRepairLimit = errors.New("webhook reconciliation repair exceeds the delivery bound")
 
 	reconciliationIDPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 	reconciliationActorPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$`)
@@ -74,4 +76,45 @@ type ReconciliationPage struct {
 	Scanned   int
 	GapEvents int
 	Missing   int
+}
+
+// RepairRequest applies one recorded reconciliation run to its current gaps. EventLimit bounds the
+// number of gap events revalidated in this repair; delivery candidates are separately capped by
+// the database.
+type RepairRequest struct {
+	Tenant      tenancy.TenantID
+	RepairID    string
+	RunID       string
+	RequestedBy string
+	EventLimit  int
+}
+
+// Validate checks the tenant, both identities, audit actor and event limit.
+func (r RepairRequest) Validate() error {
+	if string(r.Tenant) == "" || string(r.Tenant) == zeroTenant {
+		return ErrInvalidReconciliation
+	}
+	if _, err := tenancy.ParseTenantID(string(r.Tenant)); err != nil {
+		return ErrInvalidReconciliation
+	}
+	if !reconciliationIDPattern.MatchString(r.RepairID) {
+		return ErrInvalidReconciliation
+	}
+	if !reconciliationIDPattern.MatchString(r.RunID) {
+		return ErrInvalidReconciliation
+	}
+	if !reconciliationActorPattern.MatchString(r.RequestedBy) {
+		return ErrInvalidReconciliation
+	}
+	if r.EventLimit < 1 || r.EventLimit > MaxReconciliationPage {
+		return ErrInvalidReconciliation
+	}
+	return nil
+}
+
+// RepairResult is the audited outcome of one repair invocation.
+type RepairResult struct {
+	RepairID           string
+	GapEvents          int
+	InsertedDeliveries int
 }
