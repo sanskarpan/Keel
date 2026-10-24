@@ -49,7 +49,7 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
 3. **Reconciliation is not production-complete.** Historical endpoint status, provider/callback
    observation reconciliation, scheduler integration, an operator reconciliation UI and metrics are
    open.
-4. **Quotas are partial.** A configurable active-endpoint policy exists (default 100), but due-delivery/attempt quotas and over-cap remediation do not.
+4. **Quotas are partial.** A configurable active-endpoint policy (default 100) and a per-tenant per-pass delivery lease policy (default 5, at most 100) exist; the scheduler leases at most the minimum of the process batch and the tenant limit and leaves the remainder due. Global due-backlog caps, attempt quotas, fair-share ordering and over-cap remediation do not.
 5. **Operational qualification is partial.** Source-controlled local alert rules and a dashboard
    contract exist; there is no Alertmanager, paging owner, hosted dashboard, production scrape or
    SLO qualification.
