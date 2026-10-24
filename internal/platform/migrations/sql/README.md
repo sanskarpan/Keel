@@ -238,7 +238,12 @@ active count does not deactivate endpoints but blocks new growth. `0055_webhook_
 `keel_operator`-gated candidate query over failed/exhausted deliveries with attempts, replay flag,
 current endpoint status at the delivery revision and key reference. It returns no URL, payload,
 signature or receiver content; the unmounted HTTP API applies the existing selection cap and key
-readiness before returning delivery IDs and skip reasons.
+readiness before returning delivery IDs and skip reasons. Migration
+`0057_webhook_tenant_delivery_quota` adds a per-tenant delivery batch policy (1-100, default 5)
+and append-only policy history, with an expected-version `keel_operator`-gated setter, and
+re-creates tenant discovery with the effective per-pass lease limit. The scheduler leases at most
+the minimum of the process batch and the tenant limit; deliveries above the ceiling stay due for a
+later pass. It drops no backlog and adds no global cap, fair-share ordering or HTTP/UI.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

@@ -56,3 +56,43 @@ func TestEndpointLimitPolicyUpdatedAt(t *testing.T) {
 		t.Fatalf("policy = %+v", policy)
 	}
 }
+
+func testDeliveryBatchChange(t *testing.T) DeliveryBatchChange {
+	t.Helper()
+	tenant, err := tenancy.ParseTenantID("11111111-1111-4111-8111-111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return DeliveryBatchChange{
+		Tenant: tenant, ChangeID: "pol_0123456789abcdef", RequestedBy: "operator@example.com",
+		Limit: 2, Reason: "throttle the tenant delivery batch", ExpectedVersion: 0,
+	}
+}
+
+func TestDeliveryBatchChangeValidate(t *testing.T) {
+	if err := testDeliveryBatchChange(t).Validate(); err != nil {
+		t.Fatalf("valid change rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*DeliveryBatchChange)
+	}{
+		{"zero tenant", func(c *DeliveryBatchChange) { c.Tenant = "" }},
+		{"bad change", func(c *DeliveryBatchChange) { c.ChangeID = "short" }},
+		{"bad actor", func(c *DeliveryBatchChange) { c.RequestedBy = " operator" }},
+		{"zero limit", func(c *DeliveryBatchChange) { c.Limit = 0 }},
+		{"large limit", func(c *DeliveryBatchChange) { c.Limit = MaxDeliveryBatchLimit + 1 }},
+		{"empty reason", func(c *DeliveryBatchChange) { c.Reason = "" }},
+		{"control reason", func(c *DeliveryBatchChange) { c.Reason = "bad\nreason" }},
+		{"long reason", func(c *DeliveryBatchChange) { c.Reason = strings.Repeat("r", MaxReplayReasonBytes+1) }},
+		{"negative version", func(c *DeliveryBatchChange) { c.ExpectedVersion = -1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			change := testDeliveryBatchChange(t)
+			test.mutate(&change)
+			if err := change.Validate(); !errors.Is(err, ErrInvalidEndpoint) {
+				t.Fatalf("error = %v, want invalid endpoint", err)
+			}
+		})
+	}
+}

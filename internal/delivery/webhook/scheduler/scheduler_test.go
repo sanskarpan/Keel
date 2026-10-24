@@ -137,6 +137,42 @@ func TestSchedulerRunOnceProcessesEveryDueTenant(t *testing.T) {
 	}
 }
 
+func TestSchedulerRunOnceClampsBatchToTenantPolicy(t *testing.T) {
+	limited := schedulerTenant(t, "11111111-1111-4111-8111-111111111111")
+	raised := schedulerTenant(t, "22222222-2222-4222-8222-222222222222")
+	now := time.Now()
+	source := &recordingSource{tenants: []webhook.DueTenant{
+		{Tenant: limited, DueAt: now.Add(-2 * time.Minute), DueCount: 4, BatchLimit: 1},
+		{Tenant: raised, DueAt: now.Add(-time.Minute), DueCount: 1, BatchLimit: 100},
+	}}
+	runner := &recordingRunner{reports: map[string]worker.Report{}}
+	s, err := New(source, runner, WithTenantLimit(10), WithBatch(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("runner calls = %d, want 2", len(runner.calls))
+	}
+	for _, call := range runner.calls {
+		switch call.tenant {
+		case limited:
+			if call.batch != 1 {
+				t.Fatalf("limited tenant batch = %d, want 1", call.batch)
+			}
+		case raised:
+			if call.batch != 5 {
+				t.Fatalf("raised tenant batch = %d, want process ceiling 5", call.batch)
+			}
+		default:
+			t.Fatalf("unexpected tenant %s", call.tenant)
+		}
+	}
+}
+
 func TestSchedulerRunOnceReturnsDiscoveryError(t *testing.T) {
 	source := &recordingSource{err: errors.New("database unavailable")}
 	runner := &recordingRunner{}

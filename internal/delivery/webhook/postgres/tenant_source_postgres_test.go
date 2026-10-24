@@ -131,9 +131,17 @@ func TestPostgreSQLTenantSourceReturnsDueAndExpiredTenants(t *testing.T) {
 			if entry.DueAt.After(now.Add(-9*time.Minute)) || entry.DueAt.Before(now.Add(-11*time.Minute)) {
 				t.Fatalf("first tenant earliest due = %v", entry.DueAt)
 			}
+			if entry.BatchLimit != webhook.DefaultDeliveryBatchLimit {
+				t.Fatalf("first tenant batch limit = %d, want default %d",
+					entry.BatchLimit, webhook.DefaultDeliveryBatchLimit)
+			}
 		case second, third:
 			if entry.DueCount != 1 {
 				t.Fatalf("tenant %s due count = %d, want 1", entry.Tenant, entry.DueCount)
+			}
+			if entry.BatchLimit != webhook.DefaultDeliveryBatchLimit {
+				t.Fatalf("tenant %s batch limit = %d, want default %d",
+					entry.Tenant, entry.BatchLimit, webhook.DefaultDeliveryBatchLimit)
 			}
 		}
 	}
