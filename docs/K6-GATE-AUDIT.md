@@ -57,8 +57,7 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
    previous key; there is no per-endpoint key provider/KMS integration.
 7. **Repair semantics are operator-explicit.** Current-active repair can backfill an old event to an
    endpoint active now; historical endpoint status reconstruction is absent.
-8. **No content-free production logging contract.** Delivery IDs may be safe, but URLs and
-   transport errors must not be logged; observability currently relies on metrics and local alerts.
+8. **Logging is aggregate-only and not operationally qualified.** The worker logs fixed pass counts and no tenant/endpoint/delivery IDs, URLs, payloads, keys or raw errors, but log shipping, retention, sampling and production logging qualification are absent.
 
 ## Residual risks
 

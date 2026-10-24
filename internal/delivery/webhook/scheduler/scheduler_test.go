@@ -157,8 +157,15 @@ func TestSchedulerRunOnceReturnsDiscoveryError(t *testing.T) {
 }
 
 func TestSchedulerRunStopsOnCancellation(t *testing.T) {
-	source := &recordingSource{called: make(chan struct{}, 1)}
-	s, err := New(source, &recordingRunner{}, WithInterval(100*time.Millisecond))
+	source := &recordingSource{
+		tenants: []webhook.DueTenant{
+			schedulerDue(t, "11111111-1111-4111-8111-111111111111", time.Now(), 1),
+		},
+		called: make(chan struct{}, 1),
+	}
+	reported := make(chan Report, 1)
+	s, err := New(source, &recordingRunner{}, WithInterval(100*time.Millisecond),
+		WithReporter(func(report Report, failed bool) { reported <- report }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,9 +173,12 @@ func TestSchedulerRunStopsOnCancellation(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.Run(ctx) }()
 	select {
-	case <-source.called:
+	case report := <-reported:
+		if report.Tenants != 1 {
+			t.Fatalf("reported tenants = %d, want 1", report.Tenants)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("scheduler did not poll")
+		t.Fatal("scheduler did not report a pass")
 	}
 	cancel()
 	select {
@@ -217,6 +227,7 @@ func TestSchedulerConfigurationBounds(t *testing.T) {
 		WithInterval(0),
 		WithInterval(2 * time.Minute),
 		WithObserver(nil),
+		WithReporter(nil),
 		nil,
 	} {
 		if _, err := New(source, runner, option); err == nil {
