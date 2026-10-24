@@ -230,8 +230,11 @@ table behind forced RLS and revoked direct grants. Migration `0054_webhook_endpo
 re-creates endpoint registration and status functions with a per-tenant advisory lock and a
 100-active-endpoint cap. Creating or reactivating above the cap fails; updating an existing endpoint,
 deactivating, and activating an already-active endpoint remain allowed. The cap protects new growth
-only: existing over-cap tenants are not rewritten or deactivated, and agent/tenant configurability
-remains outside the database contract. Migration `0055_webhook_replay_candidates` adds a
+only: existing over-cap tenants are not rewritten or deactivated. Migration
+`0056_webhook_tenant_quota_policy` adds a per-tenant policy and append-only policy history, with a
+default limit of 100. `keel_operator` can create or update the limit using an expected version and
+bounded reason; registration/reactivation reads the effective limit. Lowering below the current
+active count does not deactivate endpoints but blocks new growth. `0055_webhook_replay_candidates` adds a
 `keel_operator`-gated candidate query over failed/exhausted deliveries with attempts, replay flag,
 current endpoint status at the delivery revision and key reference. It returns no URL, payload,
 signature or receiver content; the unmounted HTTP API applies the existing selection cap and key
