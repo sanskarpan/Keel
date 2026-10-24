@@ -226,7 +226,12 @@ function. A reset must move to a non-future time strictly before the current cur
 prior/new watermark, operator and bounded reason, and updates the cursor to `(to,zero UUID)` so the
 next planner rescans from that time. The cursor guard accepts a backward move only when the matching
 reset row exists. It creates no deliveries, does not change run/gap history, and keeps the reset
-table behind forced RLS and revoked direct grants.
+table behind forced RLS and revoked direct grants. Migration `0054_webhook_endpoint_quota`
+re-creates endpoint registration and status functions with a per-tenant advisory lock and a
+100-active-endpoint cap. Creating or reactivating above the cap fails; updating an existing endpoint,
+deactivating, and activating an already-active endpoint remain allowed. The cap protects new growth
+only: existing over-cap tenants are not rewritten or deactivated, and agent/tenant configurability
+remains outside the database contract.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

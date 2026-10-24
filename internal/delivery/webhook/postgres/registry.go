@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sanskarpan/keel/internal/delivery/webhook"
@@ -76,7 +77,7 @@ func (r *Registry) Register(ctx context.Context, tenant tenancy.TenantID, regist
 		return nil
 	})
 	if err != nil {
-		return webhook.Endpoint{}, err
+		return webhook.Endpoint{}, mapEndpointRegistryError(err)
 	}
 	return endpoint, nil
 }
@@ -129,7 +130,7 @@ func (r *Registry) SetStatus(ctx context.Context, tenant tenancy.TenantID, endpo
 		return nil
 	})
 	if err != nil {
-		return webhook.Endpoint{}, err
+		return webhook.Endpoint{}, mapEndpointRegistryError(err)
 	}
 	return endpoint, nil
 }
@@ -256,4 +257,11 @@ func validateEndpointTenant(tenant tenancy.TenantID) error {
 		return webhook.ErrInvalidEndpoint
 	}
 	return nil
+}
+
+func mapEndpointRegistryError(err error) error {
+	if err != nil && strings.Contains(err.Error(), "active endpoint quota exceeded") {
+		return webhook.ErrEndpointQuota
+	}
+	return err
 }
