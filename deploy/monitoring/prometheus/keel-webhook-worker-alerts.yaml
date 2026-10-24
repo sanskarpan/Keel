@@ -1,0 +1,90 @@
+groups:
+  - name: keel.webhook-worker
+    rules:
+      - alert: KeelWebhookWorkerDown
+        expr: up{job="keel-webhook-worker"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook worker is not reachable
+          description: The local Prometheus target has been unavailable for 30 seconds. Check the worker process and its management endpoint.
+
+      - alert: KeelWebhookDiscoveryStale
+        expr: time() - keel_webhook_last_discovery_timestamp_seconds > 180
+        for: 30s
+        labels:
+          severity: critical
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook tenant discovery is stale
+          description: The last successful tenant-discovery pass is older than three default poll intervals. Check database reachability and the worker logs without printing tenant or endpoint data.
+
+      - alert: KeelWebhookDiscoveryErrors
+        expr: increase(keel_webhook_discovery_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook tenant discovery is failing
+          description: At least one discovery pass failed in the last five minutes. The due gauges retain the last successful values.
+
+      - alert: KeelWebhookTenantErrors
+        expr: increase(keel_webhook_tenant_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook tenant batches are failing
+          description: At least one tenant batch returned an error in the last five minutes. Check database/lease health; per-delivery IDs may appear in process logs only under the content-free log contract.
+
+      - alert: KeelWebhookDueBacklog
+        expr: keel_webhook_due_deliveries > 1000
+        for: 5m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook due backlog is high
+          description: More than 1,000 due or lease-expired deliveries were observed in the last successful discovery pass for five minutes.
+
+      - alert: KeelWebhookOldestDueAge
+        expr: keel_webhook_oldest_due_age_seconds > 3600
+        for: 5m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook backlog is older than one hour
+          description: The earliest due delivery has been waiting more than one hour for five minutes. Check worker capacity, receiver failures and breaker deferrals.
+
+      - alert: KeelWebhookExhaustion
+        expr: increase(keel_webhook_outcomes_total{outcome="exhausted"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook deliveries are exhausting retries
+          description: At least one delivery reached the terminal exhausted state in the last fifteen minutes. Inspect the endpoint/receiver and consider an audited replay.
+
+      - alert: KeelWebhookStalledAttempts
+        expr: sum(increase(keel_webhook_attempts_started_total[10m])) == 0 and sum(keel_webhook_due_deliveries) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook worker has due work but no attempts
+          description: Due deliveries are visible but no attempt has started in ten minutes for five minutes. Check worker scheduling, breaker deferrals, database locks and shutdown state.
