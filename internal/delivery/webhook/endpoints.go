@@ -11,6 +11,9 @@ import (
 const (
 	// MaxEndpointURLLength bounds a stored destination URL in bytes.
 	MaxEndpointURLLength = 2048
+	// MaxActiveEndpointsPerTenant bounds active endpoint growth. Existing over-cap data is not
+	// rewritten; the limit is enforced on new registrations and reactivations.
+	MaxActiveEndpointsPerTenant = 100
 )
 
 var (
@@ -18,6 +21,8 @@ var (
 	ErrInvalidEndpoint = errors.New("webhook endpoint is invalid")
 	// ErrEndpointUnavailable means no active endpoint exists at the requested subscription revision.
 	ErrEndpointUnavailable = errors.New("webhook endpoint is unavailable")
+	// ErrEndpointQuota means the tenant already has the maximum number of active endpoints.
+	ErrEndpointQuota = errors.New("webhook endpoint quota exceeded")
 )
 
 // EndpointRegistration is a caller-supplied endpoint revision. The URL is sensitive: it may embed a
