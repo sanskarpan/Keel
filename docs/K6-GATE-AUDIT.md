@@ -49,8 +49,7 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
 3. **Reconciliation is not production-complete.** Historical endpoint status, provider/callback
    observation reconciliation, scheduler integration, an operator reconciliation UI and metrics are
    open.
-4. **Quotas are partial.** A fixed 100-active-endpoint cap exists; configurable/due-work tenant
-   quotas and over-cap remediation do not.
+4. **Quotas are partial.** A configurable active-endpoint policy exists (default 100), but due-delivery/attempt quotas and over-cap remediation do not.
 5. **Operational qualification is partial.** Source-controlled local alert rules and a dashboard
    contract exist; there is no Alertmanager, paging owner, hosted dashboard, production scrape or
    SLO qualification.
@@ -67,7 +66,7 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
   isolation and workload identity remain release gates.
 - The unmounted API is safe only while it stays unmounted; mounting it without the injected
   identity/authorization adapters would be a serious regression.
-- The fixed endpoint cap protects new growth only; legacy over-cap tenants remain possible.
+- The endpoint policy protects new growth only; lowering a limit does not deactivate legacy over-cap endpoints.
 - Candidate listing is capped at 5,000 rows; operators must narrow with delivery filters/limits.
 
 ## Recommendation
