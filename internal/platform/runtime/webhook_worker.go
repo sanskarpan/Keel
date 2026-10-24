@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"github.com/sanskarpan/keel/internal/platform/buildinfo"
 	"github.com/sanskarpan/keel/internal/platform/config"
 	"github.com/sanskarpan/keel/internal/platform/health"
+	"github.com/sanskarpan/keel/internal/platform/logging"
 )
 
 const (
@@ -158,6 +161,7 @@ func runWebhookWorker(ctx context.Context, cfg config.Config, lookup func(string
 	if err != nil {
 		return err
 	}
+	logger := logging.NewJSON(os.Stderr, cfg.LogLevel)
 	db, err := sql.Open("pgx", settings.databaseURL)
 	if err != nil {
 		return errors.New("open webhook worker database")
@@ -203,6 +207,9 @@ func runWebhookWorker(ctx context.Context, cfg config.Config, lookup func(string
 		scheduler.WithTenantLimit(settings.tenantLimit),
 		scheduler.WithBatch(settings.batch),
 		scheduler.WithInterval(settings.interval),
+		scheduler.WithReporter(func(report scheduler.Report, failed bool) {
+			logWebhookWorkerPass(logger, report, failed)
+		}),
 		scheduler.WithObserver(recorder))
 	if err != nil {
 		return err
@@ -259,4 +266,26 @@ func runWebhookWorker(ctx context.Context, cfg config.Config, lookup func(string
 		}
 		return runErr
 	}
+}
+
+func logWebhookWorkerPass(logger *slog.Logger, report scheduler.Report, failed bool) {
+	if logger == nil {
+		return
+	}
+	if !failed && report.Tenants == 0 && report.Leased == 0 && report.Delivered == 0 &&
+		report.RetryScheduled == 0 && report.Exhausted == 0 && report.Failed == 0 &&
+		report.Deferred == 0 && report.Skipped == 0 && report.Failures == 0 {
+		return
+	}
+	logger.Info("webhook worker pass completed",
+		"tenants", report.Tenants,
+		"leased", report.Leased,
+		"delivered", report.Delivered,
+		"retry_scheduled", report.RetryScheduled,
+		"exhausted", report.Exhausted,
+		"failed", report.Failed,
+		"deferred", report.Deferred,
+		"skipped", report.Skipped,
+		"tenant_batch_failures", report.Failures,
+		"pass_failed", failed)
 }

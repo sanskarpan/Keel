@@ -1,11 +1,14 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/base64"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sanskarpan/keel/internal/delivery/webhook/scheduler"
 	"github.com/sanskarpan/keel/internal/platform/config"
 )
 
@@ -120,5 +123,32 @@ func TestRegistryForWiresWebhookWorker(t *testing.T) {
 	}
 	if registry[config.RoleAPI] != nil {
 		t.Fatal("unexpected API runner registration")
+	}
+}
+
+func TestWebhookWorkerPassLoggingIsContentFree(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	logWebhookWorkerPass(logger, scheduler.Report{
+		Tenants: 2, Leased: 3, Delivered: 1, RetryScheduled: 1, Exhausted: 1, Failures: 1,
+	}, true)
+	line := output.String()
+	for _, expected := range []string{
+		"webhook worker pass completed", "tenants", "leased", "delivered",
+		"retry_scheduled", "exhausted", "tenant_batch_failures", "pass_failed",
+	} {
+		if !strings.Contains(line, expected) {
+			t.Fatalf("log missing %q: %s", expected, line)
+		}
+	}
+	for _, forbidden := range []string{"tenant_id", "endpoint", "delivery_id", "url", "error"} {
+		if strings.Contains(strings.ToLower(line), forbidden) {
+			t.Fatalf("log contains %q: %s", forbidden, line)
+		}
+	}
+	output.Reset()
+	logWebhookWorkerPass(logger, scheduler.Report{}, false)
+	if output.Len() != 0 {
+		t.Fatalf("idle pass logged: %s", output.String())
 	}
 }

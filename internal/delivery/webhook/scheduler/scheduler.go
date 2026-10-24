@@ -90,8 +90,13 @@ type Scheduler struct {
 	batch    int
 	interval time.Duration
 	observer Observer
+	reporter PassReporter
 	lastPoll atomic.Int64
 }
+
+// PassReporter receives content-free aggregate results after each RunOnce. Implementations must not
+// add tenant, endpoint, delivery, URL, payload, key or error strings.
+type PassReporter func(Report, bool)
 
 // Option adjusts bounded scheduler behavior.
 type Option func(*Scheduler) error
@@ -136,6 +141,17 @@ func WithObserver(observer Observer) Option {
 			return errors.New("webhook scheduler observer is invalid")
 		}
 		s.observer = observer
+		return nil
+	}
+}
+
+// WithReporter records one content-free aggregate result per pass. A nil reporter is rejected.
+func WithReporter(reporter PassReporter) Option {
+	return func(s *Scheduler) error {
+		if reporter == nil {
+			return errors.New("webhook scheduler reporter is invalid")
+		}
+		s.reporter = reporter
 		return nil
 	}
 }
@@ -248,7 +264,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		return errors.New("webhook scheduler context is required")
 	}
 	for {
-		if _, err := s.RunOnce(ctx); err != nil && ctx.Err() != nil {
+		report, err := s.RunOnce(ctx)
+		if s.reporter != nil {
+			s.reporter(report, err != nil)
+		}
+		if err != nil && ctx.Err() != nil {
 			return nil
 		}
 		timer := time.NewTimer(s.interval)
