@@ -17,8 +17,8 @@ const (
 )
 
 // TenantSource discovers tenants with due or expired deliveries over the webhook capability's
-// connection. It returns tenant IDs, due times and due counts only; delivery, endpoint and payload
-// data stay behind the existing tenant-scoped functions.
+// connection. It returns tenant IDs, due times, due counts and the effective per-pass lease limit
+// only; delivery, endpoint and payload data stay behind the existing tenant-scoped functions.
 type TenantSource struct {
 	db *sql.DB
 }
@@ -44,7 +44,7 @@ func (s *TenantSource) DueTenants(ctx context.Context, limit int) ([]webhook.Due
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT r_tenant_id,r_due_at,r_due_count FROM keel_meta.list_webhook_delivery_tenants($1)`, limit)
+		`SELECT r_tenant_id,r_due_at,r_due_count,r_batch_limit FROM keel_meta.list_webhook_delivery_tenants($1)`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list webhook delivery tenants: %w", err)
 	}
@@ -56,7 +56,8 @@ func (s *TenantSource) DueTenants(ctx context.Context, limit int) ([]webhook.Due
 		var raw string
 		var dueAt time.Time
 		var dueCount int64
-		if err := rows.Scan(&raw, &dueAt, &dueCount); err != nil {
+		var batchLimit int
+		if err := rows.Scan(&raw, &dueAt, &dueCount, &batchLimit); err != nil {
 			return nil, fmt.Errorf("scan webhook delivery tenant: %w", err)
 		}
 		if raw == zeroTenantID {
@@ -69,6 +70,9 @@ func (s *TenantSource) DueTenants(ctx context.Context, limit int) ([]webhook.Due
 		if dueAt.IsZero() || dueCount < 1 {
 			return nil, errors.New("webhook tenant source returned an invalid schedule")
 		}
+		if batchLimit != 0 && (batchLimit < 1 || batchLimit > webhook.MaxDeliveryBatchLimit) {
+			return nil, errors.New("webhook tenant source returned an invalid batch limit")
+		}
 		if index, duplicate := seen[raw]; duplicate {
 			if dueAt.Before(tenants[index].DueAt) {
 				tenants[index].DueAt = dueAt
@@ -77,7 +81,7 @@ func (s *TenantSource) DueTenants(ctx context.Context, limit int) ([]webhook.Due
 			continue
 		}
 		seen[raw] = len(tenants)
-		tenants = append(tenants, webhook.DueTenant{Tenant: tenant, DueAt: dueAt, DueCount: dueCount})
+		tenants = append(tenants, webhook.DueTenant{Tenant: tenant, DueAt: dueAt, DueCount: dueCount, BatchLimit: batchLimit})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate webhook delivery tenants: %w", err)

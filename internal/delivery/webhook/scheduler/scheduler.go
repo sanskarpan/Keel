@@ -112,7 +112,9 @@ func WithTenantLimit(limit int) Option {
 	}
 }
 
-// WithBatch bounds the deliveries leased for one tenant in one pass.
+// WithBatch bounds the deliveries leased for one tenant in one pass. A tenant delivery policy can
+// only lower this process ceiling: the effective batch is the minimum of the two, and deliveries
+// above the ceiling stay due for a later pass.
 func WithBatch(batch int) Option {
 	return func(s *Scheduler) error {
 		if batch < 1 || batch > worker.MaxBatch {
@@ -229,7 +231,11 @@ func (s *Scheduler) RunOnce(ctx context.Context) (Report, error) {
 			failures = append(failures, err)
 			break
 		}
-		result, err := s.runner.Run(ctx, dueTenant.Tenant, s.batch)
+		tenantBatch := s.batch
+		if dueTenant.BatchLimit >= 1 && dueTenant.BatchLimit < tenantBatch {
+			tenantBatch = dueTenant.BatchLimit
+		}
+		result, err := s.runner.Run(ctx, dueTenant.Tenant, tenantBatch)
 		report.add(result)
 		if err != nil {
 			report.Failures++
