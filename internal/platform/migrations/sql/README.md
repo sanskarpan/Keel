@@ -231,7 +231,11 @@ re-creates endpoint registration and status functions with a per-tenant advisory
 100-active-endpoint cap. Creating or reactivating above the cap fails; updating an existing endpoint,
 deactivating, and activating an already-active endpoint remain allowed. The cap protects new growth
 only: existing over-cap tenants are not rewritten or deactivated, and agent/tenant configurability
-remains outside the database contract.
+remains outside the database contract. Migration `0055_webhook_replay_candidates` adds a
+`keel_operator`-gated candidate query over failed/exhausted deliveries with attempts, replay flag,
+current endpoint status at the delivery revision and key reference. It returns no URL, payload,
+signature or receiver content; the unmounted HTTP API applies the existing selection cap and key
+readiness before returning delivery IDs and skip reasons.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
