@@ -247,7 +247,12 @@ later pass. It drops no backlog and adds no global cap, fair-share ordering or H
 `0058_webhook_endpoint_status_history` records one append-only status/subscription row per
 endpoint version through a registry trigger (backfilling current rows), and adds an
 operator-gated point-in-time query returning the latest record at or before a timestamp. It
-exposes no URL, key, payload or receiver data and changes no repair semantics.
+exposes no URL, key, payload or receiver data and changes no repair semantics. Migration
+`0059_webhook_historical_repair` re-creates the repair function so each gap event is revalidated
+against the endpoint status recorded at the event's time: deliveries are inserted only for
+endpoints active then, at their then-current subscription, while identities with no history or
+an inactive-then endpoint are skipped and counted in a new audited `skipped_identities` column.
+The planner still scans against current active endpoints.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
