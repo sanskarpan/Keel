@@ -45,7 +45,8 @@ func TestPostgreSQLReconciliationRepairIsAuditedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.GapEvents != 2 || result.InsertedDeliveries != 2 || result.RepairID != request.RepairID {
+	if result.GapEvents != 2 || result.InsertedDeliveries != 2 || result.SkippedIdentities != 0 ||
+		result.RepairID != request.RepairID {
 		t.Fatalf("repair result = %+v", result)
 	}
 	if count := countRepairDeliveries(t, adminDB, tenant); count != 2 {
@@ -87,7 +88,7 @@ func TestPostgreSQLReconciliationRepairIsAuditedAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.GapEvents != 2 || result.InsertedDeliveries != 0 {
+	if result.GapEvents != 2 || result.InsertedDeliveries != 0 || result.SkippedIdentities != 0 {
 		t.Fatalf("repeat repair result = %+v", result)
 	}
 	if count := countRepairDeliveries(t, adminDB, tenant); count != 2 {
@@ -137,7 +138,7 @@ func TestPostgreSQLReconciliationRepairHonorsEventLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.GapEvents != 1 || result.InsertedDeliveries != 1 {
+	if result.GapEvents != 1 || result.InsertedDeliveries != 1 || result.SkippedIdentities != 0 {
 		t.Fatalf("limited repair result = %+v", result)
 	}
 	if count := countRepairDeliveries(t, adminDB, tenant); count != 1 {
@@ -149,7 +150,7 @@ func TestPostgreSQLReconciliationRepairHonorsEventLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.GapEvents != 2 || result.InsertedDeliveries != 1 {
+	if result.GapEvents != 2 || result.InsertedDeliveries != 1 || result.SkippedIdentities != 0 {
 		t.Fatalf("second limited repair result = %+v", result)
 	}
 	if count := countRepairDeliveries(t, adminDB, tenant); count != 2 {
@@ -186,11 +187,118 @@ func TestPostgreSQLReconciliationRepairRevalidatesGaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.GapEvents != 2 || result.InsertedDeliveries != 1 {
+	if result.GapEvents != 2 || result.InsertedDeliveries != 1 || result.SkippedIdentities != 0 {
 		t.Fatalf("revalidated repair result = %+v", result)
 	}
 	if count := countRepairDeliveries(t, adminDB, tenant); count != 2 {
 		t.Fatalf("revalidated repair deliveries = %d, want 2", count)
+	}
+}
+
+func TestPostgreSQLReconciliationRepairUsesEventTimeStatus(t *testing.T) {
+	appDB, _, operatorDB, adminDB := reconciliationDatabases(t)
+	store := newReconciliationStore(t, operatorDB)
+	registry := newRegistry(t, appDB)
+	ctx := context.Background()
+	tenant := payloadTenant(t)
+	from := time.Now().Add(-time.Minute)
+	settle := func() { time.Sleep(100 * time.Millisecond) }
+
+	endpoint := registerFanoutEndpoint(t, registry, tenant, 1)
+	settle()
+	eventA := uuid.NewString()
+	insertFanoutOutbox(t, adminDB, tenant, eventA)
+	settle()
+	moved, err := registry.Register(ctx, tenant, webhook.EndpointRegistration{
+		ID: endpoint.ID, URL: "https://example.com/hooks/" + uuid.NewString(),
+		KeyID: endpoint.KeyID, SubscriptionVersion: 2,
+	}, endpoint.Version)
+	if err != nil {
+		t.Fatalf("move endpoint subscription: %v", err)
+	}
+	settle()
+	deactivated, err := registry.SetStatus(ctx, tenant, endpoint.ID, webhook.EndpointInactive, moved.Version)
+	if err != nil {
+		t.Fatalf("deactivate endpoint: %v", err)
+	}
+	settle()
+	eventB := uuid.NewString()
+	insertFanoutOutbox(t, adminDB, tenant, eventB)
+	settle()
+	if _, err := registry.SetStatus(ctx, tenant, endpoint.ID, webhook.EndpointActive, deactivated.Version); err != nil {
+		t.Fatalf("reactivate endpoint: %v", err)
+	}
+	settle()
+	eventC := uuid.NewString()
+	insertFanoutOutbox(t, adminDB, tenant, eventC)
+
+	plan := reconciliationRequest(tenant)
+	plan.From = &from
+	plan.PageSize = 3
+	page, err := store.PlanReconciliation(ctx, plan)
+	if err != nil || page.GapEvents != 3 {
+		t.Fatalf("plan page=%+v err=%v", page, err)
+	}
+
+	request := repairRequest(tenant, plan.RunID)
+	request.EventLimit = 3
+	result, err := store.RepairReconciliation(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.GapEvents != 3 || result.InsertedDeliveries != 2 || result.SkippedIdentities != 1 {
+		t.Fatalf("historical repair result = %+v", result)
+	}
+
+	rows, err := adminDB.QueryContext(ctx,
+		`SELECT event_id::text,subscription_version FROM keel_meta.webhook_reconciliation_repair_items
+		  WHERE tenant_id=$1 AND repair_id=$2 ORDER BY event_id::text`,
+		string(tenant), request.RepairID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type repairedItem struct {
+		eventID      string
+		subscription int
+	}
+	var items []repairedItem
+	for rows.Next() {
+		var item repairedItem
+		if err := rows.Scan(&item.eventID, &item.subscription); err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("repair items = %+v, want 2", items)
+	}
+	byEvent := make(map[string]int, len(items))
+	for _, item := range items {
+		byEvent[item.eventID] = item.subscription
+	}
+	if byEvent[eventA] != 1 {
+		t.Fatalf("event A repaired at subscription %d, want 1", byEvent[eventA])
+	}
+	if byEvent[eventC] != 2 {
+		t.Fatalf("event C repaired at subscription %d, want 2", byEvent[eventC])
+	}
+	if _, present := byEvent[eventB]; present {
+		t.Fatal("event B was repaired while the endpoint was inactive")
+	}
+
+	var skipped int
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT skipped_identities FROM keel_meta.webhook_reconciliation_repair_runs
+		  WHERE tenant_id=$1 AND repair_id=$2`,
+		string(tenant), request.RepairID).Scan(&skipped); err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 1 {
+		t.Fatalf("audited skipped identities = %d, want 1", skipped)
 	}
 }
 
