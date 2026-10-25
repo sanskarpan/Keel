@@ -243,7 +243,11 @@ readiness before returning delivery IDs and skip reasons. Migration
 and append-only policy history, with an expected-version `keel_operator`-gated setter, and
 re-creates tenant discovery with the effective per-pass lease limit. The scheduler leases at most
 the minimum of the process batch and the tenant limit; deliveries above the ceiling stay due for a
-later pass. It drops no backlog and adds no global cap, fair-share ordering or HTTP/UI.
+later pass. It drops no backlog and adds no global cap, fair-share ordering or HTTP/UI. Migration
+`0058_webhook_endpoint_status_history` records one append-only status/subscription row per
+endpoint version through a registry trigger (backfilling current rows), and adds an
+operator-gated point-in-time query returning the latest record at or before a timestamp. It
+exposes no URL, key, payload or receiver data and changes no repair semantics.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

@@ -46,9 +46,9 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
    gate can claim end-to-end authorization.
 2. **No real provider adapter or late/impossible callback policy.** The callback inbox proves the
    dedup/conflict boundary, not a provider's late-event behavior or remote-state reconciliation.
-3. **Reconciliation is not production-complete.** Historical endpoint status, provider/callback
-   observation reconciliation, scheduler integration, an operator reconciliation UI and metrics are
-   open.
+3. **Reconciliation is not production-complete.** Provider/callback observation reconciliation,
+   scheduler integration, an operator reconciliation UI and metrics are open; endpoint status
+   history is recorded with a point-in-time query but repair does not consult it yet.
 4. **Quotas are partial.** A configurable active-endpoint policy (default 100) and a per-tenant per-pass delivery lease policy (default 5, at most 100) exist; the scheduler leases at most the minimum of the process batch and the tenant limit and leaves the remainder due. Global due-backlog caps, attempt quotas, fair-share ordering and over-cap remediation do not.
 5. **Operational qualification is partial.** Source-controlled local alert rules and a dashboard
    contract exist; there is no Alertmanager, paging owner, hosted dashboard, production scrape or
@@ -56,7 +56,7 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
 6. **Key management is process-global.** The worker keyring holds one active plus at most one
    previous key; there is no per-endpoint key provider/KMS integration.
 7. **Repair semantics are operator-explicit.** Current-active repair can backfill an old event to an
-   endpoint active now; historical endpoint status reconstruction is absent.
+   endpoint active now; status history exists but repair still uses current state.
 8. **Logging is aggregate-only and not operationally qualified.** The worker logs fixed pass counts and no tenant/endpoint/delivery IDs, URLs, payloads, keys or raw errors, but log shipping, retention, sampling and production logging qualification are absent.
 
 ## Residual risks
