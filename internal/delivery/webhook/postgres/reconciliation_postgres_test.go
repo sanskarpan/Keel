@@ -199,6 +199,63 @@ func TestPostgreSQLReconciliationRequiresOperatorCapabilityAndHidesTables(t *tes
 	}
 }
 
+func TestPostgreSQLReconciliationPlanUsesEventTimeStatus(t *testing.T) {
+	appDB, _, operatorDB, adminDB := reconciliationDatabases(t)
+	store := newReconciliationStore(t, operatorDB)
+	registry := newRegistry(t, appDB)
+	ctx := context.Background()
+	tenant := payloadTenant(t)
+	from := time.Now().Add(-time.Minute)
+	settle := func() { time.Sleep(100 * time.Millisecond) }
+
+	endpoint := registerFanoutEndpoint(t, registry, tenant, 1)
+	settle()
+	eventA := uuid.NewString()
+	insertFanoutOutbox(t, adminDB, tenant, eventA)
+	settle()
+	deactivated, err := registry.SetStatus(ctx, tenant, endpoint.ID, webhook.EndpointInactive, endpoint.Version)
+	if err != nil {
+		t.Fatalf("deactivate endpoint: %v", err)
+	}
+	settle()
+	eventB := uuid.NewString()
+	insertFanoutOutbox(t, adminDB, tenant, eventB)
+	settle()
+	if _, err := registry.SetStatus(ctx, tenant, endpoint.ID, webhook.EndpointActive, deactivated.Version); err != nil {
+		t.Fatalf("reactivate endpoint: %v", err)
+	}
+	settle()
+	eventC := uuid.NewString()
+	insertFanoutOutbox(t, adminDB, tenant, eventC)
+
+	plan := reconciliationRequest(tenant)
+	plan.From = &from
+	plan.PageSize = 3
+	page, err := store.PlanReconciliation(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Scanned != 3 || page.GapEvents != 2 || page.Missing != 2 || len(page.Events) != 3 {
+		t.Fatalf("historical plan page = %+v", page)
+	}
+	byEvent := make(map[string]int, len(page.Events))
+	for _, event := range page.Events {
+		byEvent[event.EventID] = event.Missing
+	}
+	if byEvent[eventA] != 1 {
+		t.Fatalf("event A missing = %d, want 1", byEvent[eventA])
+	}
+	if missing, present := byEvent[eventB]; !present || missing != 0 {
+		t.Fatalf("event B missing = %d present=%v, want recorded 0", missing, present)
+	}
+	if byEvent[eventC] != 1 {
+		t.Fatalf("event C missing = %d, want 1", byEvent[eventC])
+	}
+	if count := countReconciliationDeliveries(t, adminDB, tenant); count != 0 {
+		t.Fatalf("dry run created %d deliveries", count)
+	}
+}
+
 func countReconciliationDeliveries(t *testing.T, adminDB *sql.DB, tenant tenancy.TenantID) int {
 	t.Helper()
 	var count int

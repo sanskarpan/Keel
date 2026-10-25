@@ -236,7 +236,7 @@ func TestPostgreSQLReconciliationRepairUsesEventTimeStatus(t *testing.T) {
 	plan.From = &from
 	plan.PageSize = 3
 	page, err := store.PlanReconciliation(ctx, plan)
-	if err != nil || page.GapEvents != 3 {
+	if err != nil || page.Scanned != 3 || page.GapEvents != 2 {
 		t.Fatalf("plan page=%+v err=%v", page, err)
 	}
 
@@ -246,7 +246,7 @@ func TestPostgreSQLReconciliationRepairUsesEventTimeStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.GapEvents != 3 || result.InsertedDeliveries != 2 || result.SkippedIdentities != 1 {
+	if result.GapEvents != 2 || result.InsertedDeliveries != 2 || result.SkippedIdentities != 0 {
 		t.Fatalf("historical repair result = %+v", result)
 	}
 
@@ -297,8 +297,31 @@ func TestPostgreSQLReconciliationRepairUsesEventTimeStatus(t *testing.T) {
 		string(tenant), request.RepairID).Scan(&skipped); err != nil {
 		t.Fatal(err)
 	}
-	if skipped != 1 {
-		t.Fatalf("audited skipped identities = %d, want 1", skipped)
+	if skipped != 0 {
+		t.Fatalf("audited skipped identities = %d, want 0", skipped)
+	}
+
+	var eventBCreated time.Time
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT created_at FROM keel_meta.event_outbox WHERE tenant_id=$1 AND event_id=$2`,
+		string(tenant), eventB).Scan(&eventBCreated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminDB.ExecContext(ctx,
+		`INSERT INTO keel_meta.webhook_reconciliation_gaps
+		 (tenant_id,run_id,event_id,event_created_at,missing_count)
+		 VALUES ($1,$2,$3,$4,1)`,
+		string(tenant), plan.RunID, eventB, eventBCreated); err != nil {
+		t.Fatalf("stage inactive-then gap: %v", err)
+	}
+	stale := repairRequest(tenant, plan.RunID)
+	stale.EventLimit = 3
+	staleResult, err := store.RepairReconciliation(ctx, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staleResult.GapEvents != 3 || staleResult.InsertedDeliveries != 0 || staleResult.SkippedIdentities != 1 {
+		t.Fatalf("stale-gap repair result = %+v", staleResult)
 	}
 }
 
