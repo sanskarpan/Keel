@@ -35,10 +35,18 @@ type testRepository struct {
 	authorization webhook.ReplayAuthorization
 	authorizeErr  error
 	request       webhook.ReplayRequest
+	runs          []webhook.ReconciliationRunSummary
+	runsErr       error
+	runsLimit     int
 }
 
 func (r *testRepository) ReplayCandidates(context.Context, tenancy.TenantID, int) ([]webhookpostgres.ReplayCandidateRecord, error) {
 	return r.candidates, r.candidatesErr
+}
+
+func (r *testRepository) ReconciliationRuns(_ context.Context, _ tenancy.TenantID, limit int) ([]webhook.ReconciliationRunSummary, error) {
+	r.runsLimit = limit
+	return r.runs, r.runsErr
 }
 
 func (r *testRepository) AuthorizeReplay(_ context.Context, request webhook.ReplayRequest) (webhook.ReplayAuthorization, error) {
@@ -231,6 +239,79 @@ func TestReplayMapsDomainErrors(t *testing.T) {
 		if strings.Contains(response.Body.String(), "database detail") {
 			t.Fatal("error response leaked a database detail")
 		}
+	}
+}
+
+func TestListRunsReturnsSummaries(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := &testRepository{runs: []webhook.ReconciliationRunSummary{
+		{
+			RunID: "rec_0123456789abcdef", RequestedBy: "operator@example.com",
+			FromCreatedAt: now.Add(-time.Hour), CursorToCreatedAt: now.Add(-30 * time.Minute),
+			CursorToEventID: "11111111-1111-4111-8111-111111111111",
+			EventsScanned:   3, GapEvents: 1, MissingDeliveries: 2,
+			RepairedDeliveries: 1, SkippedIdentities: 1, CreatedAt: now,
+		},
+		{
+			RunID: "rec_fedcba9876543210", RequestedBy: "operator@example.com",
+			FromCreatedAt: now.Add(-2 * time.Hour),
+			EventsScanned: 0, CreatedAt: now.Add(-time.Hour),
+		},
+	}}
+	response := httptest.NewRecorder()
+	newTestHandler(t, repo, true).ServeHTTP(response,
+		httptest.NewRequest(http.MethodGet, "/v1/webhooks/reconciliation-runs?limit=2", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body)
+	}
+	if repo.runsLimit != 2 {
+		t.Fatalf("runs limit = %d, want 2", repo.runsLimit)
+	}
+	var result runsResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Limit != 2 || len(result.Runs) != 2 {
+		t.Fatalf("runs response = %+v", result)
+	}
+	first := result.Runs[0]
+	if first.RunID != "rec_0123456789abcdef" || first.GapEvents != 1 || first.MissingDeliveries != 2 ||
+		first.RepairedDeliveries != 1 || first.SkippedIdentities != 1 ||
+		first.CursorToEventID != "11111111-1111-4111-8111-111111111111" ||
+		first.CursorToCreatedAt == nil || !first.CursorToCreatedAt.Equal(now.Add(-30*time.Minute)) {
+		t.Fatalf("first run = %+v", first)
+	}
+	if result.Runs[1].CursorToEventID != "" || result.Runs[1].CursorToCreatedAt != nil {
+		t.Fatalf("empty page run = %+v", result.Runs[1])
+	}
+}
+
+func TestListRunsRejectsBadRequests(t *testing.T) {
+	repo := &testRepository{runsErr: errors.New("database detail")}
+	for _, test := range []struct {
+		path   string
+		status int
+	}{
+		{"/v1/webhooks/reconciliation-runs?limit=0", http.StatusBadRequest},
+		{"/v1/webhooks/reconciliation-runs?limit=101", http.StatusBadRequest},
+		{"/v1/webhooks/reconciliation-runs?limit=two", http.StatusBadRequest},
+		{"/v1/webhooks/reconciliation-runs?unknown=1", http.StatusBadRequest},
+		{"/v1/webhooks/reconciliation-runs", http.StatusInternalServerError},
+	} {
+		response := httptest.NewRecorder()
+		newTestHandler(t, repo, true).ServeHTTP(response, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if response.Code != test.status {
+			t.Fatalf("%s status = %d, want %d", test.path, response.Code, test.status)
+		}
+		if strings.Contains(response.Body.String(), "database detail") {
+			t.Fatal("error response leaked a database detail")
+		}
+	}
+	response := httptest.NewRecorder()
+	newTestHandler(t, &testRepository{}, false).ServeHTTP(response,
+		httptest.NewRequest(http.MethodGet, "/v1/webhooks/reconciliation-runs", nil))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("denied status = %d, want 403", response.Code)
 	}
 }
 

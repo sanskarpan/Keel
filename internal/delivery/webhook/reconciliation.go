@@ -13,6 +13,8 @@ const (
 	MaxReconciliationPage = 500
 	// DefaultReconciliationPage is the suggested page size.
 	DefaultReconciliationPage = 100
+	// MaxReconciliationRunHistory bounds one reconciliation run-history listing.
+	MaxReconciliationRunHistory = 100
 )
 
 var (
@@ -76,6 +78,23 @@ type ReconciliationPage struct {
 	Scanned   int
 	GapEvents int
 	Missing   int
+}
+
+// ReconciliationRunSummary is one recorded dry-run page with its audited repair totals. It
+// carries counts, identities and timestamps only; no event, endpoint, URL, payload or receiver
+// content. A zero CursorToEventID means the page scanned no events.
+type ReconciliationRunSummary struct {
+	RunID              string
+	RequestedBy        string
+	FromCreatedAt      time.Time
+	CursorToCreatedAt  time.Time
+	CursorToEventID    string
+	EventsScanned      int
+	GapEvents          int
+	MissingDeliveries  int64
+	RepairedDeliveries int
+	SkippedIdentities  int
+	CreatedAt          time.Time
 }
 
 // RepairRequest applies one recorded reconciliation run to its gaps using the endpoint status

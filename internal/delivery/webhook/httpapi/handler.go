@@ -19,6 +19,7 @@ import (
 
 const (
 	defaultCandidateLimit = 100
+	defaultRunLimit       = 100
 	maxBodyBytes          = 8 << 10
 )
 
@@ -45,10 +46,12 @@ type Authorizer interface {
 	CanReplayWebhooks(context.Context, Principal) bool
 }
 
-// Repository is the operator replay data surface. The store must use the operator capability.
+// Repository is the operator replay and reconciliation data surface. The store must use the
+// operator capability.
 type Repository interface {
 	ReplayCandidates(context.Context, tenancy.TenantID, int) ([]webhookpostgres.ReplayCandidateRecord, error)
 	AuthorizeReplay(context.Context, webhook.ReplayRequest) (webhook.ReplayAuthorization, error)
+	ReconciliationRuns(context.Context, tenancy.TenantID, int) ([]webhook.ReconciliationRunSummary, error)
 }
 
 // KeyReady reports whether the configured signing keyring holds a key reference.
@@ -70,6 +73,7 @@ func New(repo Repository, principals PrincipalResolver, authz Authorizer, keyRea
 	h := &Handler{repo: repo, principals: principals, authz: authz, keyReady: keyReady, mux: http.NewServeMux()}
 	h.mux.HandleFunc("GET /v1/webhooks/replay-candidates", h.listCandidates)
 	h.mux.HandleFunc("POST /v1/webhooks/replays", h.replay)
+	h.mux.HandleFunc("GET /v1/webhooks/reconciliation-runs", h.listRuns)
 	return h, nil
 }
 
@@ -198,6 +202,85 @@ func candidateFilters(r *http.Request) (int, map[string]struct{}, bool) {
 		}
 	}
 	return limit, filter, true
+}
+
+type runSummaryResponse struct {
+	RunID              string     `json:"run_id"`
+	RequestedBy        string     `json:"requested_by"`
+	FromCreatedAt      time.Time  `json:"from_created_at"`
+	CursorToCreatedAt  *time.Time `json:"cursor_to_created_at,omitempty"`
+	CursorToEventID    string     `json:"cursor_to_event_id,omitempty"`
+	EventsScanned      int        `json:"events_scanned"`
+	GapEvents          int        `json:"gap_events"`
+	MissingDeliveries  int64      `json:"missing_deliveries"`
+	RepairedDeliveries int        `json:"repaired_deliveries"`
+	SkippedIdentities  int        `json:"skipped_identities"`
+	CreatedAt          time.Time  `json:"created_at"`
+}
+
+type runsResponse struct {
+	Limit int                  `json:"limit"`
+	Runs  []runSummaryResponse `json:"runs"`
+}
+
+func (h *Handler) listRuns(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.principal(w, r)
+	if !ok {
+		return
+	}
+	if !h.authz.CanReplayWebhooks(r.Context(), principal) {
+		writeProblem(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	limit, ok := runLimit(r)
+	if !ok {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	summaries, err := h.repo.ReconciliationRuns(r.Context(), principal.TenantID, limit)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "request_failed")
+		return
+	}
+	response := runsResponse{Limit: limit, Runs: make([]runSummaryResponse, 0, len(summaries))}
+	for _, summary := range summaries {
+		entry := runSummaryResponse{
+			RunID: summary.RunID, RequestedBy: summary.RequestedBy,
+			FromCreatedAt:   summary.FromCreatedAt,
+			CursorToEventID: summary.CursorToEventID,
+			EventsScanned:   summary.EventsScanned, GapEvents: summary.GapEvents,
+			MissingDeliveries:  summary.MissingDeliveries,
+			RepairedDeliveries: summary.RepairedDeliveries,
+			SkippedIdentities:  summary.SkippedIdentities, CreatedAt: summary.CreatedAt,
+		}
+		if summary.CursorToEventID != "" {
+			cursorAt := summary.CursorToCreatedAt
+			entry.CursorToCreatedAt = &cursorAt
+		}
+		response.Runs = append(response.Runs, entry)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func runLimit(r *http.Request) (int, bool) {
+	query := r.URL.Query()
+	for key := range query {
+		if key != "limit" {
+			return 0, false
+		}
+	}
+	limit := defaultRunLimit
+	if values, present := query["limit"]; present {
+		if len(values) != 1 {
+			return 0, false
+		}
+		parsed, err := strconv.Atoi(values[0])
+		if err != nil || parsed < 1 || parsed > webhook.MaxReconciliationRunHistory {
+			return 0, false
+		}
+		limit = parsed
+	}
+	return limit, true
 }
 
 type replayRequest struct {
