@@ -10,15 +10,45 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/sanskarpan/keel/internal/delivery/webhook"
 )
 
+// ReconciliationObserver receives content-free reconciliation outcomes. Implementations must not
+// retain tenant, event, endpoint or error strings; the metrics recorder implements it.
+type ReconciliationObserver interface {
+	ObserveReconciliationPlan(webhook.ReconciliationPage)
+	ObserveReconciliationRepair(webhook.RepairResult)
+}
+
 // Store claims durable webhook deliveries over the webhook capability's database connection.
 type Store struct {
-	db *sql.DB
+	mu            sync.Mutex
+	db            *sql.DB
+	reconObserver ReconciliationObserver
+}
+
+// SetReconciliationObserver registers an optional content-free reconciliation observer, fired by
+// the plan and repair paths after a successful call. A nil observer disables observation.
+func (s *Store) SetReconciliationObserver(observer ReconciliationObserver) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reconObserver = observer
+}
+
+func (s *Store) reconciliationObserver() ReconciliationObserver {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reconObserver
 }
 
 // Claim is the durable outcome of one claim. Created reports whether this call inserted the

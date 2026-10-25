@@ -71,6 +71,9 @@ func (s *Store) PlanReconciliation(ctx context.Context, request webhook.Reconcil
 		}
 		return webhook.ReconciliationPage{}, err
 	}
+	if observer := s.reconciliationObserver(); observer != nil {
+		observer.ObserveReconciliationPlan(page)
+	}
 	return page, nil
 }
 
@@ -118,6 +121,9 @@ func (s *Store) RepairReconciliation(ctx context.Context, request webhook.Repair
 			return webhook.RepairResult{}, webhook.ErrInvalidReconciliation
 		}
 		return webhook.RepairResult{}, err
+	}
+	if observer := s.reconciliationObserver(); observer != nil {
+		observer.ObserveReconciliationRepair(result)
 	}
 	return result, nil
 }

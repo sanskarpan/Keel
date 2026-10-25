@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sanskarpan/keel/internal/delivery/webhook"
 	"github.com/sanskarpan/keel/internal/delivery/webhook/scheduler"
 )
 
@@ -28,6 +29,13 @@ type Recorder struct {
 	failed        uint64
 	deferred      uint64
 	skipped       uint64
+	plans         uint64
+	planScanned   uint64
+	planGaps      uint64
+	planMissing   uint64
+	repairs       uint64
+	repaired      uint64
+	repairSkipped uint64
 }
 
 // New returns an empty recorder.
@@ -71,6 +79,32 @@ func (m *Recorder) ObserveTenant(observation scheduler.TenantObservation) {
 	}
 }
 
+// ObserveReconciliationPlan records one recorded dry-run page. Only counts are kept; no
+// tenant, event, endpoint or error strings.
+func (m *Recorder) ObserveReconciliationPlan(page webhook.ReconciliationPage) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.plans++
+	m.planScanned += uint64(max(page.Scanned, 0))
+	m.planGaps += uint64(max(page.GapEvents, 0))
+	m.planMissing += uint64(max(page.Missing, 0))
+}
+
+// ObserveReconciliationRepair records one audited repair invocation. Only counts are kept.
+func (m *Recorder) ObserveReconciliationRepair(result webhook.RepairResult) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.repairs++
+	m.repaired += uint64(max(result.InsertedDeliveries, 0))
+	m.repairSkipped += uint64(max(result.SkippedIdentities, 0))
+}
+
 // PrometheusMetrics implements the management endpoint's MetricsExtension contract.
 func (m *Recorder) PrometheusMetrics() string {
 	if m == nil {
@@ -82,6 +116,9 @@ func (m *Recorder) PrometheusMetrics() string {
 	oldestDue, lastSuccess := m.oldestDue, m.lastSuccess
 	leases, delivered, retry, exhausted := m.leases, m.delivered, m.retry, m.exhausted
 	failed, deferred, skipped := m.failed, m.deferred, m.skipped
+	plans, planScanned, planGaps := m.plans, m.planScanned, m.planGaps
+	planMissing, repairs, repaired := m.planMissing, m.repairs, m.repaired
+	repairSkipped := m.repairSkipped
 	m.mu.Unlock()
 
 	var b strings.Builder
@@ -128,5 +165,26 @@ func (m *Recorder) PrometheusMetrics() string {
 	} {
 		fmt.Fprintf(&b, "keel_webhook_outcomes_total{outcome=%q} %d\n", outcome.name, outcome.value)
 	}
+	fmt.Fprintln(&b, "# HELP keel_webhook_reconciliation_plans_total Recorded dry-run reconciliation pages.")
+	fmt.Fprintln(&b, "# TYPE keel_webhook_reconciliation_plans_total counter")
+	fmt.Fprintf(&b, "keel_webhook_reconciliation_plans_total %d\n", plans)
+	fmt.Fprintln(&b, "# HELP keel_webhook_reconciliation_scanned_total Outbox events scanned by recorded pages.")
+	fmt.Fprintln(&b, "# TYPE keel_webhook_reconciliation_scanned_total counter")
+	fmt.Fprintf(&b, "keel_webhook_reconciliation_scanned_total %d\n", planScanned)
+	fmt.Fprintln(&b, "# HELP keel_webhook_reconciliation_gaps_total Page events with missing deliveries.")
+	fmt.Fprintln(&b, "# TYPE keel_webhook_reconciliation_gaps_total counter")
+	fmt.Fprintf(&b, "keel_webhook_reconciliation_gaps_total %d\n", planGaps)
+	fmt.Fprintln(&b, "# HELP keel_webhook_reconciliation_missing_total Missing deliveries counted by recorded pages.")
+	fmt.Fprintln(&b, "# TYPE keel_webhook_reconciliation_missing_total counter")
+	fmt.Fprintf(&b, "keel_webhook_reconciliation_missing_total %d\n", planMissing)
+	fmt.Fprintln(&b, "# HELP keel_webhook_reconciliation_repairs_total Audited repair invocations.")
+	fmt.Fprintln(&b, "# TYPE keel_webhook_reconciliation_repairs_total counter")
+	fmt.Fprintf(&b, "keel_webhook_reconciliation_repairs_total %d\n", repairs)
+	fmt.Fprintln(&b, "# HELP keel_webhook_reconciliation_repaired_total Deliveries inserted by repairs.")
+	fmt.Fprintln(&b, "# TYPE keel_webhook_reconciliation_repaired_total counter")
+	fmt.Fprintf(&b, "keel_webhook_reconciliation_repaired_total %d\n", repaired)
+	fmt.Fprintln(&b, "# HELP keel_webhook_reconciliation_skipped_total Endpoint-event identities skipped by repairs.")
+	fmt.Fprintln(&b, "# TYPE keel_webhook_reconciliation_skipped_total counter")
+	fmt.Fprintf(&b, "keel_webhook_reconciliation_skipped_total %d\n", repairSkipped)
 	return b.String()
 }

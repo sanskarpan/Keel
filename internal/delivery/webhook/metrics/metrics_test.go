@@ -6,9 +6,37 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sanskarpan/keel/internal/delivery/webhook"
 	"github.com/sanskarpan/keel/internal/delivery/webhook/scheduler"
 	"github.com/sanskarpan/keel/internal/delivery/webhook/worker"
 )
+
+func TestRecorderRendersReconciliationMetrics(t *testing.T) {
+	recorder := New()
+	recorder.ObserveReconciliationPlan(webhook.ReconciliationPage{
+		Scanned: 3, GapEvents: 2, Missing: 4,
+	})
+	recorder.ObserveReconciliationRepair(webhook.RepairResult{
+		GapEvents: 2, InsertedDeliveries: 3, SkippedIdentities: 1,
+	})
+	output := recorder.PrometheusMetrics()
+	for _, expected := range []string{
+		"keel_webhook_reconciliation_plans_total 1",
+		"keel_webhook_reconciliation_scanned_total 3",
+		"keel_webhook_reconciliation_gaps_total 2",
+		"keel_webhook_reconciliation_missing_total 4",
+		"keel_webhook_reconciliation_repairs_total 1",
+		"keel_webhook_reconciliation_repaired_total 3",
+		"keel_webhook_reconciliation_skipped_total 1",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("metrics output missing %q:\n%s", expected, output)
+		}
+	}
+	if count := strings.Count(output, "{"); count != 6 {
+		t.Fatalf("metrics output has %d labeled series, want only the 6 fixed outcomes:\n%s", count, output)
+	}
+}
 
 func TestRecorderRendersContentFreeMetrics(t *testing.T) {
 	recorder := New()
@@ -85,6 +113,8 @@ func TestNilRecorderIsInert(t *testing.T) {
 	var recorder *Recorder
 	recorder.ObservePass(scheduler.PassObservation{DiscoveryFailed: true})
 	recorder.ObserveTenant(scheduler.TenantObservation{})
+	recorder.ObserveReconciliationPlan(webhook.ReconciliationPage{Scanned: 1})
+	recorder.ObserveReconciliationRepair(webhook.RepairResult{GapEvents: 1})
 	if recorder.PrometheusMetrics() != "" {
 		t.Fatal("nil recorder returned metrics")
 	}
