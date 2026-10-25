@@ -255,7 +255,10 @@ an inactive-then endpoint are skipped and counted in a new audited `skipped_iden
 Migration `0060_webhook_historical_planner` re-creates the planner (same signature) so missing
 counts are computed against the endpoint status recorded at each event's time for currently
 active endpoints; inactive-then windows and pre-history events report no gap, matching exactly
-what historical repair can insert.
+what historical repair can insert. Migration `0061_webhook_reconciliation_runs_api` adds an
+operator-gated recent-runs listing with per-run scanned/gap/missing/repaired/skipped counts and
+cursor watermarks, bounded to 100 rows; it exposes no event, endpoint, URL, payload or receiver
+content.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
