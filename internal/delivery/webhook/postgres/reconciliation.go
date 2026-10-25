@@ -74,9 +74,9 @@ func (s *Store) PlanReconciliation(ctx context.Context, request webhook.Reconcil
 	return page, nil
 }
 
-// RepairReconciliation applies one recorded reconciliation run to the still-missing deliveries for
-// current active endpoints. The store must be constructed over the operator capability's
-// connection.
+// RepairReconciliation applies one recorded reconciliation run to the still-missing deliveries,
+// revalidating each gap event against the endpoint status recorded at the event's time. The
+// store must be constructed over the operator capability's connection.
 func (s *Store) RepairReconciliation(ctx context.Context, request webhook.RepairRequest) (webhook.RepairResult, error) {
 	var result webhook.RepairResult
 	if s == nil || s.db == nil {
@@ -91,19 +91,19 @@ func (s *Store) RepairReconciliation(ctx context.Context, request webhook.Repair
 
 	err := inTenantTx(ctx, s.db, request.Tenant, func(ctx context.Context, tx *sql.Tx) error {
 		var repairID string
-		var gaps, inserted int
+		var gaps, inserted, skipped int
 		if err := tx.QueryRowContext(ctx,
-			`SELECT r_repair_id,r_gap_events,r_inserted_deliveries
+			`SELECT r_repair_id,r_gap_events,r_inserted_deliveries,r_skipped_identities
 			   FROM keel_meta.repair_webhook_reconciliation_run($1,$2,$3,$4)`,
 			request.RepairID, request.RunID, request.RequestedBy, request.EventLimit).
-			Scan(&repairID, &gaps, &inserted); err != nil {
+			Scan(&repairID, &gaps, &inserted, &skipped); err != nil {
 			return fmt.Errorf("repair webhook reconciliation: %w", err)
 		}
 		if repairID != request.RepairID || gaps < 0 || gaps > webhook.MaxReconciliationPage ||
-			inserted < 0 || inserted > 10000 {
+			inserted < 0 || inserted > 10000 || skipped < 0 || skipped > 10000 {
 			return webhook.ErrInvalidReconciliation
 		}
-		result = webhook.RepairResult{RepairID: repairID, GapEvents: gaps, InsertedDeliveries: inserted}
+		result = webhook.RepairResult{RepairID: repairID, GapEvents: gaps, InsertedDeliveries: inserted, SkippedIdentities: skipped}
 		return nil
 	})
 	if err != nil {

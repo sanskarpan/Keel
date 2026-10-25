@@ -78,9 +78,9 @@ type ReconciliationPage struct {
 	Missing   int
 }
 
-// RepairRequest applies one recorded reconciliation run to its current gaps. EventLimit bounds the
-// number of gap events revalidated in this repair; delivery candidates are separately capped by
-// the database.
+// RepairRequest applies one recorded reconciliation run to its gaps using the endpoint status
+// recorded at each event's time. EventLimit bounds the number of gap events revalidated in this
+// repair; delivery candidates are separately capped by the database.
 type RepairRequest struct {
 	Tenant      tenancy.TenantID
 	RepairID    string
@@ -112,11 +112,14 @@ func (r RepairRequest) Validate() error {
 	return nil
 }
 
-// RepairResult is the audited outcome of one repair invocation.
+// RepairResult is the audited outcome of one repair invocation. SkippedIdentities counts the
+// endpoint-event pairs with no status history or an inactive status at the event's time; those
+// deliveries are never created.
 type RepairResult struct {
 	RepairID           string
 	GapEvents          int
 	InsertedDeliveries int
+	SkippedIdentities  int
 }
 
 // CursorResetRequest moves a tenant reconciliation cursor backward to a bounded past time. The

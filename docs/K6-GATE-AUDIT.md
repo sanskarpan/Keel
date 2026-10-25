@@ -55,8 +55,10 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
    SLO qualification.
 6. **Key management is process-global.** The worker keyring holds one active plus at most one
    previous key; there is no per-endpoint key provider/KMS integration.
-7. **Repair semantics are operator-explicit.** Current-active repair can backfill an old event to an
-   endpoint active now; status history exists but repair still uses current state.
+7. **Repair semantics are operator-explicit.** Repair revalidates each gap event against the
+   endpoint status recorded at the event's time and skips inactive-then or history-less
+   identities with an audited count; the planner still scans against current active endpoints,
+   so a planned gap may repair to zero inserts.
 8. **Logging is aggregate-only and not operationally qualified.** The worker logs fixed pass counts and no tenant/endpoint/delivery IDs, URLs, payloads, keys or raw errors, but log shipping, retention, sampling and production logging qualification are absent.
 
 ## Residual risks
