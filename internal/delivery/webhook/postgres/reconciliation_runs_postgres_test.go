@@ -4,12 +4,38 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/sanskarpan/keel/internal/delivery/webhook"
 )
+
+type recordingReconObserver struct {
+	mu      sync.Mutex
+	pages   []webhook.ReconciliationPage
+	results []webhook.RepairResult
+}
+
+func (o *recordingReconObserver) ObserveReconciliationPlan(page webhook.ReconciliationPage) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.pages = append(o.pages, page)
+}
+
+func (o *recordingReconObserver) ObserveReconciliationRepair(result webhook.RepairResult) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.results = append(o.results, result)
+}
+
+func (o *recordingReconObserver) snapshot() ([]webhook.ReconciliationPage, []webhook.RepairResult) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]webhook.ReconciliationPage(nil), o.pages...),
+		append([]webhook.RepairResult(nil), o.results...)
+}
 
 func TestPostgreSQLReconciliationRunsListsHistory(t *testing.T) {
 	appDB, webhookDB, operatorDB, adminDB := reconciliationDatabases(t)
@@ -106,5 +132,48 @@ func TestPostgreSQLReconciliationRunsListsHistory(t *testing.T) {
 	if _, err := operatorDB.ExecContext(ctx,
 		`SELECT count(*) FROM keel_meta.webhook_reconciliation_runs`); err == nil {
 		t.Fatal("operator read reconciliation runs directly")
+	}
+}
+
+func TestPostgreSQLReconciliationStoreFiresContentFreeObserver(t *testing.T) {
+	appDB, _, operatorDB, adminDB := reconciliationDatabases(t)
+	store := newReconciliationStore(t, operatorDB)
+	registry := newRegistry(t, appDB)
+	ctx := context.Background()
+	tenant := payloadTenant(t)
+	from := time.Now().Add(-time.Minute)
+
+	registerFanoutEndpoint(t, registry, tenant, 1)
+	for range 2 {
+		insertFanoutOutbox(t, adminDB, tenant, uuid.NewString())
+	}
+	observer := &recordingReconObserver{}
+	store.SetReconciliationObserver(observer)
+
+	plan := reconciliationRequest(tenant)
+	plan.From = &from
+	if _, err := store.PlanReconciliation(ctx, plan); err != nil {
+		t.Fatalf("plan run: %v", err)
+	}
+	repair := repairRequest(tenant, plan.RunID)
+	if _, err := store.RepairReconciliation(ctx, repair); err != nil {
+		t.Fatalf("repair run: %v", err)
+	}
+
+	pages, results := observer.snapshot()
+	if len(pages) != 1 || pages[0].Scanned != 2 || pages[0].GapEvents != 2 || pages[0].Missing != 2 {
+		t.Fatalf("observed pages = %+v", pages)
+	}
+	if len(results) != 1 || results[0].GapEvents != 2 || results[0].InsertedDeliveries != 2 {
+		t.Fatalf("observed results = %+v", results)
+	}
+
+	store.SetReconciliationObserver(nil)
+	second := reconciliationRequest(tenant)
+	if _, err := store.PlanReconciliation(ctx, second); err != nil {
+		t.Fatalf("second plan run: %v", err)
+	}
+	if pages, results := observer.snapshot(); len(pages) != 1 || len(results) != 1 {
+		t.Fatalf("cleared observer fired: pages=%d results=%d", len(pages), len(results))
 	}
 }
