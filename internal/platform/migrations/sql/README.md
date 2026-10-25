@@ -252,7 +252,10 @@ exposes no URL, key, payload or receiver data and changes no repair semantics. M
 against the endpoint status recorded at the event's time: deliveries are inserted only for
 endpoints active then, at their then-current subscription, while identities with no history or
 an inactive-then endpoint are skipped and counted in a new audited `skipped_identities` column.
-The planner still scans against current active endpoints.
+Migration `0060_webhook_historical_planner` re-creates the planner (same signature) so missing
+counts are computed against the endpoint status recorded at each event's time for currently
+active endpoints; inactive-then windows and pre-history events report no gap, matching exactly
+what historical repair can insert.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

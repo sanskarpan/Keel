@@ -47,18 +47,17 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
 2. **No real provider adapter or late/impossible callback policy.** The callback inbox proves the
    dedup/conflict boundary, not a provider's late-event behavior or remote-state reconciliation.
 3. **Reconciliation is not production-complete.** Provider/callback observation reconciliation,
-   scheduler integration, an operator reconciliation UI and metrics are open; endpoint status
-   history is recorded with a point-in-time query but repair does not consult it yet.
+   scheduler integration, an operator reconciliation UI and metrics are open; plan and repair
+   both revalidate against endpoint state at each event's time.
 4. **Quotas are partial.** A configurable active-endpoint policy (default 100) and a per-tenant per-pass delivery lease policy (default 5, at most 100) exist; the scheduler leases at most the minimum of the process batch and the tenant limit and leaves the remainder due. Global due-backlog caps, attempt quotas, fair-share ordering and over-cap remediation do not.
 5. **Operational qualification is partial.** Source-controlled local alert rules and a dashboard
    contract exist; there is no Alertmanager, paging owner, hosted dashboard, production scrape or
    SLO qualification.
 6. **Key management is process-global.** The worker keyring holds one active plus at most one
    previous key; there is no per-endpoint key provider/KMS integration.
-7. **Repair semantics are operator-explicit.** Repair revalidates each gap event against the
-   endpoint status recorded at the event's time and skips inactive-then or history-less
-   identities with an audited count; the planner still scans against current active endpoints,
-   so a planned gap may repair to zero inserts.
+7. **Repair semantics are operator-explicit.** Plan and repair revalidate each event against
+   the endpoint status recorded at the event's time; inactive-then or history-less identities
+   never become gaps, and stale gap rows repair to audited skips instead of inserts.
 8. **Logging is aggregate-only and not operationally qualified.** The worker logs fixed pass counts and no tenant/endpoint/delivery IDs, URLs, payloads, keys or raw errors, but log shipping, retention, sampling and production logging qualification are absent.
 
 ## Residual risks
