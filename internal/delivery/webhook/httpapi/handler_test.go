@@ -25,19 +25,32 @@ func (p testPrincipal) Resolve(context.Context, *http.Request) (Principal, bool)
 	return p.principal, p.ok
 }
 
-type testAuthorizer struct{ allowed bool }
+type testAuthorizer struct {
+	allowed        bool
+	policiesDenied bool
+}
 
 func (a testAuthorizer) CanReplayWebhooks(context.Context, Principal) bool { return a.allowed }
 
+func (a testAuthorizer) CanManageWebhookPolicies(context.Context, Principal) bool {
+	return a.allowed && !a.policiesDenied
+}
+
 type testRepository struct {
-	candidates    []webhookpostgres.ReplayCandidateRecord
-	candidatesErr error
-	authorization webhook.ReplayAuthorization
-	authorizeErr  error
-	request       webhook.ReplayRequest
-	runs          []webhook.ReconciliationRunSummary
-	runsErr       error
-	runsLimit     int
+	candidates     []webhookpostgres.ReplayCandidateRecord
+	candidatesErr  error
+	authorization  webhook.ReplayAuthorization
+	authorizeErr   error
+	request        webhook.ReplayRequest
+	runs           []webhook.ReconciliationRunSummary
+	runsErr        error
+	runsLimit      int
+	endpointPolicy webhook.EndpointLimitPolicy
+	endpointErr    error
+	endpointChange webhook.EndpointLimitChange
+	deliveryPolicy webhook.DeliveryBatchPolicy
+	deliveryErr    error
+	deliveryChange webhook.DeliveryBatchChange
 }
 
 func (r *testRepository) ReplayCandidates(context.Context, tenancy.TenantID, int) ([]webhookpostgres.ReplayCandidateRecord, error) {
@@ -47,6 +60,16 @@ func (r *testRepository) ReplayCandidates(context.Context, tenancy.TenantID, int
 func (r *testRepository) ReconciliationRuns(_ context.Context, _ tenancy.TenantID, limit int) ([]webhook.ReconciliationRunSummary, error) {
 	r.runsLimit = limit
 	return r.runs, r.runsErr
+}
+
+func (r *testRepository) SetEndpointLimit(_ context.Context, change webhook.EndpointLimitChange) (webhook.EndpointLimitPolicy, error) {
+	r.endpointChange = change
+	return r.endpointPolicy, r.endpointErr
+}
+
+func (r *testRepository) SetDeliveryBatchLimit(_ context.Context, change webhook.DeliveryBatchChange) (webhook.DeliveryBatchPolicy, error) {
+	r.deliveryChange = change
+	return r.deliveryPolicy, r.deliveryErr
 }
 
 func (r *testRepository) AuthorizeReplay(_ context.Context, request webhook.ReplayRequest) (webhook.ReplayAuthorization, error) {
@@ -312,6 +335,91 @@ func TestListRunsRejectsBadRequests(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/v1/webhooks/reconciliation-runs", nil))
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("denied status = %d, want 403", response.Code)
+	}
+}
+
+func TestSetEndpointLimitUsesTrustedPrincipal(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := &testRepository{endpointPolicy: webhook.EndpointLimitPolicy{
+		ChangeID: "pol_0123456789abcdef", Version: 2, ActiveEndpointLimit: 50, UpdatedAt: now,
+	}}
+	request := `{"change_id":"pol_0123456789abcdef","limit":50,"expected_version":1,"reason":"halve the tenant endpoint cap"}`
+	response := httptest.NewRecorder()
+	newTestHandler(t, repo, true).ServeHTTP(response,
+		httptest.NewRequest(http.MethodPost, "/v1/webhooks/endpoint-limits", strings.NewReader(request)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body)
+	}
+	if repo.endpointChange.Tenant != testTenant(t) || repo.endpointChange.RequestedBy != "operator@example.com" ||
+		repo.endpointChange.Limit != 50 || repo.endpointChange.ExpectedVersion != 1 {
+		t.Fatalf("endpoint change = %+v", repo.endpointChange)
+	}
+	var result policyChangeResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ChangeID != "pol_0123456789abcdef" || result.Version != 2 || result.Limit != 50 || !result.UpdatedAt.Equal(now) {
+		t.Fatalf("policy response = %+v", result)
+	}
+}
+
+func TestSetDeliveryBatchLimitUsesTrustedPrincipal(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := &testRepository{deliveryPolicy: webhook.DeliveryBatchPolicy{
+		ChangeID: "pol_0123456789abcdef", Version: 1, BatchLimit: 2, UpdatedAt: now,
+	}}
+	request := `{"change_id":"pol_0123456789abcdef","limit":2,"expected_version":0,"reason":"throttle the tenant batch"}`
+	response := httptest.NewRecorder()
+	newTestHandler(t, repo, true).ServeHTTP(response,
+		httptest.NewRequest(http.MethodPost, "/v1/webhooks/delivery-limits", strings.NewReader(request)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body)
+	}
+	if repo.deliveryChange.Tenant != testTenant(t) || repo.deliveryChange.Limit != 2 || repo.deliveryChange.ExpectedVersion != 0 {
+		t.Fatalf("delivery change = %+v", repo.deliveryChange)
+	}
+}
+
+func TestSetPolicyLimitsMapsErrors(t *testing.T) {
+	for _, test := range []struct {
+		path   string
+		body   string
+		err    error
+		status int
+	}{
+		{"/v1/webhooks/endpoint-limits", `{"change_id":"pol_0123456789abcdef","limit":50,"expected_version":1,"reason":"ok"}`, webhook.ErrEndpointPolicyConflict, http.StatusConflict},
+		{"/v1/webhooks/endpoint-limits", `{"change_id":"pol_0123456789abcdef","limit":50,"expected_version":1,"reason":"ok"}`, webhook.ErrInvalidEndpoint, http.StatusBadRequest},
+		{"/v1/webhooks/endpoint-limits", `{"change_id":"pol_0123456789abcdef","limit":50,"expected_version":1,"reason":"ok"}`, errors.New("database detail"), http.StatusInternalServerError},
+		{"/v1/webhooks/delivery-limits", `{"change_id":"pol_0123456789abcdef","limit":2,"expected_version":0,"reason":"ok"}`, webhook.ErrDeliveryPolicyConflict, http.StatusConflict},
+		{"/v1/webhooks/delivery-limits", `{"change_id":"pol_0123456789abcdef","limit":2,"expected_version":0,"reason":"ok"}`, webhook.ErrInvalidEndpoint, http.StatusBadRequest},
+		{"/v1/webhooks/endpoint-limits", `{}`, nil, http.StatusBadRequest},
+		{"/v1/webhooks/endpoint-limits", `{"change_id":"short","limit":50,"expected_version":1,"reason":"ok"}`, nil, http.StatusBadRequest},
+		{"/v1/webhooks/endpoint-limits", `{"change_id":"pol_0123456789abcdef","limit":0,"expected_version":1,"reason":"ok"}`, nil, http.StatusBadRequest},
+		{"/v1/webhooks/delivery-limits", `{"change_id":"pol_0123456789abcdef","limit":101,"expected_version":0,"reason":"ok"}`, nil, http.StatusBadRequest},
+		{"/v1/webhooks/delivery-limits", `{"change_id":"pol_0123456789abcdef","limit":2,"expected_version":0,"reason":"ok","tenant_id":"other"}`, nil, http.StatusBadRequest},
+	} {
+		repo := &testRepository{endpointErr: test.err, deliveryErr: test.err}
+		response := httptest.NewRecorder()
+		newTestHandler(t, repo, true).ServeHTTP(response,
+			httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body)))
+		if response.Code != test.status {
+			t.Fatalf("%s %s status = %d, want %d", test.path, test.body, response.Code, test.status)
+		}
+		if strings.Contains(response.Body.String(), "database detail") {
+			t.Fatal("error response leaked a database detail")
+		}
+	}
+	response := httptest.NewRecorder()
+	handler, err := New(&testRepository{}, testPrincipal{principal: Principal{
+		TenantID: testTenant(t), ActorRef: "operator@example.com",
+	}, ok: true}, testAuthorizer{allowed: true, policiesDenied: true}, func(string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.ServeHTTP(response,
+		httptest.NewRequest(http.MethodPost, "/v1/webhooks/endpoint-limits", strings.NewReader(`{"change_id":"pol_0123456789abcdef","limit":50,"expected_version":1,"reason":"ok"}`)))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("denied policy status = %d, want 403", response.Code)
 	}
 }
 

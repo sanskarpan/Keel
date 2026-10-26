@@ -41,17 +41,21 @@ type PrincipalResolver interface {
 	Resolve(context.Context, *http.Request) (Principal, bool)
 }
 
-// Authorizer enforces the operator replay permission.
+// Authorizer enforces operator permissions. Replay and quota policy management are separate
+// permissions so a deployment can grant them independently.
 type Authorizer interface {
 	CanReplayWebhooks(context.Context, Principal) bool
+	CanManageWebhookPolicies(context.Context, Principal) bool
 }
 
-// Repository is the operator replay and reconciliation data surface. The store must use the
-// operator capability.
+// Repository is the operator replay, reconciliation and quota-policy data surface. The store
+// must use the operator capability.
 type Repository interface {
 	ReplayCandidates(context.Context, tenancy.TenantID, int) ([]webhookpostgres.ReplayCandidateRecord, error)
 	AuthorizeReplay(context.Context, webhook.ReplayRequest) (webhook.ReplayAuthorization, error)
 	ReconciliationRuns(context.Context, tenancy.TenantID, int) ([]webhook.ReconciliationRunSummary, error)
+	SetEndpointLimit(context.Context, webhook.EndpointLimitChange) (webhook.EndpointLimitPolicy, error)
+	SetDeliveryBatchLimit(context.Context, webhook.DeliveryBatchChange) (webhook.DeliveryBatchPolicy, error)
 }
 
 // KeyReady reports whether the configured signing keyring holds a key reference.
@@ -74,6 +78,8 @@ func New(repo Repository, principals PrincipalResolver, authz Authorizer, keyRea
 	h.mux.HandleFunc("GET /v1/webhooks/replay-candidates", h.listCandidates)
 	h.mux.HandleFunc("POST /v1/webhooks/replays", h.replay)
 	h.mux.HandleFunc("GET /v1/webhooks/reconciliation-runs", h.listRuns)
+	h.mux.HandleFunc("POST /v1/webhooks/endpoint-limits", h.setEndpointLimit)
+	h.mux.HandleFunc("POST /v1/webhooks/delivery-limits", h.setDeliveryBatchLimit)
 	return h, nil
 }
 
@@ -281,6 +287,102 @@ func runLimit(r *http.Request) (int, bool) {
 		limit = parsed
 	}
 	return limit, true
+}
+
+type policyChangeRequest struct {
+	ChangeID        string `json:"change_id"`
+	Limit           int    `json:"limit"`
+	ExpectedVersion int64  `json:"expected_version"`
+	Reason          string `json:"reason"`
+}
+
+type policyChangeResponse struct {
+	ChangeID  string    `json:"change_id"`
+	Version   int64     `json:"version"`
+	Limit     int       `json:"limit"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (h *Handler) setEndpointLimit(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.policyPrincipal(w, r)
+	if !ok {
+		return
+	}
+	var input policyChangeRequest
+	if decode(w, r, &input) != nil || !replayID.MatchString(input.ChangeID) {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	change := webhook.EndpointLimitChange{
+		Tenant: principal.TenantID, ChangeID: input.ChangeID, RequestedBy: principal.ActorRef,
+		Limit: input.Limit, Reason: input.Reason, ExpectedVersion: input.ExpectedVersion,
+	}
+	if err := change.Validate(); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	policy, err := h.repo.SetEndpointLimit(r.Context(), change)
+	if err != nil {
+		writePolicyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, policyChangeResponse{
+		ChangeID: policy.ChangeID, Version: policy.Version,
+		Limit: policy.ActiveEndpointLimit, UpdatedAt: policy.UpdatedAt,
+	})
+}
+
+func (h *Handler) setDeliveryBatchLimit(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.policyPrincipal(w, r)
+	if !ok {
+		return
+	}
+	var input policyChangeRequest
+	if decode(w, r, &input) != nil || !replayID.MatchString(input.ChangeID) {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	change := webhook.DeliveryBatchChange{
+		Tenant: principal.TenantID, ChangeID: input.ChangeID, RequestedBy: principal.ActorRef,
+		Limit: input.Limit, Reason: input.Reason, ExpectedVersion: input.ExpectedVersion,
+	}
+	if err := change.Validate(); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	policy, err := h.repo.SetDeliveryBatchLimit(r.Context(), change)
+	if err != nil {
+		writePolicyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, policyChangeResponse{
+		ChangeID: policy.ChangeID, Version: policy.Version,
+		Limit: policy.BatchLimit, UpdatedAt: policy.UpdatedAt,
+	})
+}
+
+func (h *Handler) policyPrincipal(w http.ResponseWriter, r *http.Request) (Principal, bool) {
+	principal, ok := h.principal(w, r)
+	if !ok {
+		return Principal{}, false
+	}
+	if !h.authz.CanManageWebhookPolicies(r.Context(), principal) {
+		writeProblem(w, http.StatusForbidden, "forbidden")
+		return Principal{}, false
+	}
+	return principal, true
+}
+
+func writePolicyError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, webhook.ErrEndpointPolicyConflict),
+		errors.Is(err, webhook.ErrDeliveryPolicyConflict):
+		writeProblem(w, http.StatusConflict, "policy_conflict")
+	case errors.Is(err, webhook.ErrInvalidEndpoint):
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+	default:
+		writeProblem(w, http.StatusInternalServerError, "request_failed")
+	}
 }
 
 type replayRequest struct {
