@@ -274,7 +274,9 @@ func logWebhookWorkerPass(logger *slog.Logger, report scheduler.Report, failed b
 	}
 	if !failed && report.Tenants == 0 && report.Leased == 0 && report.Delivered == 0 &&
 		report.RetryScheduled == 0 && report.Exhausted == 0 && report.Failed == 0 &&
-		report.Deferred == 0 && report.Skipped == 0 && report.Failures == 0 {
+		report.Deferred == 0 && report.Skipped == 0 && report.Failures == 0 &&
+		report.ReconScanned == 0 && report.ReconGaps == 0 && report.ReconMissing == 0 &&
+		report.ReconFailures == 0 {
 		return
 	}
 	logger.Info("webhook worker pass completed",
@@ -287,5 +289,9 @@ func logWebhookWorkerPass(logger *slog.Logger, report scheduler.Report, failed b
 		"deferred", report.Deferred,
 		"skipped", report.Skipped,
 		"tenant_batch_failures", report.Failures,
+		"recon_scanned", report.ReconScanned,
+		"recon_gaps", report.ReconGaps,
+		"recon_missing", report.ReconMissing,
+		"recon_failures", report.ReconFailures,
 		"pass_failed", failed)
 }

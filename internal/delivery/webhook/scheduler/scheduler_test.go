@@ -53,6 +53,26 @@ type runnerCall struct {
 	batch  int
 }
 
+type recordingReconciler struct {
+	mu       sync.Mutex
+	tenants  []tenancy.TenantID
+	plans    map[string]ReconPlan
+	failures map[string]error
+}
+
+func (r *recordingReconciler) Plan(_ context.Context, tenant tenancy.TenantID) (ReconPlan, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tenants = append(r.tenants, tenant)
+	return r.plans[string(tenant)], r.failures[string(tenant)]
+}
+
+func (r *recordingReconciler) planned() []tenancy.TenantID {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]tenancy.TenantID(nil), r.tenants...)
+}
+
 type recordingRunner struct {
 	mu      sync.Mutex
 	calls   []runnerCall
@@ -173,6 +193,85 @@ func TestSchedulerRunOnceClampsBatchToTenantPolicy(t *testing.T) {
 	}
 }
 
+func TestSchedulerRunOnceScansProcessedTenants(t *testing.T) {
+	first := schedulerTenant(t, "11111111-1111-4111-8111-111111111111")
+	second := schedulerTenant(t, "22222222-2222-4222-8222-222222222222")
+	now := time.Now()
+	source := &recordingSource{tenants: []webhook.DueTenant{
+		schedulerDue(t, string(first), now.Add(-2*time.Minute), 2),
+		schedulerDue(t, string(second), now.Add(-time.Minute), 1),
+	}}
+	reconciler := &recordingReconciler{plans: map[string]ReconPlan{
+		string(first):  {Scanned: 3, GapEvents: 1, Missing: 2},
+		string(second): {Scanned: 1},
+	}}
+	s, err := New(source, &recordingRunner{}, WithReconciler(reconciler))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := s.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if report.Tenants != 2 || report.ReconScanned != 4 || report.ReconGaps != 1 ||
+		report.ReconMissing != 2 || report.ReconFailures != 0 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	planned := reconciler.planned()
+	if len(planned) != 2 || planned[0] != first || planned[1] != second {
+		t.Fatalf("reconciled tenants = %v", planned)
+	}
+}
+
+func TestSchedulerReconcilerFailureIsIsolated(t *testing.T) {
+	first := schedulerTenant(t, "11111111-1111-4111-8111-111111111111")
+	second := schedulerTenant(t, "22222222-2222-4222-8222-222222222222")
+	now := time.Now()
+	source := &recordingSource{tenants: []webhook.DueTenant{
+		schedulerDue(t, string(first), now.Add(-2*time.Minute), 1),
+		schedulerDue(t, string(second), now.Add(-time.Minute), 1),
+	}}
+	reconciler := &recordingReconciler{
+		plans:    map[string]ReconPlan{string(second): {Scanned: 2, GapEvents: 1, Missing: 1}},
+		failures: map[string]error{string(first): errors.New("scan failed")},
+	}
+	runner := &recordingRunner{}
+	s, err := New(source, runner, WithReconciler(reconciler))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := s.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected the reconciliation failure to be reported")
+	}
+	if report.Tenants != 2 || report.ReconScanned != 2 || report.ReconGaps != 1 ||
+		report.ReconMissing != 1 || report.ReconFailures != 1 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("runner calls = %d, want delivery work to continue", len(runner.calls))
+	}
+}
+
+func TestSchedulerReconcilerIsDisabledByDefault(t *testing.T) {
+	source := &recordingSource{tenants: []webhook.DueTenant{
+		schedulerDue(t, "11111111-1111-4111-8111-111111111111", time.Now(), 1),
+	}}
+	s, err := New(source, &recordingRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := s.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if report.ReconScanned != 0 || report.ReconGaps != 0 || report.ReconMissing != 0 || report.ReconFailures != 0 {
+		t.Fatalf("disabled reconciler reported: %+v", report)
+	}
+}
+
 func TestSchedulerRunOnceReturnsDiscoveryError(t *testing.T) {
 	source := &recordingSource{err: errors.New("database unavailable")}
 	runner := &recordingRunner{}
@@ -264,6 +363,7 @@ func TestSchedulerConfigurationBounds(t *testing.T) {
 		WithInterval(2 * time.Minute),
 		WithObserver(nil),
 		WithReporter(nil),
+		WithReconciler(nil),
 		nil,
 	} {
 		if _, err := New(source, runner, option); err == nil {
