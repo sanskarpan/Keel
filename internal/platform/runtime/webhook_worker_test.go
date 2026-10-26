@@ -131,11 +131,13 @@ func TestWebhookWorkerPassLoggingIsContentFree(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
 	logWebhookWorkerPass(logger, scheduler.Report{
 		Tenants: 2, Leased: 3, Delivered: 1, RetryScheduled: 1, Exhausted: 1, Failures: 1,
+		ReconScanned: 4, ReconGaps: 1, ReconMissing: 2,
 	}, true)
 	line := output.String()
 	for _, expected := range []string{
 		"webhook worker pass completed", "tenants", "leased", "delivered",
 		"retry_scheduled", "exhausted", "tenant_batch_failures", "pass_failed",
+		"recon_scanned", "recon_gaps", "recon_missing", "recon_failures",
 	} {
 		if !strings.Contains(line, expected) {
 			t.Fatalf("log missing %q: %s", expected, line)

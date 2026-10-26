@@ -37,6 +37,20 @@ type Runner interface {
 	Run(ctx context.Context, tenant tenancy.TenantID, batch int) (worker.Report, error)
 }
 
+// ReconPlan is the content-free outcome of one dry-run reconciliation page.
+type ReconPlan struct {
+	Scanned   int
+	GapEvents int
+	Missing   int64
+}
+
+// Reconciler plans one bounded dry-run page for one tenant after its delivery batch.
+// Implementations must never create deliveries or retain tenant, event or endpoint identifiers;
+// the plan path already records its own cursor and run history.
+type Reconciler interface {
+	Plan(ctx context.Context, tenant tenancy.TenantID) (ReconPlan, error)
+}
+
 // PassObservation describes one discovery pass without tenant or delivery identifiers.
 type PassObservation struct {
 	Tenants         int
@@ -58,7 +72,7 @@ type Observer interface {
 	ObserveTenant(TenantObservation)
 }
 
-// Report aggregates one scheduler pass.
+// Report aggregates one scheduler pass, including optional dry-run reconciliation scans.
 type Report struct {
 	Tenants        int
 	Leased         int
@@ -69,6 +83,10 @@ type Report struct {
 	Deferred       int
 	Skipped        int
 	Failures       int
+	ReconScanned   int
+	ReconGaps      int
+	ReconMissing   int64
+	ReconFailures  int
 }
 
 func (r *Report) add(tenant worker.Report) {
@@ -84,14 +102,15 @@ func (r *Report) add(tenant worker.Report) {
 
 // Scheduler polls tenant discovery and runs one worker batch per tenant.
 type Scheduler struct {
-	source   TenantSource
-	runner   Runner
-	limit    int
-	batch    int
-	interval time.Duration
-	observer Observer
-	reporter PassReporter
-	lastPoll atomic.Int64
+	source     TenantSource
+	runner     Runner
+	reconciler Reconciler
+	limit      int
+	batch      int
+	interval   time.Duration
+	observer   Observer
+	reporter   PassReporter
+	lastPoll   atomic.Int64
 }
 
 // PassReporter receives content-free aggregate results after each RunOnce. Implementations must not
@@ -154,6 +173,19 @@ func WithReporter(reporter PassReporter) Option {
 			return errors.New("webhook scheduler reporter is invalid")
 		}
 		s.reporter = reporter
+		return nil
+	}
+}
+
+// WithReconciler plans one bounded dry-run reconciliation page per processed tenant. A nil
+// reconciler is rejected; omitting the option disables background scans. The reconciler only
+// runs for tenants with due work processed in the pass, so idle tenants advance no cursor.
+func WithReconciler(reconciler Reconciler) Option {
+	return func(s *Scheduler) error {
+		if reconciler == nil {
+			return errors.New("webhook scheduler reconciler is invalid")
+		}
+		s.reconciler = reconciler
 		return nil
 	}
 }
@@ -243,6 +275,21 @@ func (s *Scheduler) RunOnce(ctx context.Context) (Report, error) {
 		}
 		if s.observer != nil {
 			s.observer.ObserveTenant(TenantObservation{Report: result, Failed: err != nil})
+		}
+		if s.reconciler != nil {
+			if err := ctx.Err(); err != nil {
+				failures = append(failures, err)
+				break
+			}
+			plan, err := s.reconciler.Plan(ctx, dueTenant.Tenant)
+			if err != nil {
+				report.ReconFailures++
+				failures = append(failures, err)
+				continue
+			}
+			report.ReconScanned += max(plan.Scanned, 0)
+			report.ReconGaps += max(plan.GapEvents, 0)
+			report.ReconMissing += max(plan.Missing, 0)
 		}
 	}
 	return report, errors.Join(failures...)
