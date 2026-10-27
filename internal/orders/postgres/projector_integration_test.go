@@ -3,7 +3,9 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -367,7 +369,9 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	if err != nil || !firstPublish.Published || firstPublish.EventID != events[0].Metadata.EventID {
 		t.Fatalf("first order event publish=%+v err=%v", firstPublish, err)
 	}
-	groupID := "keel-k17-consumer-test"
+	// The group is unique per run so committed offsets from earlier runs, local reruns or
+	// shared brokers can never move this test's fetch position.
+	groupID := "keel-k17-consumer-test-" + strings.ReplaceAll(nextUUID(), "-", "")
 	reader1 := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: topic, GroupID: groupID, MinBytes: 1, MaxBytes: 1 << 20, MaxWait: 100 * time.Millisecond, CommitInterval: 0, StartOffset: kafka.FirstOffset})
 	consumer1, err := kafkarelay.NewConsumerWithReader(&failTargetCommitReader{GroupReader: reader1, eventID: events[0].Metadata.EventID}, processor)
 	if err != nil {
@@ -400,7 +404,8 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	result, err := consumer2.RunOnce(ctx)
 	if err != nil || result.Disposition != projector.Duplicate {
 		_ = consumer2.Close()
-		t.Fatalf("redelivery after group rebalance result=%+v err=%v", result, err)
+		t.Fatalf("redelivery after group rebalance result=%+v err=%v diagnostics=%s",
+			result, err, rebalanceRedeliveryDiagnostics(adminDB, tenant, events[0].Metadata.EventID))
 	}
 	secondPublish, err := publisher.RunOnce(ctx, string(tenant), "consumer-rebalance-relay")
 	if err != nil || !secondPublish.Published || secondPublish.EventID != events[1].Metadata.EventID {
@@ -447,6 +452,64 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	if inboxCount != 2 {
 		t.Fatalf("applied inbox rows=%d after duplicate replay, want exactly two logical effects", inboxCount)
 	}
+}
+
+// rebalanceRedeliveryDiagnostics snapshots the durable state behind an unexpected redelivery
+// outcome without touching Kafka: quarantined coordinates and payload hashes, inbox states,
+// and the expected first-event payload hash recomputed from the canonical outbox envelope.
+// A hash match proves the redelivered bytes were the first event's; a mismatch proves foreign
+// bytes reached the consumer.
+func rebalanceRedeliveryDiagnostics(adminDB *sql.DB, tenant tenancy.TenantID, firstEventID string) string {
+	ctx := context.Background()
+	var detail strings.Builder
+	rows, err := adminDB.QueryContext(ctx,
+		`SELECT source_topic,partition_id,message_offset,encode(payload_hash,'hex'),reason_code
+		   FROM keel_meta.transport_quarantine WHERE tenant_id=$1 ORDER BY message_offset`,
+		string(tenant))
+	if err != nil {
+		return "quarantine query failed: " + err.Error()
+	}
+	quarantined := 0
+	for rows.Next() {
+		var topic, hash, reason string
+		var partition int32
+		var offset int64
+		if err := rows.Scan(&topic, &partition, &offset, &hash, &reason); err != nil {
+			_ = rows.Close()
+			return "quarantine scan failed: " + err.Error()
+		}
+		quarantined++
+		detail.WriteString("quarantine{topic=" + topic + " partition=" + strconv.Itoa(int(partition)) +
+			" offset=" + strconv.FormatInt(offset, 10) + " hash=" + hash + " reason=" + reason + "} ")
+	}
+	_ = rows.Close()
+	if quarantined == 0 {
+		detail.WriteString("quarantine{} ")
+	}
+	inbox, err := adminDB.QueryContext(ctx,
+		`SELECT event_id::text,apply_state FROM keel_meta.event_inbox WHERE tenant_id=$1`,
+		string(tenant))
+	if err != nil {
+		return detail.String() + " inbox query failed: " + err.Error()
+	}
+	for inbox.Next() {
+		var eventID, state string
+		if err := inbox.Scan(&eventID, &state); err != nil {
+			_ = inbox.Close()
+			return detail.String() + " inbox scan failed: " + err.Error()
+		}
+		detail.WriteString("inbox{event=" + eventID + " state=" + state + "} ")
+	}
+	_ = inbox.Close()
+	var envelope []byte
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT safe_envelope FROM keel_meta.event_outbox WHERE tenant_id=$1 AND event_id=$2`,
+		string(tenant), firstEventID).Scan(&envelope); err != nil {
+		return detail.String() + " outbox query failed: " + err.Error()
+	}
+	sum := sha256.Sum256(envelope)
+	detail.WriteString("expected_first_hash=" + hex.EncodeToString(sum[:]))
+	return detail.String()
 }
 
 func TestPostgreSQLKafkaConsumerQuarantinesInvalidTraceMetadata(t *testing.T) {
