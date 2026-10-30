@@ -13,9 +13,11 @@ import (
 )
 
 type recordingReconObserver struct {
-	mu      sync.Mutex
-	pages   []webhook.ReconciliationPage
-	results []webhook.RepairResult
+	mu             sync.Mutex
+	pages          []webhook.ReconciliationPage
+	results        []webhook.RepairResult
+	planFailures   int
+	repairFailures int
 }
 
 func (o *recordingReconObserver) ObserveReconciliationPlan(page webhook.ReconciliationPage) {
@@ -28,6 +30,18 @@ func (o *recordingReconObserver) ObserveReconciliationRepair(result webhook.Repa
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.results = append(o.results, result)
+}
+
+func (o *recordingReconObserver) ObservePlanFailure() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.planFailures++
+}
+
+func (o *recordingReconObserver) ObserveRepairFailure() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.repairFailures++
 }
 
 func (o *recordingReconObserver) snapshot() ([]webhook.ReconciliationPage, []webhook.RepairResult) {
@@ -175,5 +189,41 @@ func TestPostgreSQLReconciliationStoreFiresContentFreeObserver(t *testing.T) {
 	}
 	if pages, results := observer.snapshot(); len(pages) != 1 || len(results) != 1 {
 		t.Fatalf("cleared observer fired: pages=%d results=%d", len(pages), len(results))
+	}
+}
+
+func TestPostgreSQLReconciliationStoreObservesFailures(t *testing.T) {
+	_, _, operatorDB, _ := reconciliationDatabases(t)
+	store := newReconciliationStore(t, operatorDB)
+	ctx := context.Background()
+	tenant := payloadTenant(t)
+	observer := &recordingReconObserver{}
+	store.SetReconciliationObserver(observer)
+
+	unknown := repairRequest(tenant, "rec_0123456789abcdef")
+	if _, err := store.RepairReconciliation(ctx, unknown); err == nil {
+		t.Fatal("repair of unknown run succeeded")
+	}
+	from := time.Now().Add(-time.Minute)
+	plan := reconciliationRequest(tenant)
+	plan.RunID = "rec_0123456789abcdef"
+	plan.From = &from
+	if _, err := store.PlanReconciliation(ctx, plan); err != nil {
+		t.Fatalf("plan run: %v", err)
+	}
+	duplicate := reconciliationRequest(tenant)
+	duplicate.RunID = plan.RunID
+	if _, err := store.PlanReconciliation(ctx, duplicate); err == nil {
+		t.Fatal("duplicate run succeeded")
+	}
+
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	if len(observer.pages) != 1 || len(observer.results) != 0 {
+		t.Fatalf("success observations pages=%d results=%d", len(observer.pages), len(observer.results))
+	}
+	if observer.planFailures != 1 || observer.repairFailures != 1 {
+		t.Fatalf("failure observations plan=%d repair=%d, want 1/1",
+			observer.planFailures, observer.repairFailures)
 	}
 }

@@ -18,10 +18,14 @@ import (
 )
 
 // ReconciliationObserver receives content-free reconciliation outcomes. Implementations must not
-// retain tenant, event, endpoint or error strings; the metrics recorder implements it.
+// retain tenant, event, endpoint or error strings; the metrics recorder implements it. Failure
+// observations fire only for operational failures after request validation, never for invalid
+// requests or missing dependencies.
 type ReconciliationObserver interface {
 	ObserveReconciliationPlan(webhook.ReconciliationPage)
 	ObserveReconciliationRepair(webhook.RepairResult)
+	ObservePlanFailure()
+	ObserveRepairFailure()
 }
 
 // Store claims durable webhook deliveries over the webhook capability's database connection.

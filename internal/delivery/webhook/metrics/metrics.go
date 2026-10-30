@@ -33,9 +33,11 @@ type Recorder struct {
 	planScanned   uint64
 	planGaps      uint64
 	planMissing   uint64
+	planErrs      uint64
 	repairs       uint64
 	repaired      uint64
 	repairSkipped uint64
+	repairErrs    uint64
 }
 
 // New returns an empty recorder.
@@ -105,6 +107,27 @@ func (m *Recorder) ObserveReconciliationRepair(result webhook.RepairResult) {
 	m.repairSkipped += uint64(max(result.SkippedIdentities, 0))
 }
 
+// ObservePlanFailure records one failed dry-run page after request validation. Only the
+// operation is kept; no tenant, event or error strings.
+func (m *Recorder) ObservePlanFailure() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.planErrs++
+}
+
+// ObserveRepairFailure records one failed repair invocation after request validation.
+func (m *Recorder) ObserveRepairFailure() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.repairErrs++
+}
+
 // PrometheusMetrics implements the management endpoint's MetricsExtension contract.
 func (m *Recorder) PrometheusMetrics() string {
 	if m == nil {
@@ -117,8 +140,9 @@ func (m *Recorder) PrometheusMetrics() string {
 	leases, delivered, retry, exhausted := m.leases, m.delivered, m.retry, m.exhausted
 	failed, deferred, skipped := m.failed, m.deferred, m.skipped
 	plans, planScanned, planGaps := m.plans, m.planScanned, m.planGaps
-	planMissing, repairs, repaired := m.planMissing, m.repairs, m.repaired
-	repairSkipped := m.repairSkipped
+	planMissing, planErrs := m.planMissing, m.planErrs
+	repairs, repaired := m.repairs, m.repaired
+	repairSkipped, repairErrs := m.repairSkipped, m.repairErrs
 	m.mu.Unlock()
 
 	var b strings.Builder
@@ -186,5 +210,9 @@ func (m *Recorder) PrometheusMetrics() string {
 	fmt.Fprintln(&b, "# HELP keel_webhook_reconciliation_skipped_total Endpoint-event identities skipped by repairs.")
 	fmt.Fprintln(&b, "# TYPE keel_webhook_reconciliation_skipped_total counter")
 	fmt.Fprintf(&b, "keel_webhook_reconciliation_skipped_total %d\n", repairSkipped)
+	fmt.Fprintln(&b, "# HELP keel_webhook_reconciliation_errors_total Failed dry-run pages and repairs by operation.")
+	fmt.Fprintln(&b, "# TYPE keel_webhook_reconciliation_errors_total counter")
+	fmt.Fprintf(&b, "keel_webhook_reconciliation_errors_total{op=%q} %d\n", "plan", planErrs)
+	fmt.Fprintf(&b, "keel_webhook_reconciliation_errors_total{op=%q} %d\n", "repair", repairErrs)
 	return b.String()
 }

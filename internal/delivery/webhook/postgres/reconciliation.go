@@ -62,6 +62,9 @@ func (s *Store) PlanReconciliation(ctx context.Context, request webhook.Reconcil
 		return nil
 	})
 	if err != nil {
+		if observer := s.reconciliationObserver(); observer != nil {
+			observer.ObservePlanFailure()
+		}
 		if strings.Contains(err.Error(), "reconciliation run already exists") {
 			return webhook.ReconciliationPage{}, webhook.ErrReconciliationConflict
 		}
@@ -110,6 +113,9 @@ func (s *Store) RepairReconciliation(ctx context.Context, request webhook.Repair
 		return nil
 	})
 	if err != nil {
+		if observer := s.reconciliationObserver(); observer != nil {
+			observer.ObserveRepairFailure()
+		}
 		if strings.Contains(err.Error(), "repair already exists") {
 			return webhook.RepairResult{}, webhook.ErrReconciliationConflict
 		}

@@ -114,6 +114,7 @@ services:
       - ../monitoring/prometheus/keel-local-prometheus.yaml:/etc/prometheus/prometheus.yml:ro
       - ../monitoring/prometheus/keel-rate-limit-observer-alerts.yaml:/etc/prometheus/keel-rate-limit-observer-alerts.yaml:ro
       - ../monitoring/prometheus/keel-webhook-worker-alerts.yaml:/etc/prometheus/keel-webhook-worker-alerts.yaml:ro
+      - ../monitoring/prometheus/keel-webhook-reconciliation-alerts.yaml:/etc/prometheus/keel-webhook-reconciliation-alerts.yaml:ro
     read_only: true
     tmpfs:
       - /prometheus:size=128m,mode=1777
