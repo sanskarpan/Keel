@@ -53,9 +53,9 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
    store hook. The scheduler accepts an opt-in dry-run scan hook, but no runtime wires it yet
    because planning requires the operator capability.
 4. **Quotas are partial.** A configurable active-endpoint policy (default 100) and a per-tenant per-pass delivery lease policy (default 5, at most 100) exist; the scheduler leases at most the minimum of the process batch and the tenant limit and leaves the remainder due. Global due-backlog caps, attempt quotas, fair-share ordering and over-cap remediation do not.
-5. **Operational qualification is partial.** Source-controlled local alert rules and a dashboard
-   contract exist; there is no Alertmanager, paging owner, hosted dashboard, production scrape or
-   SLO qualification.
+5. **Operational qualification is partial.** Source-controlled local alert rules for delivery
+   and reconciliation plus a dashboard contract exist; there is no Alertmanager, paging owner,
+   hosted dashboard, production scrape or SLO qualification.
 6. **Key management is process-global.** The worker keyring holds one active plus at most one
    previous key; there is no per-endpoint key provider/KMS integration.
 7. **Repair semantics are operator-explicit.** Plan and repair revalidate each event against

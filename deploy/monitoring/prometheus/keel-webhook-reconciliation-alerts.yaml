@@ -1,0 +1,46 @@
+groups:
+  - name: keel.webhook-reconciliation
+    rules:
+      - alert: KeelWebhookReconciliationPlanErrors
+        expr: increase(keel_webhook_reconciliation_errors_total{op="plan"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook reconciliation planning is failing
+          description: At least one dry-run page failed after validation in the last five minutes. Cursors do not advance on failed pages. Check the operator database capability, advisory locks and worker logs.
+
+      - alert: KeelWebhookReconciliationRepairErrors
+        expr: increase(keel_webhook_reconciliation_errors_total{op="repair"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook reconciliation repair is failing
+          description: At least one audited repair failed after validation in the last five minutes. No deliveries were inserted by the failed call. Check the operator database capability and worker logs.
+
+      - alert: KeelWebhookReconciliationSkips
+        expr: increase(keel_webhook_reconciliation_skipped_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook reconciliation repair is skipping identities
+          description: Repair skipped endpoint-event identities with no status history or an inactive-then endpoint in the last fifteen minutes. Skips are audited per repair run; nothing is lost, but pre-history events can never be reconstructed.
+
+      - alert: KeelWebhookReconciliationGaps
+        expr: increase(keel_webhook_reconciliation_gaps_total[1h]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook reconciliation gap rate is high
+          description: More than one hundred gap events were planned in the last hour for five minutes. Check endpoint churn, fanout health and whether repairs are keeping up.
