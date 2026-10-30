@@ -405,7 +405,7 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	if err != nil || result.Disposition != projector.Duplicate {
 		_ = consumer2.Close()
 		t.Fatalf("redelivery after group rebalance result=%+v err=%v diagnostics=%s",
-			result, err, rebalanceRedeliveryDiagnostics(adminDB, tenant, events[0].Metadata.EventID))
+			result, err, rebalanceRedeliveryDiagnostics(adminDB, tenant, topic, events[0].Metadata.EventID))
 	}
 	secondPublish, err := publisher.RunOnce(ctx, string(tenant), "consumer-rebalance-relay")
 	if err != nil || !secondPublish.Published || secondPublish.EventID != events[1].Metadata.EventID {
@@ -459,13 +459,15 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 // and the expected first-event payload hash recomputed from the canonical outbox envelope.
 // A hash match proves the redelivered bytes were the first event's; a mismatch proves foreign
 // bytes reached the consumer.
-func rebalanceRedeliveryDiagnostics(adminDB *sql.DB, tenant tenancy.TenantID, firstEventID string) string {
+func rebalanceRedeliveryDiagnostics(adminDB *sql.DB, tenant tenancy.TenantID, topic, firstEventID string) string {
 	ctx := context.Background()
 	var detail strings.Builder
 	rows, err := adminDB.QueryContext(ctx,
 		`SELECT source_topic,partition_id,message_offset,encode(payload_hash,'hex'),reason_code
-		   FROM keel_meta.transport_quarantine WHERE tenant_id=$1 ORDER BY message_offset`,
-		string(tenant))
+		   FROM keel_meta.transport_quarantine
+		  WHERE source_topic=$1 AND quarantined_at>clock_timestamp()-interval '10 minutes'
+		  ORDER BY partition_id,message_offset`,
+		topic)
 	if err != nil {
 		return "quarantine query failed: " + err.Error()
 	}
