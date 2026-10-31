@@ -179,3 +179,118 @@ func TestValidateObservationRejectsBadShapes(t *testing.T) {
 		})
 	}
 }
+
+func testRegistry(t *testing.T) (*Registry, tenancy.TenantID, tenancy.TenantID) {
+	t.Helper()
+	first, err := tenancy.ParseTenantID("11111111-1111-4111-8111-111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := tenancy.ParseTenantID("22222222-2222-4222-8222-222222222222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry([]ProviderConfig{
+		{Provider: "provider_one", Tenant: first,
+			Secret: []byte("0123456789abcdef0123456789abcdef"), KeyID: "key_2026_01"},
+		{Provider: "provider_two", Tenant: second,
+			Secret: []byte("fedcba9876543210fedcba9876543210"), KeyID: "key_2026_02"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry, first, second
+}
+
+func registryRequest(t *testing.T, registry *Registry, provider, secretID string) VerificationRequest {
+	t.Helper()
+	var secret []byte
+	switch secretID {
+	case "one":
+		secret = []byte("0123456789abcdef0123456789abcdef")
+	case "two":
+		secret = []byte("fedcba9876543210fedcba9876543210")
+	default:
+		t.Fatalf("unknown secret %q", secretID)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	payload := `{"event_type":"payment.settled","occurred_at":"2026-10-26T12:00:00Z"}`
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(stamp))
+	mac.Write([]byte("\n"))
+	mac.Write([]byte(payload))
+	return VerificationRequest{
+		Provider:        provider,
+		ProviderEventID: "evt_abc123",
+		Payload:         []byte(payload),
+		Signature:       []byte(hex.EncodeToString(mac.Sum(nil))),
+		Timestamp:       stamp,
+	}
+}
+
+func TestRegistryDispatchesPerProviderSecrets(t *testing.T) {
+	registry, first, second := testRegistry(t)
+	event, err := registry.Verify(context.Background(), registryRequest(t, registry, "provider_one", "one"))
+	if err != nil {
+		t.Fatalf("provider_one verify: %v", err)
+	}
+	if event.Tenant != first || event.KeyID != "key_2026_01" {
+		t.Fatalf("provider_one event = %+v", event)
+	}
+	event, err = registry.Verify(context.Background(), registryRequest(t, registry, "provider_two", "two"))
+	if err != nil {
+		t.Fatalf("provider_two verify: %v", err)
+	}
+	if event.Tenant != second || event.KeyID != "key_2026_02" {
+		t.Fatalf("provider_two event = %+v", event)
+	}
+	// Each provider's secret verifies only its own callbacks.
+	request := registryRequest(t, registry, "provider_one", "two")
+	if _, err := registry.Verify(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("cross-provider secret error = %v, want unauthenticated", err)
+	}
+}
+
+func TestRegistryRejectsUnknownProvider(t *testing.T) {
+	registry, _, _ := testRegistry(t)
+	request := registryRequest(t, registry, "provider_one", "one")
+	request.Provider = "provider_three"
+	if _, err := registry.Verify(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("unknown provider error = %v, want unauthenticated", err)
+	}
+	var nilRegistry *Registry
+	if _, err := nilRegistry.Verify(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("nil registry error = %v, want unauthenticated", err)
+	}
+}
+
+func TestNewRegistryRejectsBadConfigs(t *testing.T) {
+	tenant, err := tenancy.ParseTenantID("11111111-1111-4111-8111-111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	good := ProviderConfig{Provider: "provider_one", Tenant: tenant, Secret: secret, KeyID: "key_2026_01"}
+	other := ProviderConfig{Provider: "provider_two", Tenant: tenant, Secret: secret, KeyID: "key_2026_02"}
+	for _, test := range []struct {
+		name    string
+		configs []ProviderConfig
+	}{
+		{"empty", nil},
+		{"bad provider", []ProviderConfig{{Provider: "Provider One", Tenant: tenant, Secret: secret, KeyID: "key_2026_01"}}},
+		{"duplicate provider", []ProviderConfig{good, good}},
+		{"zero tenant", []ProviderConfig{{Provider: "provider_one", Secret: secret, KeyID: "key_2026_01"}}},
+		{"short secret", []ProviderConfig{{Provider: "provider_one", Tenant: tenant, Secret: []byte("short"), KeyID: "key_2026_01"}}},
+		{"bad key", []ProviderConfig{{Provider: "provider_one", Tenant: tenant, Secret: secret, KeyID: "k!"}}},
+		{"second bad", []ProviderConfig{good, {Provider: "provider_two", Tenant: tenant, KeyID: "key_2026_02"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewRegistry(test.configs); err == nil {
+				t.Fatal("bad registry config was accepted")
+			}
+		})
+	}
+	if _, err := NewRegistry([]ProviderConfig{good, other}); err != nil {
+		t.Fatalf("two-provider registry rejected: %v", err)
+	}
+}

@@ -43,10 +43,11 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
 
 1. **Production operator identity: bearer-token mounting landed.** The `operator-api` role serves the operator handler on its own listener with per-tenant bearer tokens (constant-time compare, scoped grants), loopback-only by default with an explicit non-loopback opt-out, and DB readiness probes. OIDC/mTLS and production deployment remain open.
 2. **No real provider adapter or late/impossible callback policy.** A code-owned synthetic HMAC
-   verifier covers local development and tests, and every claim outcome is recorded in an
+   verifier covers local development and tests, generalized into a configured multi-provider
+   registry with per-provider secrets and tenant isolation; every claim outcome is recorded in an
    append-only provider observation trail with redelivery delays; the callback inbox proves the
-   dedup/conflict boundary. A provider-owned adapter with signature/rotation/tenant rules, the
-   late-event business policy and remote-state reconciliation remain open.
+   dedup/conflict boundary. A provider-owned adapter with vendor-specific signature, rotation
+   and tenant rules, the late-event business policy and remote-state reconciliation remain open.
 3. **Reconciliation is not production-complete.** Provider/callback observation reconciliation
    and an operator reconciliation UI are open; plan and repair both revalidate against endpoint
    state at each event's time, recent runs with repair totals are readable through the unmounted
