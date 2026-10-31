@@ -72,7 +72,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 
 ## K7 — Production qualification and handoff
 
-- [ ] K7.1 Package immutable recipe/Helm role profiles for Ghostlight; bounded migration/test contracts.
+- [ ] K7.1 Package immutable recipe/Helm role profiles for Ghostlight; bounded migration/test contracts. Partial Modal slice under issue #462 (related to #52) and PR #463, merged as `966f914` with contract CI #732 passing: unqualified app definition (digest-pinned Go build, operator/webhook secrets, web endpoint, keep-warm worker, migrate job) plus secret/deploy docs; nothing provisioned or run. See `docs/K7.1-MODAL-SCAFFOLD-EVIDENCE.md`.
 - [ ] K7.2 Run capacity profile, 10k socket and separate active-stream tests; publish raw reports.
 - [ ] K7.3 Run 6h+ soak and production-scale 24h qualification; CPU/RSS/FD/DB limits documented.
 - [ ] K7.4 Qualify PITR/region recovery, erasure journal, workflow continuity and external reconciliation.
