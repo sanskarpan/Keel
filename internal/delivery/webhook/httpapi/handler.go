@@ -80,6 +80,7 @@ func New(repo Repository, principals PrincipalResolver, authz Authorizer, keyRea
 	h.mux.HandleFunc("GET /v1/webhooks/reconciliation-runs", h.listRuns)
 	h.mux.HandleFunc("POST /v1/webhooks/endpoint-limits", h.setEndpointLimit)
 	h.mux.HandleFunc("POST /v1/webhooks/delivery-limits", h.setDeliveryBatchLimit)
+	h.mux.HandleFunc("GET /ui", h.serveUI)
 	return h, nil
 }
 

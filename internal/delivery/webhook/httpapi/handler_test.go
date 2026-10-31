@@ -423,6 +423,63 @@ func TestSetPolicyLimitsMapsErrors(t *testing.T) {
 	}
 }
 
+func TestServeUIRendersContentFreeDashboard(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := &testRepository{
+		candidates: []webhookpostgres.ReplayCandidateRecord{
+			candidateRecord(t, "delivery_0001", "endpoint_01", webhook.EndpointActive),
+		},
+		runs: []webhook.ReconciliationRunSummary{{
+			RunID: "rec_0123456789abcdef", RequestedBy: "operator@example.com",
+			FromCreatedAt: now.Add(-time.Hour), EventsScanned: 2, GapEvents: 1,
+			MissingDeliveries: 1, CreatedAt: now,
+		}},
+	}
+	response := httptest.NewRecorder()
+	newTestHandler(t, repo, true).ServeHTTP(response,
+		httptest.NewRequest(http.MethodGet, "/ui", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body)
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "text/html; charset=utf-8" {
+		t.Fatalf("content type = %q", contentType)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		"rec_0123456789abcdef", "delivery_0001", "endpoint_01", "read-only",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("dashboard missing %q:\n%s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{"key_2026", "https://", "secret"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("dashboard leaked %q:\n%s", forbidden, body)
+		}
+	}
+}
+
+func TestServeUIDeniesUnauthorized(t *testing.T) {
+	repo := &testRepository{}
+	response := httptest.NewRecorder()
+	newTestHandler(t, repo, false).ServeHTTP(response,
+		httptest.NewRequest(http.MethodGet, "/ui", nil))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("denied status = %d, want 403", response.Code)
+	}
+	handler, err := New(repo, testPrincipal{principal: Principal{
+		TenantID: testTenant(t), ActorRef: "operator@example.com",
+	}, ok: false}, testAuthorizer{allowed: true}, func(string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ui", nil))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401", response.Code)
+	}
+}
+
 func TestReplayRejectsMalformedBodies(t *testing.T) {
 	repo := &testRepository{}
 	for _, body := range []string{
