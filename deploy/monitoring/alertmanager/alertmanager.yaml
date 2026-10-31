@@ -1,0 +1,49 @@
+# Local Alertmanager routing for Keel webhook alerts (UNQUALIFIED).
+#
+# Routes critical alerts to a paging PagerDuty receiver and everything else to a
+# warning receiver. Integration keys are NOT committed: each receiver reads its Events
+# API v2 key from a secret file mounted at deploy time. Grouping uses only the fixed
+# service/component/alertname labels, matching the content-free metrics contract.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: keel-warning-pd
+  group_by: [service, component, alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity = "critical"]
+      receiver: keel-critical-pd
+      group_wait: 10s
+      repeat_interval: 30m
+      continue: false
+
+receivers:
+  - name: keel-critical-pd
+    pagerduty_configs:
+      - service_key_file: /run/secrets/pd-critical-key
+        severity: critical
+        description: '{{ .GroupLabels.alertname }}: {{ .CommonAnnotations.summary }}'
+        details:
+          service: '{{ .GroupLabels.service }}'
+          component: '{{ .GroupLabels.component }}'
+          alertname: '{{ .GroupLabels.alertname }}'
+          summary: '{{ .CommonAnnotations.summary }}'
+  - name: keel-warning-pd
+    pagerduty_configs:
+      - service_key_file: /run/secrets/pd-warning-key
+        severity: warning
+        description: '{{ .GroupLabels.alertname }}: {{ .CommonAnnotations.summary }}'
+        details:
+          service: '{{ .GroupLabels.service }}'
+          component: '{{ .GroupLabels.component }}'
+          alertname: '{{ .GroupLabels.alertname }}'
+          summary: '{{ .CommonAnnotations.summary }}'
+
+inhibit_rules:
+  # A down worker makes every warning derived from its gauges noise.
+  - source_matchers: [alertname = "KeelWebhookWorkerDown", severity = "critical"]
+    target_matchers: [severity = "warning"]
+    equal: [service, component]
