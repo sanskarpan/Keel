@@ -365,13 +365,38 @@ func TestPostgreSQLKafkaConsumerReplaysUncommittedDBEffectAcrossGroupRebalance(t
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The group is unique per run so committed offsets from earlier runs, local reruns or
+	// shared brokers can never move this test's fetch position. Drain pre-existing topic
+	// messages for this group before publishing: earlier tests write directly to this shared
+	// topic, and a fresh group starts at the earliest offset, so without the drain the
+	// redelivery sequence below would consume foreign bytes. Draining commits the group past
+	// history; this test's own publishes happen after and are unaffected.
+	groupID := "keel-k17-consumer-test-" + strings.ReplaceAll(nextUUID(), "-", "")
+	drain := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: topic, GroupID: groupID, MinBytes: 1, MaxBytes: 1 << 20, MaxWait: 100 * time.Millisecond, CommitInterval: 0, StartOffset: kafka.FirstOffset})
+	// The first fetch uses a generous timeout so group join and rebalance settle before
+	// concluding anything; later windows are short because a joined reader sees backlog fast.
+	drained := 0
+	warmupCtx, warmupCancel := context.WithTimeout(ctx, 5*time.Second)
+	message, err := drain.FetchMessage(warmupCtx)
+	warmupCancel()
+	for err == nil {
+		if err := drain.CommitMessages(ctx, message); err != nil {
+			_ = drain.Close()
+			t.Fatalf("drain pre-existing topic message: %v", err)
+		}
+		drained++
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		message, err = drain.FetchMessage(fetchCtx)
+		fetchCancel()
+	}
+	if err := drain.Close(); err != nil {
+		t.Fatalf("close drain reader: %v", err)
+	}
+	t.Logf("drained %d pre-existing topic messages", drained)
 	firstPublish, err := publisher.RunOnce(ctx, string(tenant), "consumer-rebalance-relay")
 	if err != nil || !firstPublish.Published || firstPublish.EventID != events[0].Metadata.EventID {
 		t.Fatalf("first order event publish=%+v err=%v", firstPublish, err)
 	}
-	// The group is unique per run so committed offsets from earlier runs, local reruns or
-	// shared brokers can never move this test's fetch position.
-	groupID := "keel-k17-consumer-test-" + strings.ReplaceAll(nextUUID(), "-", "")
 	reader1 := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: topic, GroupID: groupID, MinBytes: 1, MaxBytes: 1 << 20, MaxWait: 100 * time.Millisecond, CommitInterval: 0, StartOffset: kafka.FirstOffset})
 	consumer1, err := kafkarelay.NewConsumerWithReader(&failTargetCommitReader{GroupReader: reader1, eventID: events[0].Metadata.EventID}, processor)
 	if err != nil {
