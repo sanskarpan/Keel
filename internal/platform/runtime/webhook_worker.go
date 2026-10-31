@@ -27,6 +27,7 @@ import (
 
 const (
 	webhookDatabaseEnv        = "KEEL_WEBHOOK_DATABASE_URL"
+	webhookKeyFileEnv         = "KEEL_WEBHOOK_KEY_FILE"
 	webhookActiveKeyIDEnv     = "KEEL_WEBHOOK_ACTIVE_KEY_ID"
 	webhookActiveKeySecretEnv = "KEEL_WEBHOOK_ACTIVE_KEY_SECRET_B64"
 	webhookPreviousKeyIDEnv   = "KEEL_WEBHOOK_PREVIOUS_KEY_ID"
@@ -66,31 +67,44 @@ func loadWebhookWorkerSettings(environment config.Environment, lookup func(strin
 
 	activeID := strings.TrimSpace(lookup(webhookActiveKeyIDEnv))
 	activeSecret := strings.TrimSpace(lookup(webhookActiveKeySecretEnv))
-	if activeID == "" || activeSecret == "" {
-		return webhookWorkerSettings{}, errors.New("webhook worker active signing key is required")
-	}
-	active, err := webhookKey(activeID, activeSecret)
-	if err != nil {
-		return webhookWorkerSettings{}, err
-	}
 	previousID := strings.TrimSpace(lookup(webhookPreviousKeyIDEnv))
 	previousSecret := strings.TrimSpace(lookup(webhookPreviousSecretEnv))
-	if (previousID == "") != (previousSecret == "") {
-		return webhookWorkerSettings{}, errors.New("webhook worker previous signing key is incomplete")
-	}
-	var previous *webhook.Key
-	if previousID != "" {
-		key, err := webhookKey(previousID, previousSecret)
+	keyFile := strings.TrimSpace(lookup(webhookKeyFileEnv))
+	var err error
+	if keyFile != "" {
+		if activeID != "" || activeSecret != "" || previousID != "" || previousSecret != "" {
+			return webhookWorkerSettings{}, errors.New("webhook worker signing key source is ambiguous")
+		}
+		keyring, err := webhook.LoadKeyringFromFile(keyFile)
+		if err != nil {
+			return webhookWorkerSettings{}, errors.New("webhook worker signing key file is invalid")
+		}
+		settings.keyring = keyring
+	} else {
+		if activeID == "" || activeSecret == "" {
+			return webhookWorkerSettings{}, errors.New("webhook worker active signing key is required")
+		}
+		active, err := webhookKey(activeID, activeSecret)
 		if err != nil {
 			return webhookWorkerSettings{}, err
 		}
-		previous = &key
+		if (previousID == "") != (previousSecret == "") {
+			return webhookWorkerSettings{}, errors.New("webhook worker previous signing key is incomplete")
+		}
+		var previous *webhook.Key
+		if previousID != "" {
+			key, err := webhookKey(previousID, previousSecret)
+			if err != nil {
+				return webhookWorkerSettings{}, err
+			}
+			previous = &key
+		}
+		keyring, err := webhook.NewKeyring(active, previous)
+		if err != nil {
+			return webhookWorkerSettings{}, errors.New("webhook worker signing keyring is invalid")
+		}
+		settings.keyring = keyring
 	}
-	keyring, err := webhook.NewKeyring(active, previous)
-	if err != nil {
-		return webhookWorkerSettings{}, errors.New("webhook worker signing keyring is invalid")
-	}
-	settings.keyring = keyring
 
 	if raw := strings.TrimSpace(lookup(webhookPollIntervalEnv)); raw != "" {
 		value, err := time.ParseDuration(raw)

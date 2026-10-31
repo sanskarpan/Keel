@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +115,41 @@ func TestLoadWebhookWorkerSettingsRejectsInvalidConfiguration(t *testing.T) {
 				t.Fatalf("configuration error leaked a credential: %q", err)
 			}
 		})
+	}
+}
+
+func TestLoadWebhookWorkerSettingsAcceptsKeyFile(t *testing.T) {
+	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32)))
+	path := filepath.Join(t.TempDir(), "keys.json")
+	body := `{"active":{"id":"key_file_2026","secret_b64":"` + secret + `"}}`
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	values := validWebhookWorkerValues()
+	delete(values, webhookActiveKeyIDEnv)
+	delete(values, webhookActiveKeySecretEnv)
+	values[webhookKeyFileEnv] = path
+	settings, err := loadWebhookWorkerSettings(config.EnvironmentDevelopment, webhookLookup(values))
+	if err != nil {
+		t.Fatalf("key file settings rejected: %v", err)
+	}
+	if settings.keyring.ActiveKeyID() != "key_file_2026" {
+		t.Fatalf("active key = %q", settings.keyring.ActiveKeyID())
+	}
+}
+
+func TestLoadWebhookWorkerSettingsRejectsAmbiguousKeySource(t *testing.T) {
+	values := validWebhookWorkerValues()
+	values[webhookKeyFileEnv] = filepath.Join(t.TempDir(), "keys.json")
+	if _, err := loadWebhookWorkerSettings(config.EnvironmentDevelopment, webhookLookup(values)); err == nil {
+		t.Fatal("ambiguous key source was accepted")
+	}
+	values = validWebhookWorkerValues()
+	delete(values, webhookActiveKeyIDEnv)
+	delete(values, webhookActiveKeySecretEnv)
+	values[webhookKeyFileEnv] = filepath.Join(t.TempDir(), "missing.json")
+	if _, err := loadWebhookWorkerSettings(config.EnvironmentDevelopment, webhookLookup(values)); err == nil {
+		t.Fatal("missing key file was accepted")
 	}
 }
 
