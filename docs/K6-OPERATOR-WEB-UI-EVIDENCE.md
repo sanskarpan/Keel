@@ -1,6 +1,8 @@
 # K6 slice: read-only operator web UI
 
-Issue #459 (parent #51, checklist item K6). This slice adds a minimal read-only dashboard
+Issue #459 (parent #51, checklist item K6). PR #460 merged as
+`5ade46d094164eb7db46d062dbf0ae64c2f7bd7a`; contract CI #728 passed on reviewed head
+`6c20260da466f82dee3d5f8dfcc12454bb3b542a`. This slice adds a minimal read-only dashboard
 to the operator API. No migration was needed and no JSON API behavior changes.
 
 ## Contract
