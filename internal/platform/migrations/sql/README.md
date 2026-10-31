@@ -258,7 +258,11 @@ active endpoints; inactive-then windows and pre-history events report no gap, ma
 what historical repair can insert. Migration `0061_webhook_reconciliation_runs_api` adds an
 operator-gated recent-runs listing with per-run scanned/gap/missing/repaired/skipped counts and
 cursor watermarks, bounded to 100 rows; it exposes no event, endpoint, URL, payload or receiver
-content.
+content. Migration `0062_provider_callback_observations` adds an append-only provider observation
+trail recorded by the `keel_callback`-gated inbox alongside each claim outcome (applied,
+duplicate with redelivery delay, conflict), with forced RLS, revoked direct grants and an
+immutable-history trigger; it exposes no payload or receiver content and changes no apply
+semantics.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

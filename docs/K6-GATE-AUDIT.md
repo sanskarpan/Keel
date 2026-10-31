@@ -22,7 +22,7 @@ production identity, provider-adapter, deployment and operational qualifications
 
 ## Verification run
 
-Against an isolated PostgreSQL database with migrations through `0055`:
+Against an isolated PostgreSQL database with migrations through `0062`:
 
 ```text
 go test -count=1 ./internal/delivery/...
@@ -42,10 +42,15 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
 ## Blockers
 
 1. **No production operator identity or mounted replay route.** The API is unmounted and requires
-   injected authentication/authorization. K0 identity and network policy must qualify before the
-   gate can claim end-to-end authorization.
-2. **No real provider adapter or late/impossible callback policy.** The callback inbox proves the
-   dedup/conflict boundary, not a provider's late-event behavior or remote-state reconciliation.
+   injected authentication/authorization. The owner approves mounting operator routes where
+   genuinely needed; mounting is still blocked on injected identity adapters and network policy
+   (K0 identity), not on approval. The gate cannot claim end-to-end authorization until those
+   qualify.
+2. **No real provider adapter or late/impossible callback policy.** A code-owned synthetic HMAC
+   verifier covers local development and tests, and every claim outcome is recorded in an
+   append-only provider observation trail with redelivery delays; the callback inbox proves the
+   dedup/conflict boundary. A provider-owned adapter with signature/rotation/tenant rules, the
+   late-event business policy and remote-state reconciliation remain open.
 3. **Reconciliation is not production-complete.** Provider/callback observation reconciliation
    and an operator reconciliation UI are open; plan and repair both revalidate against endpoint
    state at each event's time, recent runs with repair totals are readable through the unmounted
