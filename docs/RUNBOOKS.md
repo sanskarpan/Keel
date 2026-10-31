@@ -182,9 +182,32 @@ Run `BenchmarkPostgreSQLSearchScoresTenantSkew` only against a fresh disposable 
 
 
 ## KB-18: Langfuse OTLP export (disabled by default)
-
 The internal Langfuse adapter has no application wiring or production endpoint. Do not enable it until K0.1 approves the identity/secret source, TLS egress host allowlist, Langfuse retention/deletion policy, and an operational owner. The immutable v1 adapter contract emits only bounded enum metadata, latency/retry values, and optional validated W3C traceparent correlation plus a random opaque context-vault UUID; never pass a tenant/user/business identifier or add prompt, completion, tool, or arbitrary attribute fields. A schema change requires a new version. It uses OTLP/HTTP `/api/public/otel/v1/traces`, Basic auth and `x-langfuse-ingestion-version: 4`; legacy Langfuse ingestion endpoints are not supported.
 
 The queue is memory-bounded and best-effort. A full queue increments a drop counter and does not retry the model/business operation. Export failure/timeout increments a local counter and does not expose provider error text or credentials. During shutdown, call `Close` with a bounded deadline; timed-out exports are abandoned. Do not log payloads or auth headers during diagnosis.
 
 Vault expiry, record deletion, and legal-hold release do not delete data already ingested by Langfuse, including copies or provider backups. Use the independently approved Langfuse [retention](https://langfuse.com/docs/administration/data-retention) and [deletion](https://langfuse.com/docs/administration/data-deletion) controls, account for asynchronous deletion and downstream copies, and verify provider-side completion evidence before asserting telemetry erasure. A telemetry outage does not authorize retrying model work or increasing queue bounds without review.
+
+## KB-19: Webhook alert response
+
+All twelve webhook alerts carry only the fixed `service`, `component` and `severity` labels plus the alert name; no tenant, endpoint, delivery or error string ever pages. Confirm the alert name first, then work the matching step. Never add identifiers to alert annotations, dashboard panels or tickets; use the operator API and the read-only `/ui` dashboard with a bearer grant for instance-level investigation.
+
+`KeelWebhookWorkerDown` (critical, pages): the worker process or its management endpoint is unreachable. Confirm the process is running and its loopback listener answers; check database reachability and recent deploys. While it fires, warning alerts derived from its gauges are inhibited as noise.
+
+`KeelWebhookDiscoveryStale` (critical, pages): no successful tenant-discovery pass for three poll intervals. Check database reachability, lease contention and worker logs; due gauges hold last-known values, so treat them as stale, not current.
+
+`KeelWebhookDiscoveryErrors` / `KeelWebhookTenantErrors` (warning): failing passes or batches. Check database/lease health and breaker deferrals in the worker log aggregates; per-delivery IDs appear in process logs only under the content-free contract.
+
+`KeelWebhookDueBacklog` / `KeelWebhookOldestDueAge` (warning): sustained backlog or aging head. Check worker capacity against tenant batch limits, receiver failures and breaker deferrals; confirm fanout is producing before assuming the worker is behind.
+
+`KeelWebhookExhaustion` (warning): deliveries reaching terminal exhaustion. Inspect the endpoint and receiver, then consider an audited replay through the operator API; replay preserves the retry budget and never manufactures attempts.
+
+`KeelWebhookStalledAttempts` (warning): due work with no started attempts. Check scheduler liveness, breaker deferrals, database locks and shutdown state.
+
+`KeelWebhookReconciliationPlanErrors` / `KeelWebhookReconciliationRepairErrors` (warning): failed pages or repairs. Cursors do not advance on failed pages and failed repairs insert nothing; check the operator database capability and advisory locks, then retry the operation.
+
+`KeelWebhookReconciliationSkips` (warning): repair skipped identities with no status history or an inactive-then endpoint. Skips are audited per repair run; nothing is lost, but pre-history events can never be reconstructed, so do not re-run repair expecting a different result.
+
+`KeelWebhookReconciliationGaps` (warning): high planned gap rate. Check endpoint churn and fanout health, and confirm repairs are keeping up through the runs history on the operator API.
+
+Exit when the firing alert has cleared for its full `for` duration and the underlying gauge (backlog, age, error rate) has returned to baseline. Paging escalation and production thresholds remain owner decisions; local rule thresholds are starting points, not SLOs.
