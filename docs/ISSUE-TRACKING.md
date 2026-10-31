@@ -163,7 +163,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | `K7.4` | task | K7.4 Qualify PITR/region recovery, erasure journal, workflow continuity and external reconciliation. | [Open issue](https://github.com/sanskarpan/Keel/issues/55) |
 
-| `K7.5` | task | K7.5 Install SLO/burn dashboards, alerts, kill switches and operator runbooks. | [Open issue](https://github.com/sanskarpan/Keel/issues/56) |
+| `K7.5` | task | K7.5 Install SLO/burn dashboards, alerts, kill switches and operator runbooks. Alertmanager slice: [issue #464](https://github.com/sanskarpan/Keel/issues/464), [PR #465](https://github.com/sanskarpan/Keel/pull/465) merged as `e99c860` (contract CI #733): local Alertmanager with PagerDuty routing sketch, validated live. | [Open issue](https://github.com/sanskarpan/Keel/issues/56) |
 
 | `K7.6` | task | K7.6 Run Ghostlight faults with Keel's independent invariants; record recovery and cost. | [Open issue](https://github.com/sanskarpan/Keel/issues/57) |
 

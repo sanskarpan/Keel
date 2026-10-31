@@ -76,7 +76,7 @@ Tasks retain their individual status until acceptance evidence passes. Record ow
 - [ ] K7.2 Run capacity profile, 10k socket and separate active-stream tests; publish raw reports.
 - [ ] K7.3 Run 6h+ soak and production-scale 24h qualification; CPU/RSS/FD/DB limits documented.
 - [ ] K7.4 Qualify PITR/region recovery, erasure journal, workflow continuity and external reconciliation.
-- [ ] K7.5 Install SLO/burn dashboards, alerts, kill switches and operator runbooks.
+- [ ] K7.5 Install SLO/burn dashboards, alerts, kill switches and operator runbooks. Partial Alertmanager slice under issue #464 (related to #56) and PR #465, merged as `e99c860` with contract CI #733 passing: local Alertmanager with critical/warning PagerDuty receivers (placeholder secret-file keys), fixed-label grouping, WorkerDown inhibition, and Prometheus wiring; `amtool`/`promtool`/Compose validate and the container boots healthy. No keys, escalation policy, or production deployment. See `docs/K7.5-ALERTMANAGER-EVIDENCE.md`.
 - [ ] K7.6 Run Ghostlight faults with Keel's independent invariants; record recovery and cost.
 - [ ] K7.7 Publish two Keel architecture articles with ADRs, diagrams and measured tradeoffs.
 - [ ] K7 technical gate: signed candidate/config/schema evidence; critical security/correctness gates pass; operational owner assigned. Paid launch also requires K8.
