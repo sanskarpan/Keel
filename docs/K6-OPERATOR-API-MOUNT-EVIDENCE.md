@@ -1,6 +1,8 @@
 # K6 slice: mounted operator API with bearer auth
 
-Issue #453 (parent #51, checklist item K6). This slice mounts the operator API as a new
+Issue #453 (parent #51, checklist item K6). PR #454 merged as
+`2e6973593591dfa8e5055807cbb366a9a390bf4c`; contract CI #719 passed on reviewed head
+`40ae45c7a2ce0abbed63b8fc12c3f25929d688a4`. This slice mounts the operator API as a new
 `operator-api` role guarded by per-tenant bearer tokens. No migration was needed and no
 handler behavior changes.
 
