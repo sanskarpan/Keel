@@ -14,6 +14,8 @@ Targets are for the qualified production-small envelope, measured in the tenant 
 | Outbox/projections | p99 <=5s from accepted command to applied projection; oldest pending age <30s normally |
 | Workflow intent | p99 <=30s to durable Temporal start/signal acknowledgement |
 | Webhook scheduling | 99% eligible deliveries first attempted within 30s; receiver success/retry is a separate integration SLI |
+| Webhook delivery success | 99% of started attempts end `delivered` over a 30-day rolling window; `failed` and `exhausted` are the only error outcomes (`retry_scheduled`, `deferred`, `skipped` are flow control) |
+| Webhook backlog freshness | 99.5% of evaluation time with oldest due age under one hour (design target; signaled by the existing oldest-due alert until a gauge-SLO recording exists) |
 | Usage | Confirmed ledger writes accompany completion; rollup freshness <=5m; unknown provider charges explicitly visible |
 
 Use operation templates/status classifications, not arbitrary URLs as metric labels. Report excluded requests and queue rejection rates to avoid gaming availability.
