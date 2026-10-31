@@ -28,6 +28,10 @@ func RegistryFor(cfg config.Config) Registry {
 		return Registry{config.RoleWebhookWorker: func(ctx context.Context) error {
 			return runWebhookWorker(ctx, cfg, os.Getenv)
 		}}
+	case config.RoleOperatorAPI:
+		return Registry{config.RoleOperatorAPI: func(ctx context.Context) error {
+			return runOperatorAPI(ctx, cfg, os.Getenv)
+		}}
 	default:
 		return Registry{}
 	}

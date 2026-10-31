@@ -106,6 +106,16 @@ func (k *Keyring) ActiveKeyID() string {
 	return k.active.ID
 }
 
+// HasKey reports whether the keyring holds a key reference. The operator API uses it for
+// replay-candidate readiness without signing anything.
+func (k *Keyring) HasKey(keyID string) bool {
+	if k == nil {
+		return false
+	}
+	_, ok := k.keyFor(keyID)
+	return ok
+}
+
 // Rotated returns a keyring whose active key is next and whose only previous key is the current
 // active key. The receiver keeps verifying old signatures for one overlap window.
 func (k *Keyring) Rotated(next Key) (*Keyring, error) {
