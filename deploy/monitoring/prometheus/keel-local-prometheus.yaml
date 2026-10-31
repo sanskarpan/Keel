@@ -6,6 +6,7 @@ rule_files:
   - /etc/prometheus/keel-rate-limit-observer-alerts.yaml
   - /etc/prometheus/keel-webhook-worker-alerts.yaml
   - /etc/prometheus/keel-webhook-reconciliation-alerts.yaml
+  - /etc/prometheus/keel-webhook-slo-alerts.yaml
 
 alerting:
   alertmanagers:

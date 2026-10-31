@@ -1,0 +1,55 @@
+# Webhook delivery SLO burn alerts (UNQUALIFIED thresholds).
+#
+# SLO-1 (owner-defined 2026-11-01): at least 99% of started delivery attempts end
+# `delivered`, evaluated over a 30-day rolling window. Error outcomes are `failed` and
+# `exhausted` only: `retry_scheduled`, `deferred` and `skipped` are normal flow control,
+# not errors. A zero-attempt rate yields NaN, which never fires.
+#
+# The local 2-hour TSDB cannot evaluate day-scale windows; these rules are validated for
+# syntax here and become meaningful on a production Prometheus with full retention.
+groups:
+  - name: keel.webhook-slo
+    rules:
+      - alert: KeelWebhookDeliverySuccessFastBurn
+        expr: |
+          (
+            sum(rate(keel_webhook_outcomes_total{outcome=~"failed|exhausted"}[1h]))
+            /
+            sum(rate(keel_webhook_attempts_started_total[1h]))
+          ) > 0.02
+          and
+          (
+            sum(rate(keel_webhook_outcomes_total{outcome=~"failed|exhausted"}[5m]))
+            /
+            sum(rate(keel_webhook_attempts_started_total[5m]))
+          ) > 0.02
+        for: 2m
+        labels:
+          severity: critical
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook error budget is burning fast
+          description: "More than 2% of delivery attempts failed or exhausted over the last hour and the last five minutes. Page: check receivers, breaker states and the operator replay queue."
+
+      - alert: KeelWebhookDeliverySuccessSlowBurn
+        expr: |
+          (
+            sum(rate(keel_webhook_outcomes_total{outcome=~"failed|exhausted"}[6h]))
+            /
+            sum(rate(keel_webhook_attempts_started_total[6h]))
+          ) > 0.01
+          and
+          (
+            sum(rate(keel_webhook_outcomes_total{outcome=~"failed|exhausted"}[30m]))
+            /
+            sum(rate(keel_webhook_attempts_started_total[30m]))
+          ) > 0.01
+        for: 30m
+        labels:
+          severity: warning
+          service: keel
+          component: webhook-worker
+        annotations:
+          summary: Keel webhook error budget is burning slowly
+          description: More than 1% of delivery attempts failed or exhausted over the last six hours and the last thirty minutes. Check endpoint health trends and receiver error classes before the fast-burn threshold is reached.

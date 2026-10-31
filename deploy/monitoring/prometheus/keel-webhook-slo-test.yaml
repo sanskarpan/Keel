@@ -1,0 +1,57 @@
+# Synthetic evaluation of the webhook SLO burn alerts. Run locally with:
+# promtool test rules keel-webhook-slo-test.yaml
+# The local 2-hour TSDB cannot evaluate these windows; this file proves the PromQL fires
+# (and stays silent) on the intended shapes.
+rule_files:
+  - keel-webhook-slo-alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'keel_webhook_attempts_started_total{job="keel-webhook-worker"}'
+        values: 0+100x420
+      - series: 'keel_webhook_outcomes_total{job="keel-webhook-worker",outcome="failed"}'
+        values: 0+3x420
+      - series: 'keel_webhook_outcomes_total{job="keel-webhook-worker",outcome="exhausted"}'
+        values: 0+0x420
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: KeelWebhookDeliverySuccessFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: keel
+              component: webhook-worker
+              alertname: KeelWebhookDeliverySuccessFastBurn
+            exp_annotations:
+              summary: Keel webhook error budget is burning fast
+              description: "More than 2% of delivery attempts failed or exhausted over the last hour and the last five minutes. Page: check receivers, breaker states and the operator replay queue."
+      - eval_time: 7h
+        alertname: KeelWebhookDeliverySuccessSlowBurn
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: keel
+              component: webhook-worker
+              alertname: KeelWebhookDeliverySuccessSlowBurn
+            exp_annotations:
+              summary: Keel webhook error budget is burning slowly
+              description: "More than 1% of delivery attempts failed or exhausted over the last six hours and the last thirty minutes. Check endpoint health trends and receiver error classes before the fast-burn threshold is reached."
+
+  - interval: 1m
+    input_series:
+      - series: 'keel_webhook_attempts_started_total{job="keel-webhook-worker"}'
+        values: 0+100x420
+      - series: 'keel_webhook_outcomes_total{job="keel-webhook-worker",outcome="failed"}'
+        values: 0+0x420
+      - series: 'keel_webhook_outcomes_total{job="keel-webhook-worker",outcome="exhausted"}'
+        values: 0+0x420
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: KeelWebhookDeliverySuccessFastBurn
+        exp_alerts: []
+      - eval_time: 7h
+        alertname: KeelWebhookDeliverySuccessSlowBurn
+        exp_alerts: []
