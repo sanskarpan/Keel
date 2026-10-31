@@ -1,4 +1,4 @@
-.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-rate-limit-observer local-webhook-worker local-monitoring-up local-monitoring-down local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
+.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-rate-limit-observer local-webhook-worker local-operator-api local-monitoring-up local-monitoring-down local-orders-test local-supplier-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
 
 COMPOSE_FILE := deploy/compose/compose.yaml
 
@@ -93,6 +93,14 @@ local-webhook-worker: local-migrate
 	KEEL_WEBHOOK_TENANT_LIMIT=100 \
 	KEEL_WEBHOOK_BATCH=5 \
 	KEEL_WEBHOOK_LEASE_DURATION=120s \
+	GOTOOLCHAIN=local go run ./cmd/keel
+
+local-operator-api: local-migrate
+	KEEL_ROLE=operator-api \
+	KEEL_ENVIRONMENT=development \
+	KEEL_LISTEN_ADDRESS=127.0.0.1:18083 \
+	KEEL_OPERATOR_DATABASE_URL='postgres://keel_local_operator:keel-operator-local-only@127.0.0.1:54329/postgres?sslmode=disable' \
+	KEEL_OPERATOR_API_TOKENS='22222222-2222-4222-8222-222222222222:local-ops:local-only-operator-token-0123456789abcdef' \
 	GOTOOLCHAIN=local go run ./cmd/keel
 
 local-monitoring-up: local-up

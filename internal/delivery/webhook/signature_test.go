@@ -302,6 +302,9 @@ func TestKeyringNilSafety(t *testing.T) {
 	if ring.ActiveKeyID() != "" {
 		t.Fatalf("expected an empty key id, got %q", ring.ActiveKeyID())
 	}
+	if ring.HasKey("key_2026") {
+		t.Fatal("nil keyring reported a held key")
+	}
 	if _, err := ring.Rotated(testNextKey); !errors.Is(err, ErrInvalidKeyring) {
 		t.Fatalf("expected ErrInvalidKeyring, got %v", err)
 	}

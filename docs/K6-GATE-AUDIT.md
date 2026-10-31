@@ -41,11 +41,7 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
 
 ## Blockers
 
-1. **No production operator identity or mounted replay route.** The API is unmounted and requires
-   injected authentication/authorization. The owner approves mounting operator routes where
-   genuinely needed; mounting is still blocked on injected identity adapters and network policy
-   (K0 identity), not on approval. The gate cannot claim end-to-end authorization until those
-   qualify.
+1. **Production operator identity: bearer-token mounting landed.** The `operator-api` role serves the operator handler on its own listener with per-tenant bearer tokens (constant-time compare, scoped grants), loopback-only by default with an explicit non-loopback opt-out, and DB readiness probes. OIDC/mTLS and production deployment remain open.
 2. **No real provider adapter or late/impossible callback policy.** A code-owned synthetic HMAC
    verifier covers local development and tests, and every claim outcome is recorded in an
    append-only provider observation trail with redelivery delays; the callback inbox proves the
