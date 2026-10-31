@@ -175,6 +175,9 @@ func (i *Inbox) Accept(ctx context.Context, request VerificationRequest, apply A
 			event.Provider, event.ProviderEventID).Scan(&appliedAt); err != nil {
 			return Receipt{}, fmt.Errorf("confirm provider callback: %w", err)
 		}
+		if err := i.recordObservation(ctx, tx, event, ObservationApplied, sql.NullInt64{}); err != nil {
+			return Receipt{}, err
+		}
 		receipt.AppliedAt = appliedAt.UTC()
 	case "duplicate":
 		if !recordedAt.Valid {
@@ -182,7 +185,14 @@ func (i *Inbox) Accept(ctx context.Context, request VerificationRequest, apply A
 		}
 		receipt.Duplicate = true
 		receipt.AppliedAt = recordedAt.Time.UTC()
+		if err := i.recordObservation(ctx, tx, event, ObservationDuplicate,
+			redeliveryDelayMs(recordedAt.Time)); err != nil {
+			return Receipt{}, err
+		}
 	case "conflict", "tenant_mismatch":
+		if err := i.recordObservation(ctx, tx, event, ObservationConflict, sql.NullInt64{}); err != nil {
+			return Receipt{}, err
+		}
 		if err := tx.Commit(); err != nil {
 			return Receipt{}, fmt.Errorf("commit callback conflict: %w", err)
 		}
