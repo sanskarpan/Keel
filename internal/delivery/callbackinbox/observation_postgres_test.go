@@ -216,13 +216,17 @@ func TestPostgreSQLProviderRegistryIsolatesTenants(t *testing.T) {
 			Signature: []byte(hex.EncodeToString(mac.Sum(nil))), Timestamp: stamp,
 		}
 	}
+	// The shared event ID is random per run: CI executes the package twice against one
+	// disposable database, and the claim is idempotent per identity, so a fixed ID would
+	// collide with the previous run's rows under a new tenant.
+	sharedEventID := "evt_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	// The same provider event ID under two providers applies once per tenant with no
 	// conflict: provider identity is part of the claim.
 	for _, test := range []struct{ provider, secret string }{
 		{"provider_one", "one"},
 		{"provider_two", "two"},
 	} {
-		receipt, err := inbox.Accept(ctx, sign(test.provider, test.secret, "evt_shared"),
+		receipt, err := inbox.Accept(ctx, sign(test.provider, test.secret, sharedEventID),
 			noopApplier)
 		if err != nil {
 			t.Fatalf("accept %s: %v", test.provider, err)
