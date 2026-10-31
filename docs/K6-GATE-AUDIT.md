@@ -49,10 +49,9 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
    dedup/conflict boundary. A provider-owned adapter with vendor-specific signature, rotation
    and tenant rules, the late-event business policy and remote-state reconciliation remain open.
 3. **Reconciliation is not production-complete.** Provider/callback observation reconciliation
-   and an operator reconciliation UI are open; plan and repair both revalidate against endpoint
-   state at each event's time, recent runs with repair totals are readable through the unmounted
-   operator API, and plan/repair counters exist in the local metrics recorder behind a nil-safe
-   store hook. The scheduler accepts an opt-in dry-run scan hook, but no runtime wires it yet
+   is open; plan and repair both revalidate against endpoint state at each event's time, recent runs with repair totals are
+   readable through the operator API and a read-only web UI, and plan/repair counters exist in the local
+   metrics recorder behind a nil-safe store hook. The scheduler accepts an opt-in dry-run scan hook, but no runtime wires it yet
    because planning requires the operator capability.
 4. **Quotas are partial.** A configurable active-endpoint policy (default 100) and a per-tenant per-pass delivery lease policy (default 5, at most 100) exist; the scheduler leases at most the minimum of the process batch and the tenant limit and leaves the remainder due. Global due-backlog caps, attempt quotas, fair-share ordering and over-cap remediation do not.
 5. **Operational qualification is partial.** Source-controlled local alert rules for delivery
