@@ -61,8 +61,8 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
 5. **Operational qualification is partial.** Source-controlled local alert rules for delivery
    and reconciliation plus a dashboard contract exist; there is no Alertmanager, paging owner,
    hosted dashboard, production scrape or SLO qualification.
-6. **Key management is process-global.** The worker keyring holds one active plus at most one
-   previous key; there is no per-endpoint key provider/KMS integration.
+6. **Key management is process-global with file sourcing.** The worker keyring holds one active plus at most one
+   previous key, sourced from base64 environment secrets or a JSON key file; there is no per-endpoint key provider/KMS integration.
 7. **Repair semantics are operator-explicit.** Plan and repair revalidate each event against
    the endpoint status recorded at the event's time; inactive-then or history-less identities
    never become gaps, and stale gap rows repair to audited skips instead of inserts.
