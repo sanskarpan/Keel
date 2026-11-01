@@ -15,9 +15,14 @@ in `docs/TECHNOLOGY-BASELINE.md`.
   breaks both), and suffix pooler usernames with the project ref
   (`role.<project-ref>`) or routing fails with `ENOIDENTIFIER`. Runtime roles may use
   the transaction-mode port (all capability functions are transaction-scoped), and the
-  pooler maps `role.<ref>` back to the bare role so RLS checks resolve. Staging and
+  pooler maps `role.<ref>` back to the bare role so RLS checks resolve. Transaction-mode
+  runtime DSNs must also set `default_query_exec_mode=exec`, because pgx's
+  prepared-statement cache leaks across pooled sessions and fails with
+  `prepared statement "stmtcache_..." already exists`. Staging and
   production database URLs must use `sslmode=verify-full` (enforced by the role settings
-  loader); the bootstrap itself runs over a session-mode connection.
+  loader) together with `sslrootcert=/etc/keel/supabase-ca.pem`, since the pooler presents
+  a private CA (the committed public bundle in this directory); the bootstrap itself runs
+  over a session-mode connection.
   Designated staging host is recorded in `docs/TECHNOLOGY-BASELINE.md`; it must be
   reachable from both this machine (for migrate/roles bootstrap) and Modal's network
   before proceeding.
