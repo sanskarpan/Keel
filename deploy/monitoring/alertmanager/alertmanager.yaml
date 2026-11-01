@@ -25,13 +25,13 @@ route:
 receivers:
   - name: keel-critical-ops
     webhook_configs:
-      - url: http://127.0.0.1:19094/hooks/ops-alerts
+      - url: http://127.0.0.1:19095/hooks/ops-alerts
         send_resolved: true
         http_config:
           follow_redirects: false
   - name: keel-warning-ops
     webhook_configs:
-      - url: http://127.0.0.1:19094/hooks/ops-alerts
+      - url: http://127.0.0.1:19095/hooks/ops-alerts
         send_resolved: true
         http_config:
           follow_redirects: false
