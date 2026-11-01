@@ -21,7 +21,22 @@ GO_BUILDER = "golang@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d38
 keel_image = (
     modal.Image.from_registry(GO_BUILDER)
     .env({"GOTOOLCHAIN": "local", "CGO_ENABLED": "0"})
-    .add_local_dir("../..", remote_path="/repo")
+    # Only what the build needs: the git object store and local caches are irrelevant
+    # remotely and would slow every image build.
+    .add_local_dir(
+        "../..",
+        remote_path="/repo",
+        ignore=[
+            ".git",
+            ".env",
+            ".env.*",
+            "**/__pycache__",
+            "**/*.pyc",
+            "deploy/modal",
+            "docs",
+            "research",
+        ],
+    )
     .run_commands("cd /repo && go build -o /keel ./cmd/keel")
 )
 
