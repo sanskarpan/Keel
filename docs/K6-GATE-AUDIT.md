@@ -46,7 +46,8 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
    verifier covers local development and tests, generalized into a configured multi-provider
    registry with per-provider secrets and tenant isolation; every claim outcome is recorded in an
    append-only provider observation trail with redelivery delays; the callback inbox proves the
-   dedup/conflict boundary. A provider-owned adapter with vendor-specific signature, rotation
+   dedup/conflict boundary. Owner direction 2026-11-01 confirms generic HMAC as the provider
+   direction, so vendor-specific schemes are out of scope unless a vendor is named. A provider-owned adapter with vendor-specific signature, rotation
    and tenant rules, the late-event business policy and remote-state reconciliation remain open.
 3. **Reconciliation is not production-complete.** Provider/callback observation reconciliation
    is open; plan and repair both revalidate against endpoint state at each event's time, recent runs with repair totals are
@@ -55,7 +56,7 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
    because planning requires the operator capability.
 4. **Quotas are partial.** A configurable active-endpoint policy (default 100) and a per-tenant per-pass delivery lease policy (default 5, at most 100) exist; the scheduler leases at most the minimum of the process batch and the tenant limit and leaves the remainder due. Global due-backlog caps, attempt quotas, fair-share ordering and over-cap remediation do not.
 5. **Operational qualification is partial.** Source-controlled local alert rules for delivery
-   and reconciliation, SLO burn alerts, a dashboard contract and an alert response runbook exist, with local Alertmanager routing sketched; there is no paging key owner,
+   and reconciliation, SLO burn alerts, a dashboard contract and an alert response runbook exist, with local Alertmanager routing to a generic webhook placeholder (PagerDuty removed per owner direction); there is no delivery endpoint owner,
    hosted dashboard, production scrape or production SLO qualification.
 6. **Key management is process-global with file sourcing.** The worker keyring holds one active plus at most one
    previous key, sourced from base64 environment secrets or a JSON key file; there is no per-endpoint key provider/KMS integration.

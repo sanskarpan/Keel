@@ -9,6 +9,9 @@ in `docs/TECHNOLOGY-BASELINE.md`.
 
 - An external managed PostgreSQL database with pgvector (Modal has no stateful Compose
   equivalent; Kafka/Redis/Temporal-backed roles are out of scope for this scaffold).
+  Designated staging host is recorded in `docs/TECHNOLOGY-BASELINE.md`; it must be
+  reachable from both this machine (for migrate/roles bootstrap) and Modal's network
+  before proceeding.
 - Tenant roles bootstrapped and migrations applied, equivalent to the local
   `20-keel-tenant-roles.sql` plus `keel migrate` against the managed database.
 - A Modal account with `modal` CLI authenticated (verified with CLI 1.5.5; definitions
