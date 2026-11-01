@@ -156,6 +156,7 @@ func runOperatorAPI(ctx context.Context, cfg config.Config, lookup func(string) 
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/v1/webhooks/", handler)
+	mux.Handle("/ui", handler)
 	healthHandler := health.NewHandler(buildinfo.Current(), probe)
 	healthHandler.MarkStartupComplete()
 	mux.Handle("/", healthHandler)
