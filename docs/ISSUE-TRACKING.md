@@ -155,7 +155,7 @@ This index maps every unchecked item in [`CHECKLIST.md`](CHECKLIST.md) to its Gi
 
 | Checklist ID | Type | Checklist item | GitHub issue |
 |---|---|---|---|
-| `K7.1` | task | K7.1 Package immutable recipe/Helm role profiles for Ghostlight; bounded migration/test contracts. Modal scaffold: [issue #462](https://github.com/sanskarpan/Keel/issues/462), [PR #463](https://github.com/sanskarpan/Keel/pull/463) merged as `966f914` (contract CI #732): unqualified app definition with secrets wiring and docs; nothing provisioned or run. | [Open issue](https://github.com/sanskarpan/Keel/issues/52) |
+| `K7.1` | task | K7.1 Package immutable recipe/Helm role profiles for Ghostlight; bounded migration/test contracts. Modal scaffold: [issue #462](https://github.com/sanskarpan/Keel/issues/462), [PR #463](https://github.com/sanskarpan/Keel/pull/463) merged as `966f914` (contract CI #732): unqualified app definition with secrets wiring and docs; nothing provisioned or run; staging slice PR #473 merged as `53adef9` (contract CI #751): Supabase staging bootstrap (roles + 62 migrations) and live Modal deployment with verified health/auth/UI. | [Open issue](https://github.com/sanskarpan/Keel/issues/52) |
 
 | `K7.2` | task | K7.2 Run capacity profile, 10k socket and separate active-stream tests; publish raw reports. | [Open issue](https://github.com/sanskarpan/Keel/issues/53) |
 
