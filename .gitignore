@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 *.pem
+!deploy/modal/supabase-ca-2021.pem
 *.key
 secrets/
 .DS_Store
