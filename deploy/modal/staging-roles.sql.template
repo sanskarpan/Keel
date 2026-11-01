@@ -1,0 +1,163 @@
+-- Staging role/bootstrap DDL for a managed PostgreSQL database (e.g. Supabase).
+--
+-- Mirrors deploy/compose/init/20-keel-tenant-roles.sql for the abstract capability roles,
+-- schemas and helper function, but creates NO local-synthetic logins: staging logins use
+-- fresh passwords substituted for the __STAGING_*_PASSWORD__ placeholders at apply time and
+-- are never committed. The managed `postgres` login is not a superuser, so this file avoids
+-- ALTER ROLE attribute changes (roles are created with final attributes) and instead GRANTs
+-- each abstract role back to the bootstrap login so SET ROLE works for owned DDL.
+--
+-- Apply (single transaction, passwords via environment, never on disk):
+--   1. Substitute the three placeholders with generated secrets.
+--   2. Execute the whole file as one statement batch over a session-mode connection.
+--   3. Run `keel migrate` with the migrator staging DSN over a session-mode connection.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_schema_owner') THEN
+        CREATE ROLE keel_schema_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_context_owner') THEN
+        CREATE ROLE keel_context_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_context_vault') THEN
+        CREATE ROLE keel_context_vault NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_context_policy') THEN
+        CREATE ROLE keel_context_policy NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_context_erasure') THEN
+        CREATE ROLE keel_context_erasure NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_context_erasure_worker') THEN
+        CREATE ROLE keel_context_erasure_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_context_legal_hold') THEN
+        CREATE ROLE keel_context_legal_hold NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_context_replay') THEN
+        CREATE ROLE keel_context_replay NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_callback') THEN
+        CREATE ROLE keel_callback NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_webhook') THEN
+        CREATE ROLE keel_webhook NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_app') THEN
+        CREATE ROLE keel_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_budget_control') THEN
+        CREATE ROLE keel_budget_control NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_rate_control') THEN
+        CREATE ROLE keel_rate_control NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_rate_status') THEN
+        CREATE ROLE keel_rate_status NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_ai_worker') THEN
+        CREATE ROLE keel_ai_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_worker') THEN
+        CREATE ROLE keel_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_projector') THEN
+        CREATE ROLE keel_projector NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_operator') THEN
+        CREATE ROLE keel_operator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_file_processor') THEN
+        CREATE ROLE keel_file_processor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_retrieval_indexer') THEN
+        CREATE ROLE keel_retrieval_indexer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_agent') THEN
+        CREATE ROLE keel_agent NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+END
+$$;
+
+-- The bootstrap login needs membership to SET ROLE for the owned DDL below. As the
+-- creator of these roles it may grant them to itself (verified on Supabase Postgres 17).
+GRANT keel_context_owner TO postgres;
+GRANT keel_schema_owner TO postgres;
+
+CREATE SCHEMA IF NOT EXISTS keel_private AUTHORIZATION keel_context_owner;
+CREATE SCHEMA IF NOT EXISTS tenant_data AUTHORIZATION keel_schema_owner;
+CREATE SCHEMA IF NOT EXISTS keel_meta AUTHORIZATION keel_schema_owner;
+ALTER SCHEMA keel_private OWNER TO keel_context_owner;
+ALTER SCHEMA tenant_data OWNER TO keel_schema_owner;
+ALTER SCHEMA keel_meta OWNER TO keel_schema_owner;
+REVOKE ALL ON SCHEMA keel_meta FROM PUBLIC;
+GRANT USAGE ON SCHEMA keel_private TO keel_app, keel_budget_control, keel_rate_control, keel_ai_worker, keel_worker, keel_projector, keel_operator, keel_file_processor, keel_retrieval_indexer, keel_context_vault, keel_context_policy, keel_context_erasure, keel_context_erasure_worker, keel_context_legal_hold, keel_context_replay, keel_callback, keel_webhook, keel_agent;
+GRANT USAGE ON SCHEMA tenant_data TO keel_app, keel_worker, keel_agent;
+
+SET ROLE keel_context_owner;
+CREATE TABLE IF NOT EXISTS keel_private.agent_role_tenant (
+    role_name name PRIMARY KEY,
+    tenant_id uuid NOT NULL,
+    provisioned_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+REVOKE ALL ON keel_private.agent_role_tenant FROM PUBLIC, keel_app, keel_worker, keel_agent;
+CREATE OR REPLACE FUNCTION keel_private.current_tenant_id()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, keel_private, pg_temp
+AS $$
+    SELECT CASE
+        WHEN pg_catalog.pg_has_role(session_user, 'keel_agent', 'MEMBER') THEN (
+            SELECT mapping.tenant_id
+            FROM keel_private.agent_role_tenant AS mapping
+            WHERE mapping.role_name = session_user::name
+        )
+        ELSE nullif(pg_catalog.current_setting('keel.tenant_id', true), '')::uuid
+    END
+$$;
+REVOKE ALL ON FUNCTION keel_private.current_tenant_id() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION keel_private.current_tenant_id() TO keel_app, keel_budget_control, keel_rate_control, keel_ai_worker, keel_worker, keel_projector, keel_operator, keel_file_processor, keel_retrieval_indexer, keel_context_vault, keel_context_policy, keel_context_erasure, keel_context_erasure_worker, keel_context_legal_hold, keel_context_replay, keel_callback, keel_webhook, keel_agent;
+RESET ROLE;
+GRANT USAGE ON SCHEMA keel_private TO keel_schema_owner;
+GRANT EXECUTE ON FUNCTION keel_private.current_tenant_id() TO keel_schema_owner;
+
+SET ROLE keel_schema_owner;
+CREATE TABLE IF NOT EXISTS tenant_data.rls_probe (
+    tenant_id uuid NOT NULL,
+    probe_id uuid NOT NULL,
+    marker text NOT NULL CHECK (length(marker) BETWEEN 1 AND 80),
+    PRIMARY KEY (tenant_id, probe_id)
+);
+ALTER TABLE tenant_data.rls_probe ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_data.rls_probe FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON tenant_data.rls_probe;
+CREATE POLICY tenant_isolation ON tenant_data.rls_probe
+    TO keel_app, keel_worker, keel_agent
+    USING (tenant_id = (SELECT keel_private.current_tenant_id()))
+    WITH CHECK (tenant_id = (SELECT keel_private.current_tenant_id()));
+RESET ROLE;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_data.rls_probe TO keel_app;
+GRANT SELECT, INSERT, UPDATE ON tenant_data.rls_probe TO keel_worker;
+GRANT SELECT ON tenant_data.rls_probe TO keel_agent;
+
+-- Staging logins. Passwords are substituted at apply time and never committed.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_staging_operator') THEN
+        CREATE ROLE keel_staging_operator LOGIN PASSWORD '__STAGING_OPERATOR_PASSWORD__' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_staging_webhook') THEN
+        CREATE ROLE keel_staging_webhook LOGIN PASSWORD '__STAGING_WEBHOOK_PASSWORD__' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_staging_migrator') THEN
+        CREATE ROLE keel_staging_migrator LOGIN PASSWORD '__STAGING_MIGRATOR_PASSWORD__' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
+END
+$$;
+
+GRANT keel_operator TO keel_staging_operator;
+GRANT keel_webhook TO keel_staging_webhook;
+GRANT keel_schema_owner TO keel_staging_migrator;

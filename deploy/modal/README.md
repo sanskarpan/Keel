@@ -9,6 +9,15 @@ in `docs/TECHNOLOGY-BASELINE.md`.
 
 - An external managed PostgreSQL database with pgvector (Modal has no stateful Compose
   equivalent; Kafka/Redis/Temporal-backed roles are out of scope for this scaffold).
+  Verified 2026-11-01 against Supabase Postgres 17 (pgvector 0.8.2) through its pooler:
+  use the **session-mode** pooler port for migrations and role bootstrap (the migration
+  runner needs session semantics for `SET ROLE` and advisory locks; transaction mode
+  breaks both), and suffix pooler usernames with the project ref
+  (`role.<project-ref>`) or routing fails with `ENOIDENTIFIER`. Runtime roles may use
+  the transaction-mode port (all capability functions are transaction-scoped), and the
+  pooler maps `role.<ref>` back to the bare role so RLS checks resolve. Staging and
+  production database URLs must use `sslmode=verify-full` (enforced by the role settings
+  loader); the bootstrap itself runs over a session-mode connection.
   Designated staging host is recorded in `docs/TECHNOLOGY-BASELINE.md`; it must be
   reachable from both this machine (for migrate/roles bootstrap) and Modal's network
   before proceeding.
