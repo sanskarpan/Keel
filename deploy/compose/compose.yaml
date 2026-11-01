@@ -135,7 +135,7 @@ services:
       - --config.file=/etc/alertmanager/alertmanager.yaml
       - --storage.path=/alertmanager
       - --web.listen-address=127.0.0.1:19093
-      - --cluster.listen-address=127.0.0.1:19094
+      - --cluster.listen-address=127.0.0.1:19096
     volumes:
       - ../monitoring/alertmanager/alertmanager.yaml:/etc/alertmanager/alertmanager.yaml:ro
     read_only: true
@@ -147,6 +147,23 @@ services:
     pids_limit: 128
     mem_limit: 128m
     cpus: 0.5
+    restart: unless-stopped
+
+  alert-sink:
+    image: python:3.12-alpine@sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8
+    profiles: [monitoring]
+    network_mode: host
+    command: ["python", "/sink/sink.py"]
+    volumes:
+      - ../monitoring/alert-sink/sink.py:/sink/sink.py:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
     restart: unless-stopped
 
 networks:

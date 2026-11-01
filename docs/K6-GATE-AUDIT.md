@@ -56,7 +56,7 @@ alert/config files and `docker compose --profile monitoring config --quiet` pass
    because planning requires the operator capability.
 4. **Quotas are partial.** A configurable active-endpoint policy (default 100) and a per-tenant per-pass delivery lease policy (default 5, at most 100) exist; the scheduler leases at most the minimum of the process batch and the tenant limit and leaves the remainder due. Global due-backlog caps, attempt quotas, fair-share ordering and over-cap remediation do not.
 5. **Operational qualification is partial.** Source-controlled local alert rules for delivery
-   and reconciliation, SLO burn alerts, a dashboard contract and an alert response runbook exist, with local Alertmanager routing to a generic webhook placeholder (PagerDuty removed per owner direction); there is no delivery endpoint owner,
+   and reconciliation, SLO burn alerts, a dashboard contract and an alert response runbook exist, with local Alertmanager routing to a working local alert sink (PagerDuty removed per owner direction; any free incoming-webhook URL can replace the two receiver URLs); there is no escalation or on-call ownership,
    hosted dashboard, production scrape or production SLO qualification.
 6. **Key management is process-global with file sourcing.** The worker keyring holds one active plus at most one
    previous key, sourced from base64 environment secrets or a JSON key file; there is no per-endpoint key provider/KMS integration.
