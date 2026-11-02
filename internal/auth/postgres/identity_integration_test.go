@@ -1,7 +1,9 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"os"
@@ -176,7 +178,8 @@ func TestPostgreSQLIdentityBootstrapAndSessionLifecycle(t *testing.T) {
 		 WHERE n.nspname='keel_meta'
 		   AND c.relname IN ('identity_principals','identity_credentials',
 		                     'identity_email_verifications','identity_sessions',
-		                     'identity_password_resets','identity_login_throttle')
+		                     'identity_password_resets','identity_login_throttle',
+		                     'identity_webauthn_credentials','identity_webauthn_challenges')
 		   AND EXISTS (SELECT 1 FROM aclexplode(c.relacl) a
 		                WHERE a.grantee<>c.relowner)`)
 	if err != nil {
@@ -548,4 +551,195 @@ func openRoleDB(t *testing.T, dsn string) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+// TestPostgreSQLIdentityWebAuthn proves the key lifecycle: active-only
+// challenges with resend replacement, single-use consume, atomic registration
+// bound to a registration challenge, monotonic sign counts with clone
+// reporting, and the same capability isolation as every identity table.
+func TestPostgreSQLIdentityWebAuthn(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity integration tests")
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	identityDB := openRoleDB(t, identityDSN)
+	repo, err := New(identityDB)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	pepper := []byte("keel-integration-pepper-keel-integration-pepper-32")
+	adminDB := openRoleDB(t, adminDSN)
+
+	email := "webauthn-" + uuid.NewString() + "@example.test"
+	hash, err := auth.HashPassword("webauthn-pass-phrase", auth.TestArgonParams())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	principalID := uuid.New()
+	tenantID := uuid.MustParse("44444444-4444-4444-8444-444444444444")
+	if outcome, err := repo.BootstrapPrincipal(ctx, principalID, email, pepper, hash, &tenantID); err != nil || outcome != "created" {
+		t.Fatalf("bootstrap: %v (outcome %q)", err, outcome)
+	}
+	// Pending principals cannot start ceremonies.
+	pendingChallenge := make([]byte, auth.WebAuthnChallengeBytes)
+	if _, err := repo.RecordWebAuthnChallenge(ctx, uuid.New(), principalID, auth.PurposeWebAuthnRegistration, pendingChallenge, now, now.Add(5*time.Minute)); !errors.Is(err, ErrNotVerified) {
+		t.Fatalf("pending challenge accepted: %v", err)
+	}
+	verifyToken := mustSecret(t)
+	if _, err := repo.RecordEmailVerification(ctx, principalID, verifyToken, pepper, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("record verification: %v", err)
+	}
+	if outcome, _, err := repo.ConsumeEmailVerification(ctx, verifyToken, pepper); err != nil || outcome != "verified" {
+		t.Fatalf("consume: %v (outcome %q)", err, outcome)
+	}
+
+	nonce := func() []byte {
+		out := make([]byte, auth.WebAuthnChallengeBytes)
+		if _, err := rand.Read(out); err != nil {
+			t.Fatalf("nonce: %v", err)
+		}
+		return out
+	}
+	n1, n2, n3, n4, n5, n6 := nonce(), nonce(), nonce(), nonce(), nonce(), nonce()
+	// Under-min ceremony windows are rejected before the database.
+	if _, err := repo.RecordWebAuthnChallenge(ctx, uuid.New(), principalID, auth.PurposeWebAuthnRegistration, nonce(), now, now.Add(30*time.Second)); err == nil {
+		t.Fatal("under-min challenge TTL accepted")
+	}
+	firstID := uuid.New()
+	if outcome, err := repo.RecordWebAuthnChallenge(ctx, firstID, principalID, auth.PurposeWebAuthnRegistration, n1, now, now.Add(5*time.Minute)); err != nil || outcome != "recorded" {
+		t.Fatalf("record challenge: %v (outcome %q)", err, outcome)
+	}
+	// Resend replaces the pending challenge for the same purpose.
+	secondID := uuid.New()
+	if outcome, err := repo.RecordWebAuthnChallenge(ctx, secondID, principalID, auth.PurposeWebAuthnRegistration, n2, now, now.Add(5*time.Minute)); err != nil || outcome != "recorded" {
+		t.Fatalf("resend challenge: %v (outcome %q)", err, outcome)
+	}
+	// The replaced challenge is gone; the live one consumes exactly once.
+	if outcome, _, _, _, err := repo.ConsumeWebAuthnChallenge(ctx, firstID); err != nil || outcome != "unknown" {
+		t.Fatalf("replaced consume: %v (outcome %q)", err, outcome)
+	}
+	outcome, consumedPrincipal, purpose, consumedNonce, err := repo.ConsumeWebAuthnChallenge(ctx, secondID)
+	if err != nil || outcome != "ready" || consumedPrincipal != principalID || purpose != auth.PurposeWebAuthnRegistration {
+		t.Fatalf("consume: %v (outcome %q purpose %q)", err, outcome, purpose)
+	}
+	if string(consumedNonce) != string(n2) {
+		t.Fatal("consumed nonce mismatch")
+	}
+	if outcome, _, _, _, err := repo.ConsumeWebAuthnChallenge(ctx, secondID); err != nil || outcome != "duplicate" {
+		t.Fatalf("repeat consume: %v (outcome %q)", err, outcome)
+	}
+	// Challenge bytes are globally unique: reuse across principals refused.
+	otherPrincipal := uuid.New()
+	otherEmail := "webauthn-other-" + uuid.NewString() + "@example.test"
+	if outcome, err := repo.BootstrapPrincipal(ctx, otherPrincipal, otherEmail, pepper, hash, &tenantID); err != nil || outcome != "created" {
+		t.Fatalf("second bootstrap: %v (outcome %q)", err, outcome)
+	}
+	otherVerify := mustSecret(t)
+	if _, err := repo.RecordEmailVerification(ctx, otherPrincipal, otherVerify, pepper, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("other verification: %v", err)
+	}
+	if outcome, _, err := repo.ConsumeEmailVerification(ctx, otherVerify, pepper); err != nil || outcome != "verified" {
+		t.Fatalf("other consume: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.RecordWebAuthnChallenge(ctx, uuid.New(), otherPrincipal, auth.PurposeWebAuthnAuthentication, n2, now, now.Add(5*time.Minute)); !errors.Is(err, ErrTokenReuse) {
+		t.Fatalf("challenge reuse accepted: %v", err)
+	}
+	// Registration binds exactly one key through a fresh ceremony.
+	regID := uuid.New()
+	if outcome, err := repo.RecordWebAuthnChallenge(ctx, regID, principalID, auth.PurposeWebAuthnRegistration, n3, now, now.Add(5*time.Minute)); err != nil || outcome != "recorded" {
+		t.Fatalf("registration challenge: %v (outcome %q)", err, outcome)
+	}
+	credentialID := []byte("webauthn-cred-" + uuid.NewString())
+	publicKey := bytes.Repeat([]byte{0x04}, 77)
+	if outcome, registeredID, err := repo.RegisterWebAuthnCredential(ctx, regID, credentialID, publicKey, "usb", true, false); err != nil || outcome != "registered" || registeredID != principalID {
+		t.Fatalf("register: %v (outcome %q id %v)", err, outcome, registeredID)
+	}
+	// The ceremony challenge is spent: registration is single-use.
+	if outcome, _, err := repo.RegisterWebAuthnCredential(ctx, regID, []byte("other-credential"), publicKey, "", false, false); err != nil || outcome != "duplicate" {
+		t.Fatalf("repeat register: %v (outcome %q)", err, outcome)
+	}
+	// An authentication-purpose challenge cannot mint a key.
+	authCID := uuid.New()
+	if outcome, err := repo.RecordWebAuthnChallenge(ctx, authCID, principalID, auth.PurposeWebAuthnAuthentication, n4, now, now.Add(5*time.Minute)); err != nil || outcome != "recorded" {
+		t.Fatalf("auth challenge: %v (outcome %q)", err, outcome)
+	}
+	if outcome, _, err := repo.RegisterWebAuthnCredential(ctx, authCID, []byte("auth-credential"), publicKey, "", false, false); err != nil || outcome != "wrong_purpose" {
+		t.Fatalf("wrong-purpose register: %v (outcome %q)", err, outcome)
+	}
+	// Credential identifiers are globally unique.
+	dupCID := uuid.New()
+	if outcome, err := repo.RecordWebAuthnChallenge(ctx, dupCID, otherPrincipal, auth.PurposeWebAuthnRegistration, n5, now, now.Add(5*time.Minute)); err != nil || outcome != "recorded" {
+		t.Fatalf("other challenge: %v (outcome %q)", err, outcome)
+	}
+	if outcome, _, err := repo.RegisterWebAuthnCredential(ctx, dupCID, credentialID, publicKey, "", false, false); err != nil || outcome != "credential_reuse" {
+		t.Fatalf("credential reuse: %v (outcome %q)", err, outcome)
+	}
+	// Key listing exposes exactly the bound key for ceremony verification.
+	keys, err := repo.KeysFor(ctx, principalID)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("keys: %v (%d)", err, len(keys))
+	}
+	if string(keys[0].CredentialID) != string(credentialID) || string(keys[0].PublicKey) != string(publicKey) ||
+		keys[0].SignCount != 0 || keys[0].Transports != "usb" || !keys[0].BackupEligible || keys[0].BackupState {
+		t.Fatalf("key mismatch: %+v", keys[0])
+	}
+	if keys, err := repo.KeysFor(ctx, otherPrincipal); err != nil || len(keys) != 0 {
+		t.Fatalf("other keys: %v (%d)", err, len(keys))
+	}
+	// Sign counts advance monotonically; replays are reported, not applied.
+	if outcome, _, err := repo.AdvanceSignCount(ctx, credentialID, 1); err != nil || outcome != "advanced" {
+		t.Fatalf("advance: %v (outcome %q)", err, outcome)
+	}
+	if outcome, _, err := repo.AdvanceSignCount(ctx, credentialID, 1); err != nil || outcome != "cloned" {
+		t.Fatalf("replay: %v (outcome %q)", err, outcome)
+	}
+	if outcome, _, err := repo.AdvanceSignCount(ctx, credentialID, 0); err != nil || outcome != "cloned" {
+		t.Fatalf("regressed: %v (outcome %q)", err, outcome)
+	}
+	if outcome, _, err := repo.AdvanceSignCount(ctx, credentialID, 41); err != nil || outcome != "advanced" {
+		t.Fatalf("second advance: %v (outcome %q)", err, outcome)
+	}
+	if outcome, _, err := repo.AdvanceSignCount(ctx, []byte("missing-credential"), 1); err != nil || outcome != "unknown" {
+		t.Fatalf("unknown advance: %v (outcome %q)", err, outcome)
+	}
+	// Expired challenges consume as expired.
+	expiredID := uuid.New()
+	if outcome, err := repo.RecordWebAuthnChallenge(ctx, expiredID, principalID, auth.PurposeWebAuthnAuthentication, n6, now, now.Add(5*time.Minute)); err != nil || outcome != "recorded" {
+		t.Fatalf("expiry candidate: %v (outcome %q)", err, outcome)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_webauthn_challenges DISABLE TRIGGER identity_webauthn_challenges_guard`); err != nil {
+		t.Fatalf("disable challenge guard: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.identity_webauthn_challenges SET requested_at=clock_timestamp()-INTERVAL '1 hour',expires_at=clock_timestamp()-INTERVAL '1 minute' WHERE challenge_id=$1`, expiredID); err != nil {
+		t.Fatalf("backdate challenge: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_webauthn_challenges ENABLE TRIGGER identity_webauthn_challenges_guard`); err != nil {
+		t.Fatalf("enable challenge guard: %v", err)
+	}
+	if outcome, _, _, _, err := repo.ConsumeWebAuthnChallenge(ctx, expiredID); err != nil || outcome != "expired" {
+		t.Fatalf("expired consume: %v (outcome %q)", err, outcome)
+	}
+	// Structural lockdown for both new tables.
+	for _, table := range []string{"identity_webauthn_credentials", "identity_webauthn_challenges"} {
+		var forced bool
+		if err := adminDB.QueryRowContext(ctx,
+			`SELECT relforcerowsecurity FROM pg_class WHERE oid=('keel_meta.'||$1)::regclass`, table).Scan(&forced); err != nil || !forced {
+			t.Fatalf("%s is not FORCE RLS: %v", table, err)
+		}
+	}
+	appDB := openRoleDB(t, "postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable")
+	if _, err := appDB.QueryContext(ctx, `SELECT keel_meta.record_identity_webauthn_challenge(gen_random_uuid(),gen_random_uuid(),'identity-webauthn-registration-v1','00'::bytea,now())`); err == nil {
+		t.Fatal("app capability executed challenge function")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected app denial: %v", err)
+	}
+	if _, err := identityDB.QueryContext(ctx, `SELECT public_key FROM keel_meta.identity_webauthn_credentials LIMIT 1`); err == nil {
+		t.Fatal("identity login read keys directly")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected identity denial: %v", err)
+	}
 }
