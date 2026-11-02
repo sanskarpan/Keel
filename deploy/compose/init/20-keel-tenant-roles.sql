@@ -32,6 +32,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_webhook') THEN
         CREATE ROLE keel_webhook NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_identity') THEN
+        CREATE ROLE keel_identity NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_app') THEN
         CREATE ROLE keel_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
     END IF;
@@ -119,6 +122,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_webhook') THEN
         CREATE ROLE keel_local_webhook LOGIN PASSWORD 'keel-webhook-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_identity') THEN
+        CREATE ROLE keel_local_identity LOGIN PASSWORD 'keel-identity-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'keel_local_agent_alpha') THEN
         CREATE ROLE keel_local_agent_alpha LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
     END IF;
@@ -141,6 +147,7 @@ ALTER ROLE keel_context_legal_hold NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE N
 ALTER ROLE keel_context_replay NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_callback NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_webhook NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+ALTER ROLE keel_identity NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_budget_control NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 ALTER ROLE keel_rate_control NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
@@ -170,6 +177,7 @@ ALTER ROLE keel_local_context_legal_hold LOGIN PASSWORD 'keel-context-legal-hold
 ALTER ROLE keel_local_context_replay LOGIN PASSWORD 'keel-context-replay-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_callback LOGIN PASSWORD 'keel-callback-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_webhook LOGIN PASSWORD 'keel-webhook-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+ALTER ROLE keel_local_identity LOGIN PASSWORD 'keel-identity-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_agent_alpha LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_agent_beta LOGIN PASSWORD 'keel-agent-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ALTER ROLE keel_local_migrator LOGIN PASSWORD 'keel-migrate-local-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
@@ -192,6 +200,7 @@ GRANT keel_context_legal_hold TO keel_local_context_legal_hold;
 GRANT keel_context_replay TO keel_local_context_replay;
 GRANT keel_callback TO keel_local_callback;
 GRANT keel_webhook TO keel_local_webhook;
+GRANT keel_identity TO keel_local_identity;
 GRANT keel_agent TO keel_local_agent_alpha;
 GRANT keel_agent TO keel_local_agent_beta;
 GRANT keel_schema_owner TO keel_local_migrator;

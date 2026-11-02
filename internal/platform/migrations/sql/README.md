@@ -264,5 +264,21 @@ duplicate with redelivery delay, conflict), with forced RLS, revoked direct gran
 immutable-history trigger; it exposes no payload or receiver content and changes no apply
 semantics.
 
+Migration `0063_identity_principals_sessions` adds the first-party identity slice:
+four forced-RLS `keel_meta` tables (principals keyed by peppered email digest, one
+Argon2id credential per principal, one unconsumed email verification, one session row
+per session token digest) with immutable-history guard triggers and seven
+`keel_identity`-gated SECURITY DEFINER functions covering bootstrap, credential lookup,
+verification record/consume and session record/resolve/revoke. Email addresses, tokens
+and passwords are stored only as digests or PHC hashes; the capability login has no
+direct table grant. Signed-off forward repairs are unavoidable: applied files are
+immutable, so `0064_identity_bootstrap_conflict_outcome` re-creates
+`create_identity_principal` to report `duplicate_email` for the email-digest unique
+violation instead of aborting with SQLSTATE 23505, and
+`0065_identity_lock_projection_fix` re-creates the verification and session record
+functions to select the real `state` column (0063 named a nonexistent
+`principal_state`, aborting with SQLSTATE 42703 before the row lock). Both repairs
+keep the same signatures and capability gates.
+
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
