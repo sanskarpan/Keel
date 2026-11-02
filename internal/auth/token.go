@@ -1,7 +1,8 @@
-// Package auth implements the first K8.11 identity slice: first-party principals,
-// verified email and session lifecycle. This file owns the purpose-separated opaque
-// token scheme and peppered email digests. Callers persist only digests; the original
-// secret is shown to its recipient exactly once.
+// Package auth implements the K8.11 identity slices: first-party principals,
+// verified email, session lifecycle, and password recovery with rotation. This
+// file owns the purpose-separated opaque token scheme and peppered email
+// digests. Callers persist only digests; the original secret is shown to its
+// recipient exactly once.
 package auth
 
 import (
@@ -30,6 +31,7 @@ const (
 const (
 	PurposeSession           = "identity-session-v1"
 	PurposeEmailVerification = "identity-email-verification-v1"
+	PurposePasswordReset     = "identity-password-reset-v1"
 )
 
 var (
@@ -55,7 +57,7 @@ func NewSecret(source io.Reader) (string, error) {
 
 // TokenDigest binds one allowed purpose to one well-formed secret.
 func TokenDigest(secret, purpose string) ([sha256.Size]byte, error) {
-	if purpose != PurposeSession && purpose != PurposeEmailVerification {
+	if purpose != PurposeSession && purpose != PurposeEmailVerification && purpose != PurposePasswordReset {
 		return [sha256.Size]byte{}, ErrInvalidToken
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(secret)

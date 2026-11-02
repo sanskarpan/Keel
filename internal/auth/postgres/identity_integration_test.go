@@ -175,7 +175,8 @@ func TestPostgreSQLIdentityBootstrapAndSessionLifecycle(t *testing.T) {
 		  JOIN pg_namespace n ON n.oid=c.relnamespace
 		 WHERE n.nspname='keel_meta'
 		   AND c.relname IN ('identity_principals','identity_credentials',
-		                     'identity_email_verifications','identity_sessions')
+		                     'identity_email_verifications','identity_sessions',
+		                     'identity_password_resets')
 		   AND EXISTS (SELECT 1 FROM aclexplode(c.relacl) a
 		                WHERE a.grantee<>c.relowner)`)
 	if err != nil {
@@ -206,6 +207,222 @@ func isPrivilegeDenial(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "permission denied") ||
 		strings.Contains(message, "capability is required")
+}
+
+// TestPostgreSQLIdentityRecoveryAndRotation proves the takeover boundary: a
+// reset for an active principal rotates the credential and revokes every live
+// session, the token is single-use, pending principals cannot start recovery,
+// and revoke-all supports owner lockout.
+func TestPostgreSQLIdentityRecoveryAndRotation(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity integration tests")
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	identityDB := openRoleDB(t, identityDSN)
+	repo, err := New(identityDB)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	pepper := []byte("keel-integration-pepper-keel-integration-pepper-32")
+	adminDB := openRoleDB(t, adminDSN)
+	_ = adminDB
+
+	// Bootstrap then verify a principal so recovery is eligible.
+	email := "recover-" + uuid.NewString() + "@example.test"
+	oldPassword := "old-recovery-phrase"
+	oldHash, err := auth.HashPassword(oldPassword, auth.TestArgonParams())
+	if err != nil {
+		t.Fatalf("hash old: %v", err)
+	}
+	principalID := uuid.New()
+	tenantID := uuid.MustParse("22222222-2222-4222-8222-222222222222")
+	if outcome, err := repo.BootstrapPrincipal(ctx, principalID, email, pepper, oldHash, &tenantID); err != nil || outcome != "created" {
+		t.Fatalf("bootstrap: %v (outcome %q)", err, outcome)
+	}
+	// Pending principals cannot start recovery.
+	pendingToken, err := auth.NewSecret(nil)
+	if err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+	if _, err := repo.RecordPasswordReset(ctx, principalID, pendingToken, pepper, now, now.Add(time.Hour)); !errors.Is(err, ErrNotVerified) {
+		t.Fatalf("pending reset accepted: %v", err)
+	}
+	verifyToken, err := auth.NewSecret(nil)
+	if err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+	if _, err := repo.RecordEmailVerification(ctx, principalID, verifyToken, pepper, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("record verification: %v", err)
+	}
+	if outcome, _, err := repo.ConsumeEmailVerification(ctx, verifyToken, pepper); err != nil || outcome != "verified" {
+		t.Fatalf("consume: %v (outcome %q)", err, outcome)
+	}
+
+	// Mint two live sessions before rotation.
+	sessionOne, tokenOne := uuid.New(), mustSecret(t)
+	if outcome, err := repo.RecordSession(ctx, sessionOne, principalID, tokenOne, pepper, now, now.Add(time.Hour)); err != nil || outcome != "created" {
+		t.Fatalf("record session one: %v (outcome %q)", err, outcome)
+	}
+	sessionTwo, tokenTwo := uuid.New(), mustSecret(t)
+	if outcome, err := repo.RecordSession(ctx, sessionTwo, principalID, tokenTwo, pepper, now, now.Add(time.Hour)); err != nil || outcome != "created" {
+		t.Fatalf("record session two: %v (outcome %q)", err, outcome)
+	}
+
+	// Under-min reset TTL is rejected before the database.
+	resetToken, err := auth.NewSecret(nil)
+	if err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+	if _, err := repo.RecordPasswordReset(ctx, principalID, resetToken, pepper, now, now.Add(time.Minute)); err == nil {
+		t.Fatal("under-min reset TTL accepted")
+	}
+	if outcome, err := repo.RecordPasswordReset(ctx, principalID, resetToken, pepper, now, now.Add(time.Hour)); err != nil || outcome != "recorded" {
+		t.Fatalf("record reset: %v (outcome %q)", err, outcome)
+	}
+	// Token reuse across a second principal is refused.
+	otherPrincipal := uuid.New()
+	otherEmail := "recover-other-" + uuid.NewString() + "@example.test"
+	if outcome, err := repo.BootstrapPrincipal(ctx, otherPrincipal, otherEmail, pepper, oldHash, &tenantID); err != nil || outcome != "created" {
+		t.Fatalf("second bootstrap: %v (outcome %q)", err, outcome)
+	}
+	otherVerify, err := auth.NewSecret(nil)
+	if err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+	if _, err := repo.RecordEmailVerification(ctx, otherPrincipal, otherVerify, pepper, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("other verification: %v", err)
+	}
+	if outcome, _, err := repo.ConsumeEmailVerification(ctx, otherVerify, pepper); err != nil || outcome != "verified" {
+		t.Fatalf("other consume: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.RecordPasswordReset(ctx, otherPrincipal, resetToken, pepper, now, now.Add(time.Hour)); !errors.Is(err, ErrTokenReuse) {
+		t.Fatalf("reset token reuse accepted: %v", err)
+	}
+
+	// Rotation consumes the token, replaces the hash and revokes both sessions.
+	newPassword := "new-recovery-phrase"
+	newHash, err := auth.HashPassword(newPassword, auth.TestArgonParams())
+	if err != nil {
+		t.Fatalf("hash new: %v", err)
+	}
+	if outcome, rotatedID, err := repo.RotateCredential(ctx, resetToken, pepper, newHash); err != nil || outcome != "rotated" || rotatedID != principalID {
+		t.Fatalf("rotate: %v (outcome %q id %v)", err, outcome, rotatedID)
+	}
+	// Single-use: the same token is now a duplicate.
+	if outcome, _, err := repo.RotateCredential(ctx, resetToken, pepper, newHash); err != nil || outcome != "duplicate" {
+		t.Fatalf("repeat rotate: %v (outcome %q)", err, outcome)
+	}
+	// Unknown reset digests resolve to unknown.
+	if outcome, _, err := repo.RotateCredential(ctx, mustSecret(t), pepper, newHash); err != nil || outcome != "unknown" {
+		t.Fatalf("unknown rotate: %v (outcome %q)", err, outcome)
+	}
+	// Expired resets are consumed but refuse rotation. Backdate one request
+	// through the superuser by parking the guard trigger, then restore it.
+	expiredToken, err := auth.NewSecret(nil)
+	if err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+	if outcome, err := repo.RecordPasswordReset(ctx, principalID, expiredToken, pepper, now, now.Add(time.Hour)); err != nil || outcome != "recorded" {
+		t.Fatalf("record expired-candidate: %v (outcome %q)", err, outcome)
+	}
+	expiredDigest, err := auth.TokenDigest(expiredToken, auth.PurposePasswordReset)
+	if err != nil {
+		t.Fatalf("expired digest: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_password_resets DISABLE TRIGGER identity_password_resets_guard`); err != nil {
+		t.Fatalf("disable reset guard: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.identity_password_resets SET requested_at=clock_timestamp()-INTERVAL '2 hours',expires_at=clock_timestamp()-INTERVAL '1 minute' WHERE token_digest=$1`, expiredDigest[:]); err != nil {
+		t.Fatalf("backdate reset: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_password_resets ENABLE TRIGGER identity_password_resets_guard`); err != nil {
+		t.Fatalf("enable reset guard: %v", err)
+	}
+	if outcome, _, err := repo.RotateCredential(ctx, expiredToken, pepper, newHash); err != nil || outcome != "expired" {
+		t.Fatalf("expired rotate: %v (outcome %q)", err, outcome)
+	}
+	// Credential version advanced exactly once through rotation.
+	var credentialVersion int
+	if err := adminDB.QueryRowContext(ctx, `SELECT version FROM keel_meta.identity_credentials WHERE principal_id=$1`, principalID).Scan(&credentialVersion); err != nil || credentialVersion != 2 {
+		t.Fatalf("credential version: %d err=%v", credentialVersion, err)
+	}
+	// Old password fails, new password verifies.
+	_, _, stored, err := repo.CredentialForEmail(ctx, email, pepper)
+	if err != nil {
+		t.Fatalf("credential lookup: %v", err)
+	}
+	if ok, err := auth.VerifyPassword(oldPassword, stored); err != nil || ok {
+		t.Fatalf("old password still verifies: %v %v", ok, err)
+	}
+	if ok, err := auth.VerifyPassword(newPassword, stored); err != nil || !ok {
+		t.Fatalf("new password rejected: %v %v", ok, err)
+	}
+	// Both pre-rotation sessions are revoked and judge invalid.
+	for i, tok := range []string{tokenOne, tokenTwo} {
+		session, err := repo.SessionForToken(ctx, tok, pepper)
+		if err != nil {
+			t.Fatalf("revoked lookup %d: %v", i, err)
+		}
+		if session.Valid(now) {
+			t.Fatalf("post-rotation session %d judged valid", i)
+		}
+	}
+	// Revoke-all on a principal with no live sessions reports zero.
+	if n, err := repo.RevokeAllSessions(ctx, principalID); err != nil || n != 0 {
+		t.Fatalf("revoke-all empty: %v (n=%d)", err, n)
+	}
+	// A fresh session after rotation works, then revoke-all locks it out.
+	freshID, freshToken := uuid.New(), mustSecret(t)
+	if outcome, err := repo.RecordSession(ctx, freshID, principalID, freshToken, pepper, now, now.Add(time.Hour)); err != nil || outcome != "created" {
+		t.Fatalf("fresh session: %v (outcome %q)", err, outcome)
+	}
+	secondID, secondToken := uuid.New(), mustSecret(t)
+	if outcome, err := repo.RecordSession(ctx, secondID, principalID, secondToken, pepper, now, now.Add(time.Hour)); err != nil || outcome != "created" {
+		t.Fatalf("second session: %v (outcome %q)", err, outcome)
+	}
+	if n, err := repo.RevokeAllSessions(ctx, principalID); err != nil || n != 2 {
+		t.Fatalf("revoke-all: %v (n=%d)", err, n)
+	}
+	for i, tok := range []string{freshToken, secondToken} {
+		session, err := repo.SessionForToken(ctx, tok, pepper)
+		if err != nil {
+			t.Fatalf("lockout lookup %d: %v", i, err)
+		}
+		if session.Valid(now) {
+			t.Fatalf("lockout session %d judged valid", i)
+		}
+	}
+	// Capability isolation for the new functions.
+	var resetsForced bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT relforcerowsecurity FROM pg_class
+		  WHERE oid='keel_meta.identity_password_resets'::regclass`).Scan(&resetsForced); err != nil || !resetsForced {
+		t.Fatalf("identity resets is not FORCE RLS: %v", err)
+	}
+	appDB := openRoleDB(t, "postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable")
+	if _, err := appDB.QueryContext(ctx, `SELECT keel_meta.record_identity_password_reset(gen_random_uuid(),'00'::bytea,now())`); err == nil {
+		t.Fatal("app capability executed reset function")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected app denial: %v", err)
+	}
+	if _, err := identityDB.QueryContext(ctx, `SELECT token_digest FROM keel_meta.identity_password_resets LIMIT 1`); err == nil {
+		t.Fatal("identity login read resets directly")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected identity denial: %v", err)
+	}
+}
+
+func mustSecret(t *testing.T) string {
+	t.Helper()
+	secret, err := auth.NewSecret(nil)
+	if err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+	return secret
 }
 
 func openRoleDB(t *testing.T, dsn string) *sql.DB {

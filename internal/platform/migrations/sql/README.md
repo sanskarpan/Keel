@@ -278,7 +278,16 @@ violation instead of aborting with SQLSTATE 23505, and
 `0065_identity_lock_projection_fix` re-creates the verification and session record
 functions to select the real `state` column (0063 named a nonexistent
 `principal_state`, aborting with SQLSTATE 42703 before the row lock). Both repairs
-keep the same signatures and capability gates.
+keep the same signatures and capability gates. Migration
+`0066_identity_password_recovery_rotation` adds the recovery slice: a
+forced-RLS `identity_password_resets` table (one unconsumed reset per
+principal, globally unique token, 24-hour window), a capability-gated
+record function that only active principals can call, an atomic
+`rotate_identity_credential` that consumes one reset, replaces the Argon2id
+hash with a version increment and revokes every live session, plus a
+`revoke_all_identity_sessions` count for owner lockout; the credentials
+guard is replaced to allow only versioned rotation and still refuses
+deletes and direct writes.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

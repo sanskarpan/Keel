@@ -1,7 +1,7 @@
 // Package postgres stores first-party identity principals, credentials,
-// verifications and sessions behind the keel_identity capability. Identity
-// access is pre-tenant: these functions are global and tenant binding is a
-// later K8.1/K8.2 concern, so no RLS tenant context is used here.
+// verifications, password resets and sessions behind the keel_identity
+// capability. Identity access is pre-tenant: these functions are global and
+// tenant binding is a later K8.1/K8.2 concern, so no RLS tenant context is used here.
 package postgres
 
 import (
@@ -229,6 +229,83 @@ func (r *Repository) RevokeSession(ctx context.Context, sessionID uuid.UUID) (st
 		return "", ErrNotFound
 	}
 	return outcome, err
+}
+
+// RecordPasswordReset stores one bounded reset request for an active principal,
+// replacing any pending request. Inactive principals cannot start recovery.
+func (r *Repository) RecordPasswordReset(ctx context.Context, principalID uuid.UUID, token string, pepper []byte, now, expires time.Time) (string, error) {
+	if r == nil || r.db == nil {
+		return "", ErrInvalidRecord
+	}
+	_ = pepper
+	if err := auth.ValidateResetTTL(now, expires); err != nil {
+		return "", err
+	}
+	digest, err := auth.TokenDigest(token, auth.PurposePasswordReset)
+	if err != nil {
+		return "", err
+	}
+	var outcome string
+	err = r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.record_identity_password_reset($1,$2,$3)`,
+			principalID, digest[:], expires.UTC(),
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_active" {
+		return "", ErrNotVerified
+	}
+	if err == nil && outcome == "token_reuse" {
+		return "", ErrTokenReuse
+	}
+	return outcome, err
+}
+
+// RotateCredential atomically consumes one reset token, replaces the Argon2id
+// hash (versioned) and revokes every live session for the principal. The
+// caller judges the outcome: only "rotated" changes credentials.
+func (r *Repository) RotateCredential(ctx context.Context, token string, pepper []byte, newHash string) (string, uuid.UUID, error) {
+	if r == nil || r.db == nil {
+		return "", uuid.Nil, ErrInvalidRecord
+	}
+	_ = pepper
+	if newHash == "" || len(newHash) > auth.MaxHashLen {
+		return "", uuid.Nil, ErrInvalidRecord
+	}
+	digest, err := auth.TokenDigest(token, auth.PurposePasswordReset)
+	if err != nil {
+		return "", uuid.Nil, err
+	}
+	var outcome string
+	var principalID uuid.UUID
+	err = r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT outcome,out_principal_id FROM keel_meta.rotate_identity_credential($1,$2)`,
+			digest[:], newHash,
+		).Scan(&outcome, &principalID)
+	})
+	if err != nil || outcome != "rotated" {
+		return outcome, principalID, err
+	}
+	if principalID == uuid.Nil {
+		return "", uuid.Nil, fmt.Errorf("%w: rotation completed with empty principal", ErrInvalidRecord)
+	}
+	return outcome, principalID, err
+}
+
+// RevokeAllSessions revokes every live session for one principal and reports
+// the count. Zero is a valid outcome when no sessions are live.
+func (r *Repository) RevokeAllSessions(ctx context.Context, principalID uuid.UUID) (int, error) {
+	if r == nil || r.db == nil || principalID == uuid.Nil {
+		return 0, ErrInvalidRecord
+	}
+	var revoked int
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.revoke_all_identity_sessions($1)`, principalID,
+		).Scan(&revoked)
+	})
+	return revoked, err
 }
 
 func (r *Repository) withTx(ctx context.Context, work func(*sql.Tx) error) error {

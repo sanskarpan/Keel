@@ -12,11 +12,15 @@ func TestTokenDigestRejectsUnknownPurpose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSecret: %v", err)
 	}
-	if _, err := TokenDigest(secret, "identity-password-reset-v1"); err == nil {
+	if _, err := TokenDigest(secret, "identity-password-reset-v2"); err == nil {
 		t.Fatal("unknown purpose accepted")
 	}
 	if _, err := TokenDigest(secret, ""); err == nil {
 		t.Fatal("empty purpose accepted")
+	}
+	// Recovery is a first-class purpose since the rotation slice.
+	if _, err := TokenDigest(secret, PurposePasswordReset); err != nil {
+		t.Fatalf("reset purpose rejected: %v", err)
 	}
 }
 
@@ -33,7 +37,11 @@ func TestTokenDigestIsPurposeSeparated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verification digest: %v", err)
 	}
-	if session == verification {
+	reset, err := TokenDigest(secret, PurposePasswordReset)
+	if err != nil {
+		t.Fatalf("reset digest: %v", err)
+	}
+	if session == verification || session == reset || verification == reset {
 		t.Fatal("one purpose digest must not equal another purpose digest")
 	}
 	if _, err := TokenDigest("!"+secret, PurposeSession); err == nil {
