@@ -49,6 +49,16 @@ type fakeRepo struct {
 	rotateOutcome string
 	rotateID      uuid.UUID
 	rotateErr     error
+
+	throttleCount int
+	throttleUntil time.Time
+	throttleErr   error
+
+	failureOutcome string
+	failureErr     error
+
+	resetCount int
+	resetErr   error
 }
 
 func (f *fakeRepo) BootstrapPrincipal(_ context.Context, id uuid.UUID, _ string, _ []byte, _ string, _ *uuid.UUID) (string, error) {
@@ -87,6 +97,18 @@ func (f *fakeRepo) RecordPasswordReset(_ context.Context, _ uuid.UUID, _ string,
 
 func (f *fakeRepo) RotateCredential(_ context.Context, _ string, _ []byte, _ string) (string, uuid.UUID, error) {
 	return f.rotateOutcome, f.rotateID, f.rotateErr
+}
+
+func (f *fakeRepo) RecordLoginFailure(_ context.Context, _ uuid.UUID) (string, error) {
+	return f.failureOutcome, f.failureErr
+}
+
+func (f *fakeRepo) ResetLoginThrottle(_ context.Context, _ uuid.UUID) (int, error) {
+	return f.resetCount, f.resetErr
+}
+
+func (f *fakeRepo) ThrottleFor(_ context.Context, _ uuid.UUID) (int, time.Time, error) {
+	return f.throttleCount, f.throttleUntil, f.throttleErr
 }
 
 type fakeSender struct {
@@ -355,5 +377,50 @@ func TestNewRejectsWeakPepperAndParams(t *testing.T) {
 	}
 	if _, err := New(&fakeRepo{}, testPepper(), auth.ArgonParams{}, &fakeSender{}, &fakeSender{}); err == nil {
 		t.Fatal("empty params accepted")
+	}
+}
+
+func TestLoginLockedPrincipalGets429(t *testing.T) {
+	hash, err := auth.HashPassword("correct-horse-battery", auth.TestArgonParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &fakeRepo{
+		credID: uuid.New(), credState: auth.PrincipalActive, credHash: hash,
+		throttleCount: 5, throttleUntil: time.Date(2026, time.November, 2, 12, 10, 0, 0, time.UTC),
+	}
+	response := doRequest(newTestHandler(repo, &fakeSender{}, &fakeSender{}), http.MethodPost,
+		"/v1/auth/sessions", map[string]string{"email": "owner@example.com", "password": "correct-horse-battery"}, "")
+	if response.Code != http.StatusTooManyRequests || problemCode(t, response) != "locked" {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After header")
+	}
+}
+
+func TestLoginFifthFailureLocks(t *testing.T) {
+	hash, err := auth.HashPassword("correct-horse-battery", auth.TestArgonParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockedAt := time.Date(2026, time.November, 2, 12, 10, 0, 0, time.UTC)
+	fifth := &fakeRepo{
+		credID: uuid.New(), credState: auth.PrincipalActive, credHash: hash,
+		failureOutcome: "locked", throttleCount: 5, throttleUntil: lockedAt,
+	}
+	response := doRequest(newTestHandler(fifth, &fakeSender{}, &fakeSender{}), http.MethodPost,
+		"/v1/auth/sessions", map[string]string{"email": "owner@example.com", "password": "wrong-horse-battery!"}, "")
+	if response.Code != http.StatusTooManyRequests || problemCode(t, response) != "locked" {
+		t.Fatalf("fifth failure: %d %s", response.Code, response.Body.String())
+	}
+	earlier := &fakeRepo{
+		credID: uuid.New(), credState: auth.PrincipalActive, credHash: hash,
+		failureOutcome: "counted",
+	}
+	response = doRequest(newTestHandler(earlier, &fakeSender{}, &fakeSender{}), http.MethodPost,
+		"/v1/auth/sessions", map[string]string{"email": "owner@example.com", "password": "wrong-horse-battery!"}, "")
+	if response.Code != http.StatusUnauthorized || problemCode(t, response) != "invalid_credentials" {
+		t.Fatalf("earlier failure: %d %s", response.Code, response.Body.String())
 	}
 }

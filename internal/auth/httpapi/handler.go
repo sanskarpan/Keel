@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,6 +41,9 @@ type Repository interface {
 	RevokeSession(ctx context.Context, sessionID uuid.UUID) (string, error)
 	RecordPasswordReset(ctx context.Context, principalID uuid.UUID, token string, pepper []byte, now, expires time.Time) (string, error)
 	RotateCredential(ctx context.Context, token string, pepper []byte, newHash string) (string, uuid.UUID, error)
+	RecordLoginFailure(ctx context.Context, principalID uuid.UUID) (string, error)
+	ResetLoginThrottle(ctx context.Context, principalID uuid.UUID) (int, error)
+	ThrottleFor(ctx context.Context, principalID uuid.UUID) (int, time.Time, error)
 }
 
 // VerificationSender delivers email-verification tokens. Production sends
@@ -224,12 +228,35 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnauthorized, "invalid_credentials")
 		return
 	}
+	now := h.now()
+	if _, lockedUntil, err := h.repo.ThrottleFor(r.Context(), principalID); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "request_failed")
+		return
+	} else if !lockedUntil.IsZero() && lockedUntil.After(now) {
+		writeLocked(w, lockedUntil.Sub(now))
+		return
+	}
 	ok, err := auth.VerifyPassword(input.Password, stored)
 	if err != nil || !ok {
+		outcome, recordErr := h.repo.RecordLoginFailure(r.Context(), principalID)
+		if recordErr != nil {
+			writeProblem(w, http.StatusInternalServerError, "request_failed")
+			return
+		}
+		if outcome == "locked" {
+			if _, lockedUntil, err := h.repo.ThrottleFor(r.Context(), principalID); err == nil && !lockedUntil.IsZero() {
+				writeLocked(w, lockedUntil.Sub(now))
+				return
+			}
+			writeProblem(w, http.StatusTooManyRequests, "locked")
+			return
+		}
 		writeProblem(w, http.StatusUnauthorized, "invalid_credentials")
 		return
 	}
-	now := h.now()
+	// Best-effort: a throttle reset outage must not lock out a principal that
+	// just proved its password.
+	_, _ = h.repo.ResetLoginThrottle(r.Context(), principalID)
 	expires := now.Add(24 * time.Hour)
 	if err := auth.ValidateSessionTTL(now, expires); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "request_failed")
@@ -388,6 +415,15 @@ type problemResponse struct {
 	Title  string `json:"title"`
 	Status int    `json:"status"`
 	Code   string `json:"code"`
+}
+
+func writeLocked(w http.ResponseWriter, remaining time.Duration) {
+	seconds := int64(remaining.Seconds()) + 1
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	writeProblem(w, http.StatusTooManyRequests, "locked")
 }
 
 func writeProblem(w http.ResponseWriter, status int, code string) {

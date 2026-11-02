@@ -308,6 +308,67 @@ func (r *Repository) RevokeAllSessions(ctx context.Context, principalID uuid.UUI
 	return revoked, err
 }
 
+// RecordLoginFailure counts one failed password login. Five consecutive
+// failures lock the principal for 15 minutes; attempts while locked change
+// nothing. Unknown principals are not counted.
+func (r *Repository) RecordLoginFailure(ctx context.Context, principalID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || principalID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.record_identity_login_failure($1)`, principalID,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "unknown_principal" {
+		return "", ErrNotFound
+	}
+	return outcome, err
+}
+
+// ResetLoginThrottle clears the failure count after a successful login.
+// Zero is valid when nothing was recorded.
+func (r *Repository) ResetLoginThrottle(ctx context.Context, principalID uuid.UUID) (int, error) {
+	if r == nil || r.db == nil || principalID == uuid.Nil {
+		return 0, ErrInvalidRecord
+	}
+	var removed int
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.reset_identity_login_throttle($1)`, principalID,
+		).Scan(&removed)
+	})
+	return removed, err
+}
+
+// ThrottleFor reports the current failure count and lock expiry. Zero values
+// mean no throttle is recorded; a locked_until in the future means the
+// principal is locked as of the database clock.
+func (r *Repository) ThrottleFor(ctx context.Context, principalID uuid.UUID) (int, time.Time, error) {
+	if r == nil || r.db == nil || principalID == uuid.Nil {
+		return 0, time.Time{}, ErrInvalidRecord
+	}
+	var consecutive int
+	var lockedUntil sql.NullTime
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT out_consecutive,out_locked_until FROM keel_meta.identity_throttle_for($1)`,
+			principalID,
+		).Scan(&consecutive, &lockedUntil)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, time.Time{}, nil
+	}
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if lockedUntil.Valid {
+		return consecutive, lockedUntil.Time, nil
+	}
+	return consecutive, time.Time{}, nil
+}
+
 func (r *Repository) withTx(ctx context.Context, work func(*sql.Tx) error) error {
 	tx, tranErr := r.db.BeginTx(ctx, nil)
 	if tranErr != nil {

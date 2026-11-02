@@ -99,5 +99,33 @@ func TestHTTPIdentityLifecycleAgainstPostgres(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("new login: %d %s", response.Code, response.Body.String())
 	}
+	// Lockout over HTTP: four wrong passwords are 401, the fifth is 429
+	// with Retry-After, and the correct password stays locked.
+	for i := 0; i < 4; i++ {
+		response = doRequest(h, http.MethodPost, "/v1/auth/sessions",
+			map[string]string{"email": email, "password": "wrong-pass-phrase!"}, "")
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("wrong %d: %d %s", i+1, response.Code, response.Body.String())
+		}
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/sessions",
+		map[string]string{"email": email, "password": "wrong-pass-phrase!"}, "")
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("fifth wrong: %d %s", response.Code, response.Body.String())
+	}
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil || problem.Code != "locked" {
+		t.Fatalf("lock code: %v body=%s", err, response.Body.String())
+	}
+	if response.Header().Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After on lockout")
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/sessions",
+		map[string]string{"email": email, "password": newPassword}, "")
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct while locked: %d %s", response.Code, response.Body.String())
+	}
 	_ = httptest.NewRecorder
 }

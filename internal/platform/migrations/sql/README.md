@@ -287,7 +287,13 @@ record function that only active principals can call, an atomic
 hash with a version increment and revokes every live session, plus a
 `revoke_all_identity_sessions` count for owner lockout; the credentials
 guard is replaced to allow only versioned rotation and still refuses
-deletes and direct writes.
+deletes and direct writes. Migration `0067_identity_login_lockout` adds
+the bounded lockout: one forced-RLS `identity_login_throttle` row per
+principal, five consecutive failures locking for 15 minutes with a 15-minute
+staleness decay, success deleting the row, attempts while locked changing
+nothing, and unknown principals never counted; `0068` forward-repairs the
+throttle guard, which had refused the fresh-count reset (first/last moved
+to now) that the decay and expired-lock branches require.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
