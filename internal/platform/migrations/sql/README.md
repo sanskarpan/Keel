@@ -309,7 +309,15 @@ library, then `store_identity_webauthn_credential` binds the key
 (`stored`/`credential_reuse`/`principal_inactive`); the credentials guard is
 relaxed for inserts only so a ceremony may present a nonzero opening
 counter, while updates still advance monotonically and deletes stay
-refused.
+refused. Migration `0072_identity_organizations_memberships` adds the
+tenancy foundation: forced-RLS `identity_organizations` (globally unique
+DNS-safe slug, bounded name/region) and `identity_memberships`
+(owner/admin/member, one membership per principal), capability-gated
+`create_identity_organization` (active, unbound founder becomes owner and
+binds), `add_organization_member` (actor must hold owner/admin, member must
+be active, tenant must converge) and `organizations_for`; the principals
+guard now permits the single NULL-to-org tenant binding and still refuses
+every other direct mutation.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
