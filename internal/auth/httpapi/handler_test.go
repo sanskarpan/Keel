@@ -92,6 +92,26 @@ type fakeRepo struct {
 
 	orgs    []postgres.Organization
 	orgsErr error
+
+	inviteOutcome string
+	inviteErr     error
+	invitedEmail  string
+	invitedRole   string
+
+	acceptOutcome string
+	acceptOrg     uuid.UUID
+	acceptErr     error
+
+	transferOutcome string
+	transferErr     error
+	transferActor   uuid.UUID
+	transferOrg     uuid.UUID
+	transferTarget  uuid.UUID
+
+	switchOutcome string
+	switchErr     error
+	switchSession uuid.UUID
+	switchOrg     uuid.UUID
 }
 
 func (f *fakeRepo) BootstrapPrincipal(_ context.Context, id uuid.UUID, _ string, _ []byte, _ string, _ *uuid.UUID) (string, error) {
@@ -164,6 +184,25 @@ func (f *fakeRepo) AddOrganizationMember(_ context.Context, actor, org, member u
 
 func (f *fakeRepo) OrganizationsFor(_ context.Context, _ uuid.UUID) ([]postgres.Organization, error) {
 	return f.orgs, f.orgsErr
+}
+
+func (f *fakeRepo) InviteMember(_ context.Context, _, _, _ uuid.UUID, email string, _ []byte, _ string, role string, _, _ time.Time) (string, error) {
+	f.invitedEmail, f.invitedRole = email, role
+	return f.inviteOutcome, f.inviteErr
+}
+
+func (f *fakeRepo) AcceptInvite(_ context.Context, _ string, _ uuid.UUID) (string, uuid.UUID, error) {
+	return f.acceptOutcome, f.acceptOrg, f.acceptErr
+}
+
+func (f *fakeRepo) TransferOwnership(_ context.Context, actor, org, target uuid.UUID) (string, error) {
+	f.transferActor, f.transferOrg, f.transferTarget = actor, org, target
+	return f.transferOutcome, f.transferErr
+}
+
+func (f *fakeRepo) SwitchSessionOrg(_ context.Context, session, org uuid.UUID) (string, error) {
+	f.switchSession, f.switchOrg = session, org
+	return f.switchOutcome, f.switchErr
 }
 
 func (f *fakeRepo) RecordLoginFailure(_ context.Context, _ uuid.UUID) (string, error) {

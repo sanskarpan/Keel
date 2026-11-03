@@ -53,6 +53,10 @@ type Repository interface {
 	CreateOrganization(ctx context.Context, orgID, principalID uuid.UUID, slug, displayName, region string) (string, error)
 	AddOrganizationMember(ctx context.Context, actorID, orgID, memberID uuid.UUID, role string) (string, error)
 	OrganizationsFor(ctx context.Context, principalID uuid.UUID) ([]postgres.Organization, error)
+	InviteMember(ctx context.Context, inviteID, actorID, orgID uuid.UUID, email string, pepper []byte, token string, role string, now, expires time.Time) (string, error)
+	AcceptInvite(ctx context.Context, token string, principalID uuid.UUID) (string, uuid.UUID, error)
+	TransferOwnership(ctx context.Context, actorID, orgID, newOwnerID uuid.UUID) (string, error)
+	SwitchSessionOrg(ctx context.Context, sessionID, orgID uuid.UUID) (string, error)
 }
 
 // VerificationSender delivers email-verification tokens. Production sends
@@ -111,6 +115,10 @@ func New(repo Repository, pepper []byte, hashParams auth.ArgonParams, verifySend
 	h.mux.HandleFunc("POST /v1/auth/organizations", h.createOrganization)
 	h.mux.HandleFunc("POST /v1/auth/organizations/{org_id}/members", h.addOrganizationMember)
 	h.mux.HandleFunc("GET /v1/auth/organizations", h.listOrganizations)
+	h.mux.HandleFunc("POST /v1/auth/organizations/{org_id}/invites", h.inviteMember)
+	h.mux.HandleFunc("POST /v1/auth/invites/accept", h.acceptInvite)
+	h.mux.HandleFunc("POST /v1/auth/organizations/{org_id}/transfer", h.transferOwnership)
+	h.mux.HandleFunc("POST /v1/auth/sessions/switch", h.switchSessionOrg)
 	return h, nil
 }
 
