@@ -1224,6 +1224,41 @@ func TestPostgreSQLIdentityAPIKeys(t *testing.T) {
 	if _, err := repo.DisableServicePrincipal(ctx, owner, svcID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("repeat disable: %v", err)
 	}
+	// Directory reads: owners see the full key set, strangers see nothing.
+	if org, err := repo.ServicePrincipalOrg(ctx, svcID); err != nil || org != orgID {
+		t.Fatalf("sp org: %v %v", org, err)
+	}
+	if _, err := repo.ServicePrincipalOrg(ctx, uuid.New()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown sp org: %v", err)
+	}
+	keys, err := repo.KeysForServicePrincipal(ctx, owner, svcID)
+	if err != nil || len(keys) != 3 {
+		t.Fatalf("keys: %v err=%v", keys, err)
+	}
+	// Assertions key off IDs, not row order, so wall-clock backdating for
+	// the expiry case cannot disturb them.
+	byID := make(map[uuid.UUID]APIKey, len(keys))
+	for _, key := range keys {
+		if key.Prefix == "" || key.CreatedAt.IsZero() {
+			t.Fatalf("missing key fields: %+v", key)
+		}
+		byID[key.KeyID] = key
+	}
+	used, ok := byID[keyID]
+	if !ok || used.RevokedAt.IsZero() || used.LastUsedAt.IsZero() || !used.ExpiresAt.IsZero() {
+		t.Fatalf("used key: %+v", used)
+	}
+	stale, ok := byID[rotatedID]
+	if !ok || stale.ExpiresAt.IsZero() || stale.RevokedAt.IsZero() {
+		t.Fatalf("rotated key: %+v", stale)
+	}
+	fresh, ok := byID[liveID]
+	if !ok || fresh.RevokedAt.IsZero() || !fresh.LastUsedAt.IsZero() {
+		t.Fatalf("live key: %+v", fresh)
+	}
+	if keys, err := repo.KeysForServicePrincipal(ctx, stranger, svcID); err != nil || len(keys) != 0 {
+		t.Fatalf("stranger keys: %v err=%v", keys, err)
+	}
 	// Structural lockdown for both new tables.
 	for _, table := range []string{"identity_service_principals", "identity_api_keys"} {
 		var forced bool

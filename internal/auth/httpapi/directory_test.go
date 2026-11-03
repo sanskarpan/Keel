@@ -11,6 +11,38 @@ import (
 	"github.com/sanskarpan/keel/internal/auth/postgres"
 )
 
+func TestListAPIKeysRequiresMembership(t *testing.T) {
+	actor, org, sp := uuid.New(), uuid.New(), uuid.New()
+	target := "/v1/auth/service-principals/" + sp.String() + "/keys"
+	repo := orgSessionRepo(actor)
+	repo.spOrg = org
+	repo.orgs = []postgres.Organization{{OrgID: org, Role: auth.OrgRoleOwner}}
+	repo.apiKeys = []postgres.APIKey{
+		{KeyID: uuid.New(), Prefix: "abcdefgh", CreatedAt: directoryNow()},
+		{KeyID: uuid.New(), Prefix: "ijklmnop", CreatedAt: directoryNow()},
+	}
+	h := newTestHandler(repo, &fakeSender{}, &fakeSender{})
+	response := doRequest(h, http.MethodGet, target, nil, "token")
+	if response.Code != http.StatusOK || !contains(response.Body.String(), "abcdefgh") {
+		t.Fatalf("keys: %d %s", response.Code, response.Body.String())
+	}
+	stranger := orgSessionRepo(actor)
+	h = newTestHandler(stranger, &fakeSender{}, &fakeSender{})
+	if response := doRequest(h, http.MethodGet, target, nil, "token"); response.Code != http.StatusNotFound {
+		t.Fatalf("stranger: %d", response.Code)
+	}
+	membered := orgSessionRepo(actor)
+	membered.spOrg = org
+	membered.orgs = []postgres.Organization{{OrgID: org, Role: auth.OrgRoleMember}}
+	h = newTestHandler(membered, &fakeSender{}, &fakeSender{})
+	if response := doRequest(h, http.MethodGet, target, nil, "token"); response.Code != http.StatusForbidden {
+		t.Fatalf("member: %d", response.Code)
+	}
+	if response := doRequest(h, http.MethodGet, "/v1/auth/service-principals/not-a-uuid/keys", nil, "token"); response.Code != http.StatusBadRequest {
+		t.Fatalf("bad sp: %d", response.Code)
+	}
+}
+
 func directoryNow() time.Time {
 	return time.Date(2026, time.November, 2, 12, 0, 0, 0, time.UTC)
 }

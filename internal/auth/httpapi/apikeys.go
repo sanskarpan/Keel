@@ -196,3 +196,87 @@ func (h *Handler) apiKeyIdentity(r *http.Request) (postgres.APIKeyIdentity, bool
 	}
 	return identity, true
 }
+
+// servicePrincipalOrg resolves the owning org for one service principal and
+// enforces owner/admin visibility: strangers see nothing beyond their own
+// orgs (404), members see a refusal (403).
+func (h *Handler) servicePrincipalOrg(w http.ResponseWriter, r *http.Request, actorID, spID uuid.UUID) (uuid.UUID, bool) {
+	orgID, err := h.repo.ServicePrincipalOrg(r.Context(), spID)
+	if err != nil {
+		if errors.Is(err, postgres.ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "not_found")
+			return uuid.Nil, false
+		}
+		writeProblem(w, http.StatusInternalServerError, "request_failed")
+		return uuid.Nil, false
+	}
+	orgs, err := h.repo.OrganizationsFor(r.Context(), actorID)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "request_failed")
+		return uuid.Nil, false
+	}
+	for _, org := range orgs {
+		if org.OrgID == orgID {
+			switch org.Role {
+			case auth.OrgRoleOwner, auth.OrgRoleAdmin:
+				return orgID, true
+			default:
+				writeProblem(w, http.StatusForbidden, "forbidden")
+				return uuid.Nil, false
+			}
+		}
+	}
+	writeProblem(w, http.StatusNotFound, "not_found")
+	return uuid.Nil, false
+}
+
+type apiKeyEntry struct {
+	KeyID      string `json:"key_id"`
+	Prefix     string `json:"prefix"`
+	CreatedAt  string `json:"created_at"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
+	RevokedAt  string `json:"revoked_at,omitempty"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// GET /v1/auth/service-principals/{service_principal_id}/keys (Bearer
+// owner/admin of the owning org).
+func (h *Handler) listAPIKeys(w http.ResponseWriter, r *http.Request) {
+	actorID, ok := h.authenticatedPrincipal(w, r)
+	if !ok {
+		return
+	}
+	servicePrincipalID, err := uuid.Parse(r.PathValue("service_principal_id"))
+	if err != nil || servicePrincipalID == uuid.Nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if _, ok := h.servicePrincipalOrg(w, r, actorID, servicePrincipalID); !ok {
+		return
+	}
+	keys, err := h.repo.KeysForServicePrincipal(r.Context(), actorID, servicePrincipalID)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "request_failed")
+		return
+	}
+	response := struct {
+		Keys []apiKeyEntry `json:"keys"`
+	}{Keys: make([]apiKeyEntry, 0, len(keys))}
+	for _, key := range keys {
+		response.Keys = append(response.Keys, apiKeyEntry{
+			KeyID: key.KeyID.String(), Prefix: key.Prefix,
+			CreatedAt:  formatTime(key.CreatedAt),
+			ExpiresAt:  formatTime(key.ExpiresAt),
+			RevokedAt:  formatTime(key.RevokedAt),
+			LastUsedAt: formatTime(key.LastUsedAt),
+		})
+	}
+	writeJSON(w, http.StatusOK, response)
+}

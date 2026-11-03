@@ -345,6 +345,14 @@ func TestHTTPAPIKeysLifecycleAgainstPostgres(t *testing.T) {
 	if err != nil || outcome != "valid" || identity.OrgID.String() != created.OrgID {
 		t.Fatalf("verify: %v (outcome %q identity %+v)", err, outcome, identity)
 	}
+	listTarget := "/v1/auth/service-principals/" + sp.ServicePrincipalID + "/keys"
+	response = doRequest(h, http.MethodGet, listTarget, nil, ownerToken)
+	if response.Code != http.StatusOK || !contains(response.Body.String(), issued.KeyID) {
+		t.Fatalf("list: %d %s", response.Code, response.Body.String())
+	}
+	if response := doRequest(h, http.MethodGet, listTarget, nil, strangerToken); response.Code != http.StatusNotFound {
+		t.Fatalf("stranger list: %d", response.Code)
+	}
 	revokeTarget := "/v1/auth/service-principals/" + sp.ServicePrincipalID + "/keys/" + issued.KeyID + "/revoke"
 	response = doRequest(h, http.MethodPost, revokeTarget, nil, strangerToken)
 	if response.Code != http.StatusForbidden {

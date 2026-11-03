@@ -68,6 +68,8 @@ type Repository interface {
 	VerifyAPIKey(ctx context.Context, formattedKey string) (string, postgres.APIKeyIdentity, error)
 	RevokeAPIKey(ctx context.Context, actorID, keyID uuid.UUID) (string, error)
 	DisableServicePrincipal(ctx context.Context, actorID, servicePrincipalID uuid.UUID) (string, error)
+	ServicePrincipalOrg(ctx context.Context, servicePrincipalID uuid.UUID) (uuid.UUID, error)
+	KeysForServicePrincipal(ctx context.Context, actorID, servicePrincipalID uuid.UUID) ([]postgres.APIKey, error)
 }
 
 type APIKeyIdentity = postgres.APIKeyIdentity
@@ -142,6 +144,7 @@ func New(repo Repository, pepper []byte, hashParams auth.ArgonParams, verifySend
 	h.mux.HandleFunc("POST /v1/auth/service-principals/{service_principal_id}/keys", h.issueAPIKey)
 	h.mux.HandleFunc("POST /v1/auth/service-principals/{service_principal_id}/keys/{key_id}/revoke", h.revokeAPIKey)
 	h.mux.HandleFunc("POST /v1/auth/service-principals/{service_principal_id}/disable", h.disableServicePrincipal)
+	h.mux.HandleFunc("GET /v1/auth/service-principals/{service_principal_id}/keys", h.listAPIKeys)
 	h.mux.HandleFunc("GET /v1/auth/whoami", h.whoami)
 	return h, nil
 }

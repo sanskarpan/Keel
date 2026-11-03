@@ -153,6 +153,12 @@ type fakeRepo struct {
 
 	disableSPOutcome string
 	disableSPErr     error
+
+	spOrg    uuid.UUID
+	spOrgErr error
+
+	apiKeys    []postgres.APIKey
+	apiKeysErr error
 }
 
 func (f *fakeRepo) BootstrapPrincipal(_ context.Context, id uuid.UUID, _ string, _ []byte, _ string, _ *uuid.UUID) (string, error) {
@@ -231,6 +237,14 @@ func (f *fakeRepo) RevokeAPIKey(_ context.Context, _, _ uuid.UUID) (string, erro
 
 func (f *fakeRepo) DisableServicePrincipal(_ context.Context, _, _ uuid.UUID) (string, error) {
 	return f.disableSPOutcome, f.disableSPErr
+}
+
+func (f *fakeRepo) ServicePrincipalOrg(_ context.Context, _ uuid.UUID) (uuid.UUID, error) {
+	return f.spOrg, f.spOrgErr
+}
+
+func (f *fakeRepo) KeysForServicePrincipal(_ context.Context, _, _ uuid.UUID) ([]postgres.APIKey, error) {
+	return f.apiKeys, f.apiKeysErr
 }
 
 func (f *fakeRepo) CreateOrganization(_ context.Context, orgID, _ uuid.UUID, _, _, _ string) (string, error) {
