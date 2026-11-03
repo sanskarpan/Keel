@@ -154,7 +154,7 @@ local-identity-test: local-migrate
 	 docker compose -f $(COMPOSE_FILE) exec -T postgres env \
 	   KEEL_TEST_IDENTITY_DATABASE_URL='postgres://keel_local_identity:keel-identity-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	   KEEL_TEST_ADMIN_DATABASE_URL='postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
-	   /tmp/keel-identity.test -test.run TestPostgreSQLIdentityBootstrapAndSessionLifecycle -test.count=1
+	   /tmp/keel-identity.test -test.run TestPostgreSQLIdentity -test.count=1
 
 local-case-test: local-migrate
 	@set -eu; \

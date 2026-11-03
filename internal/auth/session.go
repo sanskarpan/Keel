@@ -40,6 +40,13 @@ func (s Session) Valid(now time.Time) bool {
 	return now.Before(s.ExpiresAt)
 }
 
+// ValidateResetTTL accepts one bounded password reset window; it intentionally
+// shares the verification bounds because an unused reset request is the same
+// kind of one-shot capability. The caller clocks expiry checks against now.
+func ValidateResetTTL(now, expires time.Time) error {
+	return ValidateVerificationTTL(now, expires)
+}
+
 // ValidateSessionBounds accepts a caller-chosen TTL within the fixed window.
 func ValidateSessionTTL(now, expires time.Time) error {
 	if expires.IsZero() || expires.Before(now.Add(MinSessionTTL)) || expires.After(now.Add(MaxSessionTTL)) {
