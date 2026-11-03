@@ -362,3 +362,65 @@ func TestHTTPAPIKeysLifecycleAgainstPostgres(t *testing.T) {
 		t.Fatalf("disable: %d %s", response.Code, response.Body.String())
 	}
 }
+
+// TestHTTPTenantResolutionAgainstPostgres proves the bridge into tenancy:
+// a bearer session resolves to nothing until switched, then to the org id
+// that trusted code passes to tenancy.WithTenantTx.
+func TestHTTPTenantResolutionAgainstPostgres(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity HTTP integration tests")
+	}
+	db, err := sql.Open("pgx", identityDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := postgres.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pepper := []byte("keel-http-pepper-keel-http-pepper-32-keel")
+	verifyS, resetS := &fakeSender{}, &fakeSender{}
+	h, err := New(repo, pepper, auth.TestArgonParams(), verifyS, resetS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestWith := func(token string) *http.Request {
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		return request
+	}
+	ownerToken := httpRegisterVerifyLogin(t, h, verifyS, "ten-owner-"+uuid.NewString()+"@example.test", "ten-owner-pass-phrase")
+	if _, ok := h.TenantForRequest(requestWith(ownerToken)); ok {
+		t.Fatal("unswitched session resolved")
+	}
+	slug := "ten-" + uuid.NewString()[:8]
+	response := doRequest(h, http.MethodPost, "/v1/auth/organizations",
+		map[string]string{"slug": slug, "display_name": "Tenants", "region": "home"}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", response.Code, response.Body.String())
+	}
+	var created struct {
+		OrgID string `json:"org_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/sessions/switch",
+		map[string]string{"org_id": created.OrgID}, ownerToken)
+	if response.Code != http.StatusOK {
+		t.Fatalf("switch: %d %s", response.Code, response.Body.String())
+	}
+	tenant, ok := h.TenantForRequest(requestWith(ownerToken))
+	if !ok || string(tenant) != created.OrgID {
+		t.Fatalf("tenant: %q %v", tenant, ok)
+	}
+	if _, ok := h.TenantForRequest(requestWith("bad-token")); ok {
+		t.Fatal("bad token resolved")
+	}
+}
