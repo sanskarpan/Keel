@@ -870,6 +870,176 @@ func (r *Repository) DisableServicePrincipal(ctx context.Context, actorID, servi
 	return outcome, err
 }
 
+// Membership is one org seat as seen by an owner/admin directory read.
+type Membership struct {
+	PrincipalID uuid.UUID
+	Role        string
+	CreatedAt   time.Time
+}
+
+// MembersFor lists every seat in an organization. Actor authorization is
+// enforced by the caller comparing against OrganizationsFor; the function
+// itself returns rows only to keel_identity holders.
+func (r *Repository) MembersFor(ctx context.Context, actorID, orgID uuid.UUID) ([]Membership, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil {
+		return nil, ErrInvalidRecord
+	}
+	var members []Membership
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		rows, rowsErr := tx.QueryContext(ctx,
+			`SELECT out_principal_id,out_role,out_created_at FROM keel_meta.members_for_organization($1,$2)`,
+			actorID, orgID,
+		)
+		if rowsErr != nil {
+			return rowsErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var member Membership
+			if scanErr := rows.Scan(&member.PrincipalID, &member.Role, &member.CreatedAt); scanErr != nil {
+				return scanErr
+			}
+			members = append(members, member)
+		}
+		return rows.Err()
+	})
+	return members, err
+}
+
+// Invite is one pending invitation as seen by an owner/admin directory read.
+// The email digest is opaque hex: matchable by inviter tooling, never an
+// address.
+type Invite struct {
+	InviteID    uuid.UUID
+	EmailDigest []byte
+	Role        string
+	RequestedAt time.Time
+	ExpiresAt   time.Time
+}
+
+// InvitesFor lists every pending invite in an organization. Actor
+// authorization is enforced by the caller comparing against
+// OrganizationsFor.
+func (r *Repository) InvitesFor(ctx context.Context, actorID, orgID uuid.UUID) ([]Invite, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil {
+		return nil, ErrInvalidRecord
+	}
+	var invites []Invite
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		rows, rowsErr := tx.QueryContext(ctx,
+			`SELECT out_invite_id,out_email_digest,out_role,out_requested_at,out_expires_at FROM keel_meta.invites_for_organization($1,$2)`,
+			actorID, orgID,
+		)
+		if rowsErr != nil {
+			return rowsErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var invite Invite
+			if scanErr := rows.Scan(&invite.InviteID, &invite.EmailDigest, &invite.Role, &invite.RequestedAt, &invite.ExpiresAt); scanErr != nil {
+				return scanErr
+			}
+			invites = append(invites, invite)
+		}
+		return rows.Err()
+	})
+	return invites, err
+}
+
+// RevokeInvite cancels one pending invite before acceptance; consumed
+// invites are immutable history and report unknown.
+func (r *Repository) RevokeInvite(ctx context.Context, actorID, inviteID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || inviteID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.revoke_organization_invite($1,$2)`, actorID, inviteID,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "unknown_invite" {
+		return "", ErrNotFound
+	}
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
+	return outcome, err
+}
+
+// SetMemberRole moves a seat between admin and member. Only the owner may
+// change roles; the owner seat moves only by transfer and the call is
+// idempotent when the seat already holds the role.
+func (r *Repository) SetMemberRole(ctx context.Context, actorID, orgID, memberID uuid.UUID, role string) (string, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil || memberID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	if role != auth.OrgRoleAdmin && role != auth.OrgRoleMember {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.set_organization_member_role($1,$2,$3,$4)`,
+			actorID, orgID, memberID, role,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
+	if err == nil && outcome == "not_member" {
+		return "", ErrNotFound
+	}
+	if err == nil && outcome == "owner_immutable" {
+		return "", ErrConflict
+	}
+	return outcome, err
+}
+
+// RemoveMember removes a non-owner seat. Owners and admins remove others;
+// any non-owner may leave unilaterally. Owners leave only by transfer.
+func (r *Repository) RemoveMember(ctx context.Context, actorID, orgID, memberID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil || memberID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.remove_organization_member($1,$2,$3)`,
+			actorID, orgID, memberID,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
+	if err == nil && outcome == "not_member" {
+		return "", ErrNotFound
+	}
+	if err == nil && outcome == "owner_immutable" {
+		return "", ErrConflict
+	}
+	return outcome, err
+}
+
+// ReapExpiredInvites deletes expired pending invites for one organization.
+// Negative means the actor is not an owner/admin; otherwise the count
+// removed (zero is valid).
+func (r *Repository) ReapExpiredInvites(ctx context.Context, actorID, orgID uuid.UUID) (int, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil {
+		return 0, ErrInvalidRecord
+	}
+	var reaped int
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.reap_expired_organization_invites($1,$2)`, actorID, orgID,
+		).Scan(&reaped)
+	})
+	if err == nil && reaped < 0 {
+		return 0, ErrNotAuthorized
+	}
+	return reaped, err
+}
+
 // OrganizationsFor lists every organization one principal belongs to.
 func (r *Repository) OrganizationsFor(ctx context.Context, principalID uuid.UUID) ([]Organization, error) {
 	if r == nil || r.db == nil || principalID == uuid.Nil {
