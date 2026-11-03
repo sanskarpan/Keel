@@ -93,6 +93,15 @@ type fakeRepo struct {
 	orgs    []postgres.Organization
 	orgsErr error
 
+	members    []postgres.Membership
+	membersErr error
+
+	invites    []postgres.Invite
+	invitesErr error
+
+	revokeInviteOutcome string
+	revokeInviteErr     error
+
 	inviteOutcome string
 	inviteErr     error
 	invitedEmail  string
@@ -220,6 +229,18 @@ func (f *fakeRepo) AddOrganizationMember(_ context.Context, actor, org, member u
 
 func (f *fakeRepo) OrganizationsFor(_ context.Context, _ uuid.UUID) ([]postgres.Organization, error) {
 	return f.orgs, f.orgsErr
+}
+
+func (f *fakeRepo) MembersFor(_ context.Context, _, _ uuid.UUID) ([]postgres.Membership, error) {
+	return f.members, f.membersErr
+}
+
+func (f *fakeRepo) InvitesFor(_ context.Context, _, _ uuid.UUID) ([]postgres.Invite, error) {
+	return f.invites, f.invitesErr
+}
+
+func (f *fakeRepo) RevokeInvite(_ context.Context, _, _ uuid.UUID) (string, error) {
+	return f.revokeInviteOutcome, f.revokeInviteErr
 }
 
 func (f *fakeRepo) InviteMember(_ context.Context, _, _, _ uuid.UUID, email string, _ []byte, _ string, role string, _, _ time.Time) (string, error) {
