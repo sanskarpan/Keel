@@ -148,13 +148,20 @@ local-supplier-test: local-migrate
 local-identity-test: local-migrate
 	@set -eu; \
 	 test_bin=$$(mktemp /tmp/keel-identity-test.XXXXXX); \
-	 trap 'rm -f "$$test_bin"; docker compose -f $(COMPOSE_FILE) exec -T postgres rm -f /tmp/keel-identity.test >/dev/null 2>&1 || true' EXIT; \
+	 http_bin=$$(mktemp /tmp/keel-identity-http-test.XXXXXX); \
+	 trap 'rm -f "$$test_bin" "$$http_bin"; docker compose -f $(COMPOSE_FILE) exec -T postgres rm -f /tmp/keel-identity.test /tmp/keel-identity-http.test >/dev/null 2>&1 || true' EXIT; \
 	 GOTOOLCHAIN=local go test -c -o "$$test_bin" ./internal/auth/postgres; \
+	 GOTOOLCHAIN=local go test -c -o "$$http_bin" ./internal/auth/httpapi; \
 	 docker cp "$$test_bin" $$(docker compose -f $(COMPOSE_FILE) ps -q postgres):/tmp/keel-identity.test; \
+	 docker cp "$$http_bin" $$(docker compose -f $(COMPOSE_FILE) ps -q postgres):/tmp/keel-identity-http.test; \
 	 docker compose -f $(COMPOSE_FILE) exec -T postgres env \
 	   KEEL_TEST_IDENTITY_DATABASE_URL='postgres://keel_local_identity:keel-identity-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
 	   KEEL_TEST_ADMIN_DATABASE_URL='postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
-	   /tmp/keel-identity.test -test.run TestPostgreSQLIdentity -test.count=1
+	   /tmp/keel-identity.test -test.run TestPostgreSQLIdentity -test.count=1; \
+	 docker compose -f $(COMPOSE_FILE) exec -T postgres env \
+	   KEEL_TEST_IDENTITY_DATABASE_URL='postgres://keel_local_identity:keel-identity-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
+	   KEEL_TEST_ADMIN_DATABASE_URL='postgres://postgres:keel-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
+	   /tmp/keel-identity-http.test -test.run TestHTTPIdentity -test.count=1
 
 local-case-test: local-migrate
 	@set -eu; \
