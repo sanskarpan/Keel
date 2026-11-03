@@ -1,4 +1,4 @@
-.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-rate-limit-observer local-webhook-worker local-operator-api local-monitoring-up local-monitoring-down local-orders-test local-supplier-test local-identity-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
+.PHONY: test vet fmt check contract retrieval-lint retrieval-eval local-up local-down local-health local-seed local-roles local-rls-test local-migration-test local-migrate local-rate-limit-observer local-webhook-worker local-operator-api local-identity-api local-monitoring-up local-monitoring-down local-orders-test local-supplier-test local-identity-test local-case-test local-workflow-dispatch-test local-retrieval-test local-temporal-test
 
 COMPOSE_FILE := deploy/compose/compose.yaml
 
@@ -102,6 +102,18 @@ local-operator-api: local-migrate
 	KEEL_OPERATOR_DATABASE_URL='postgres://keel_local_operator:keel-operator-local-only@127.0.0.1:54329/postgres?sslmode=disable' \
 	KEEL_OPERATOR_API_TOKENS='22222222-2222-4222-8222-222222222222:local-ops:local-only-operator-token-0123456789abcdef' \
 	GOTOOLCHAIN=local go run ./cmd/keel
+
+local-identity-api: local-migrate
+	@set -eu; \
+	 pepper_file=$$(mktemp /tmp/keel-pepper.XXXXXX); \
+	 trap 'rm -f "$$pepper_file"' EXIT; \
+	 printf '%s' 'keel-local-dev-pepper-keel-local-dev!' > "$$pepper_file"; \
+	 KEEL_ROLE=identity-api \
+	 KEEL_ENVIRONMENT=development \
+	 KEEL_LISTEN_ADDRESS=127.0.0.1:18084 \
+	 KEEL_IDENTITY_DATABASE_URL='postgres://keel_local_identity:keel-identity-local-only@127.0.0.1:5432/postgres?sslmode=disable' \
+	 KEEL_IDENTITY_PEPPER_FILE="$$pepper_file" \
+	 GOTOOLCHAIN=local go run ./cmd/keel
 
 local-monitoring-up: local-up
 	docker compose -f $(COMPOSE_FILE) --profile monitoring up -d prometheus

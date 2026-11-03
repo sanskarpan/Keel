@@ -32,6 +32,10 @@ func RegistryFor(cfg config.Config) Registry {
 		return Registry{config.RoleOperatorAPI: func(ctx context.Context) error {
 			return runOperatorAPI(ctx, cfg, os.Getenv)
 		}}
+	case config.RoleIdentityAPI:
+		return Registry{config.RoleIdentityAPI: func(ctx context.Context) error {
+			return runIdentityAPI(ctx, cfg, os.Getenv)
+		}}
 	default:
 		return Registry{}
 	}
