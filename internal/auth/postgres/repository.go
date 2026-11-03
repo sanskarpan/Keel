@@ -754,10 +754,11 @@ func (r *Repository) CreateServicePrincipal(ctx context.Context, servicePrincipa
 }
 
 // IssueAPIKey mints one bearer key and returns the wire form exactly once.
-// Only the purpose-bound digest is stored; rotation is a fresh issue plus a
-// revoke of the predecessor.
-func (r *Repository) IssueAPIKey(ctx context.Context, keyID, servicePrincipalID uuid.UUID, now, expires time.Time) (string, error) {
-	if r == nil || r.db == nil || keyID == uuid.Nil || servicePrincipalID == uuid.Nil {
+// The actor must hold owner/admin membership in the service principal's
+// organization. Only the purpose-bound digest is stored; rotation is a fresh
+// issue plus a revoke of the predecessor.
+func (r *Repository) IssueAPIKey(ctx context.Context, keyID, actorID, servicePrincipalID uuid.UUID, now, expires time.Time) (string, error) {
+	if r == nil || r.db == nil || keyID == uuid.Nil || actorID == uuid.Nil || servicePrincipalID == uuid.Nil {
 		return "", ErrInvalidRecord
 	}
 	if err := auth.ValidateAPIKeyTTL(now, expires); err != nil {
@@ -778,12 +779,15 @@ func (r *Repository) IssueAPIKey(ctx context.Context, keyID, servicePrincipalID 
 	var outcome string
 	err = r.withTx(ctx, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx,
-			`SELECT keel_meta.issue_identity_api_key($1,$2,$3,$4,$5)`,
-			keyID, servicePrincipalID, prefix, digest[:], expiry,
+			`SELECT keel_meta.issue_identity_api_key($1,$2,$3,$4,$5,$6)`,
+			keyID, actorID, servicePrincipalID, prefix, digest[:], expiry,
 		).Scan(&outcome)
 	})
 	if err == nil && outcome == "unknown_principal" {
 		return "", ErrNotFound
+	}
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
 	}
 	if err == nil && outcome == "key_reuse" {
 		return "", ErrTokenReuse
@@ -825,36 +829,43 @@ func (r *Repository) VerifyAPIKey(ctx context.Context, formattedKey string) (str
 }
 
 // RevokeAPIKey terminates one key exactly once; repeat revokes converge.
-func (r *Repository) RevokeAPIKey(ctx context.Context, keyID uuid.UUID) (string, error) {
-	if r == nil || r.db == nil || keyID == uuid.Nil {
+// The actor must hold owner/admin membership in the key's organization.
+func (r *Repository) RevokeAPIKey(ctx context.Context, actorID, keyID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || keyID == uuid.Nil {
 		return "", ErrInvalidRecord
 	}
 	var outcome string
 	err := r.withTx(ctx, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx,
-			`SELECT keel_meta.revoke_identity_api_key($1)`, keyID,
+			`SELECT keel_meta.revoke_identity_api_key($1,$2)`, actorID, keyID,
 		).Scan(&outcome)
 	})
 	if err == nil && outcome == "unknown_key" {
 		return "", ErrNotFound
 	}
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
 	return outcome, err
 }
 
 // DisableServicePrincipal disables one machine identity and revokes every
-// live key it holds.
-func (r *Repository) DisableServicePrincipal(ctx context.Context, servicePrincipalID uuid.UUID) (string, error) {
-	if r == nil || r.db == nil || servicePrincipalID == uuid.Nil {
+// live key it holds. The actor must hold owner/admin membership.
+func (r *Repository) DisableServicePrincipal(ctx context.Context, actorID, servicePrincipalID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || servicePrincipalID == uuid.Nil {
 		return "", ErrInvalidRecord
 	}
 	var outcome string
 	err := r.withTx(ctx, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx,
-			`SELECT keel_meta.disable_identity_service_principal($1)`, servicePrincipalID,
+			`SELECT keel_meta.disable_identity_service_principal($1,$2)`, actorID, servicePrincipalID,
 		).Scan(&outcome)
 	})
 	if err == nil && outcome == "unknown_principal" {
 		return "", ErrNotFound
+	}
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
 	}
 	return outcome, err
 }

@@ -338,7 +338,9 @@ the legitimate member-to-owner transfer shape. Migration
 `identity_service_principals` (one org each) and `identity_api_keys`
 (public prefix, unique purpose-bound digest, optional expiry, revoke and
 use-stamp history) with capability-gated create/issue/verify/revoke plus
-principal disable that revokes every live key.
+principal disable that revokes every live key; `0077` repairs the trust
+boundary by adding owner/admin actor authorization to issue/revoke/disable
+and dropping the capability-only originals.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
