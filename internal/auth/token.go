@@ -59,7 +59,7 @@ func NewSecret(source io.Reader) (string, error) {
 // TokenDigest binds one allowed purpose to one well-formed secret.
 func TokenDigest(secret, purpose string) ([sha256.Size]byte, error) {
 	if purpose != PurposeSession && purpose != PurposeEmailVerification && purpose != PurposePasswordReset &&
-		purpose != PurposeOrganizationInvite {
+		purpose != PurposeOrganizationInvite && purpose != PurposeAPIKey {
 		return [sha256.Size]byte{}, ErrInvalidToken
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(secret)

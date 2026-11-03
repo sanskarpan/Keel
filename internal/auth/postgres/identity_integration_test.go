@@ -181,7 +181,8 @@ func TestPostgreSQLIdentityBootstrapAndSessionLifecycle(t *testing.T) {
 		                     'identity_password_resets','identity_login_throttle',
 		                     'identity_webauthn_credentials','identity_webauthn_challenges',
 		                     'identity_organizations','identity_memberships',
-		                     'identity_invites')
+		                     'identity_invites','identity_service_principals',
+		                     'identity_api_keys')
 		   AND EXISTS (SELECT 1 FROM aclexplode(c.relacl) a
 		                WHERE a.grantee<>c.relowner)`)
 	if err != nil {
@@ -916,6 +917,139 @@ func TestPostgreSQLIdentityInvitesAndTransfer(t *testing.T) {
 	} else if !isPrivilegeDenial(err) {
 		t.Fatalf("unexpected identity denial: %v", err)
 	}
+}
+
+// TestPostgreSQLIdentityAPIKeys proves the machine-identity lifecycle: an
+// owner/admin registers a service principal, issues bearer keys shown once,
+// verifies against digests only, rotates with overlap, and revocation plus
+// disable fail closed.
+func TestPostgreSQLIdentityAPIKeys(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity integration tests")
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	identityDB := openRoleDB(t, identityDSN)
+	repo, err := New(identityDB)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	pepper := []byte("keel-integration-pepper-keel-integration-pepper-32")
+	adminDB := openRoleDB(t, adminDSN)
+
+	owner := activeTestPrincipal(t, ctx, repo, pepper, "svc-owner-"+uuid.NewString()+"@example.test", nil)
+	orgID := uuid.New()
+	if outcome, err := repo.CreateOrganization(ctx, orgID, owner, "svc-"+uuid.NewString()[:8], "Services", "home"); err != nil || outcome != "created" {
+		t.Fatalf("create: %v (outcome %q)", err, outcome)
+	}
+	stranger := activeTestPrincipal(t, ctx, repo, pepper, "svc-stranger-"+uuid.NewString()+"@example.test", nil)
+	svcID := uuid.New()
+	if outcome, err := repo.CreateServicePrincipal(ctx, svcID, owner, orgID, "etl-worker"); err != nil || outcome != "created" {
+		t.Fatalf("create service: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.CreateServicePrincipal(ctx, uuid.New(), stranger, orgID, "intruder"); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("stranger create: %v", err)
+	}
+	// Issue shows the wire form once; verification resolves the identity.
+	keyID := uuid.New()
+	wire, err := repo.IssueAPIKey(ctx, keyID, svcID, now, time.Time{})
+	if err != nil || wire == "" {
+		t.Fatalf("issue: %v", err)
+	}
+	if prefix, _, err := auth.ParseAPIKey(wire); err != nil || prefix == "" {
+		t.Fatalf("wire form: %v", err)
+	}
+	outcome, identity, err := repo.VerifyAPIKey(ctx, wire)
+	if err != nil || outcome != "valid" || identity.KeyID != keyID || identity.ServicePrincipalID != svcID || identity.OrgID != orgID {
+		t.Fatalf("verify: %v (outcome %q identity %+v)", err, outcome, identity)
+	}
+	if outcome, _, err := repo.VerifyAPIKey(ctx, wire[:len(wire)-2]+"xx"); err != nil || outcome != "unknown" {
+		t.Fatalf("tampered key: %v (outcome %q)", err, outcome)
+	}
+	// Rotation overlaps: the predecessor stays valid until revoked.
+	rotatedID := uuid.New()
+	rotated, err := repo.IssueAPIKey(ctx, rotatedID, svcID, now, now.Add(24*time.Hour))
+	if err != nil || rotated == "" {
+		t.Fatalf("rotate issue: %v", err)
+	}
+	if outcome, _, err := repo.VerifyAPIKey(ctx, wire); err != nil || outcome != "valid" {
+		t.Fatalf("predecessor during overlap: %v (outcome %q)", err, outcome)
+	}
+	if outcome, err := repo.RevokeAPIKey(ctx, keyID); err != nil || outcome != "revoked" {
+		t.Fatalf("revoke: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.RevokeAPIKey(ctx, keyID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("repeat revoke: %v", err)
+	}
+	if outcome, _, err := repo.VerifyAPIKey(ctx, wire); err != nil || outcome != "revoked" {
+		t.Fatalf("revoked verify: %v (outcome %q)", err, outcome)
+	}
+	if outcome, _, err := repo.VerifyAPIKey(ctx, rotated); err != nil || outcome != "valid" {
+		t.Fatalf("rotated verify: %v (outcome %q)", err, outcome)
+	}
+	// Expiry is enforced on the database clock.
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_api_keys DISABLE TRIGGER identity_api_keys_guard`); err != nil {
+		t.Fatalf("disable key guard: %v", err)
+	}
+	expiryDigest, err := auth.APIKeyDigest(mustAPIKeySecret(t, rotated))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.identity_api_keys SET created_at=clock_timestamp()-INTERVAL '2 hours',expires_at=clock_timestamp()-INTERVAL '1 minute' WHERE key_digest=$1`, expiryDigest[:]); err != nil {
+		t.Fatalf("backdate key: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_api_keys ENABLE TRIGGER identity_api_keys_guard`); err != nil {
+		t.Fatalf("enable key guard: %v", err)
+	}
+	if outcome, _, err := repo.VerifyAPIKey(ctx, rotated); err != nil || outcome != "expired" {
+		t.Fatalf("expired verify: %v (outcome %q)", err, outcome)
+	}
+	// Disabling the principal revokes every live key.
+	liveID := uuid.New()
+	live, err := repo.IssueAPIKey(ctx, liveID, svcID, now, time.Time{})
+	if err != nil {
+		t.Fatalf("live issue: %v", err)
+	}
+	if outcome, err := repo.DisableServicePrincipal(ctx, svcID); err != nil || outcome != "disabled" {
+		t.Fatalf("disable: %v (outcome %q)", err, outcome)
+	}
+	if outcome, _, err := repo.VerifyAPIKey(ctx, live); err != nil || outcome != "revoked" {
+		t.Fatalf("disabled verify: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.DisableServicePrincipal(ctx, svcID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("repeat disable: %v", err)
+	}
+	// Structural lockdown for both new tables.
+	for _, table := range []string{"identity_service_principals", "identity_api_keys"} {
+		var forced bool
+		if err := adminDB.QueryRowContext(ctx,
+			`SELECT relforcerowsecurity FROM pg_class WHERE oid=('keel_meta.'||$1)::regclass`, table).Scan(&forced); err != nil || !forced {
+			t.Fatalf("%s is not FORCE RLS: %v", table, err)
+		}
+	}
+	appDB := openRoleDB(t, "postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable")
+	if _, err := appDB.QueryContext(ctx, `SELECT keel_meta.issue_identity_api_key(gen_random_uuid(),gen_random_uuid(),'abcdefgh','00'::bytea,NULL)`); err == nil {
+		t.Fatal("app capability executed key function")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected app denial: %v", err)
+	}
+	if _, err := identityDB.QueryContext(ctx, `SELECT key_digest FROM keel_meta.identity_api_keys LIMIT 1`); err == nil {
+		t.Fatal("identity login read keys directly")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected identity denial: %v", err)
+	}
+}
+
+func mustAPIKeySecret(t *testing.T, wire string) string {
+	t.Helper()
+	_, secret, err := auth.ParseAPIKey(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return secret
 }
 
 // TestPostgreSQLIdentityWebAuthn proves the key lifecycle: active-only

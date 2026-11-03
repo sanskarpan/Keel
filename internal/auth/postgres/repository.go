@@ -724,6 +724,141 @@ func (r *Repository) TransferOwnership(ctx context.Context, actorID, orgID, newO
 	return outcome, err
 }
 
+// APIKeyIdentity is the verified identity behind one bearer key.
+type APIKeyIdentity struct {
+	KeyID              uuid.UUID
+	ServicePrincipalID uuid.UUID
+	OrgID              uuid.UUID
+}
+
+// CreateServicePrincipal registers one machine identity under an
+// organization. The actor must hold owner/admin membership.
+func (r *Repository) CreateServicePrincipal(ctx context.Context, servicePrincipalID, actorID, orgID uuid.UUID, name string) (string, error) {
+	if r == nil || r.db == nil || servicePrincipalID == uuid.Nil || actorID == uuid.Nil || orgID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	if err := auth.ValidateServiceName(name); err != nil {
+		return "", err
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.create_identity_service_principal($1,$2,$3,$4)`,
+			servicePrincipalID, actorID, orgID, name,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
+	return outcome, err
+}
+
+// IssueAPIKey mints one bearer key and returns the wire form exactly once.
+// Only the purpose-bound digest is stored; rotation is a fresh issue plus a
+// revoke of the predecessor.
+func (r *Repository) IssueAPIKey(ctx context.Context, keyID, servicePrincipalID uuid.UUID, now, expires time.Time) (string, error) {
+	if r == nil || r.db == nil || keyID == uuid.Nil || servicePrincipalID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	if err := auth.ValidateAPIKeyTTL(now, expires); err != nil {
+		return "", err
+	}
+	secret, prefix, err := auth.NewAPIKeySecret()
+	if err != nil {
+		return "", err
+	}
+	digest, err := auth.APIKeyDigest(secret)
+	if err != nil {
+		return "", err
+	}
+	var expiry any
+	if !expires.IsZero() {
+		expiry = expires.UTC()
+	}
+	var outcome string
+	err = r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.issue_identity_api_key($1,$2,$3,$4,$5)`,
+			keyID, servicePrincipalID, prefix, digest[:], expiry,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "unknown_principal" {
+		return "", ErrNotFound
+	}
+	if err == nil && outcome == "key_reuse" {
+		return "", ErrTokenReuse
+	}
+	if err != nil || outcome != "issued" {
+		return "", err
+	}
+	formatted, err := auth.FormatAPIKey(secret)
+	if err != nil {
+		return "", err
+	}
+	return formatted, nil
+}
+
+// VerifyAPIKey resolves one bearer key to its service identity. Only
+// "valid" authenticates; revocation, expiry and unknown keys fail closed
+// with distinct outcomes and no identity.
+func (r *Repository) VerifyAPIKey(ctx context.Context, formattedKey string) (string, APIKeyIdentity, error) {
+	if r == nil || r.db == nil {
+		return "", APIKeyIdentity{}, ErrInvalidRecord
+	}
+	_, secret, err := auth.ParseAPIKey(formattedKey)
+	if err != nil {
+		return "", APIKeyIdentity{}, err
+	}
+	digest, err := auth.APIKeyDigest(secret)
+	if err != nil {
+		return "", APIKeyIdentity{}, err
+	}
+	var outcome string
+	var identity APIKeyIdentity
+	err = r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT outcome,out_key_id,out_service_principal_id,out_org_id FROM keel_meta.verify_identity_api_key($1)`,
+			digest[:],
+		).Scan(&outcome, &identity.KeyID, &identity.ServicePrincipalID, &identity.OrgID)
+	})
+	return outcome, identity, err
+}
+
+// RevokeAPIKey terminates one key exactly once; repeat revokes converge.
+func (r *Repository) RevokeAPIKey(ctx context.Context, keyID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || keyID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.revoke_identity_api_key($1)`, keyID,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "unknown_key" {
+		return "", ErrNotFound
+	}
+	return outcome, err
+}
+
+// DisableServicePrincipal disables one machine identity and revokes every
+// live key it holds.
+func (r *Repository) DisableServicePrincipal(ctx context.Context, servicePrincipalID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || servicePrincipalID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.disable_identity_service_principal($1)`, servicePrincipalID,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "unknown_principal" {
+		return "", ErrNotFound
+	}
+	return outcome, err
+}
+
 // OrganizationsFor lists every organization one principal belongs to.
 func (r *Repository) OrganizationsFor(ctx context.Context, principalID uuid.UUID) ([]Organization, error) {
 	if r == nil || r.db == nil || principalID == uuid.Nil {

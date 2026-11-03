@@ -333,7 +333,12 @@ digest that needs no account yet, single-use tokens, admin/member seats,
 resend replacement) with capability-gated invite/accept and an immediate
 audited owner transfer that swaps owner/admin atomically without
 orphaning; `0075` forward-repairs the membership guard, which had refused
-the legitimate member-to-owner transfer shape.
+the legitimate member-to-owner transfer shape. Migration
+`0076_identity_api_keys` adds machine identities: forced-RLS
+`identity_service_principals` (one org each) and `identity_api_keys`
+(public prefix, unique purpose-bound digest, optional expiry, revoke and
+use-stamp history) with capability-gated create/issue/verify/revoke plus
+principal disable that revokes every live key.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
