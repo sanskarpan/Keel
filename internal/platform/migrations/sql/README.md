@@ -317,7 +317,17 @@ DNS-safe slug, bounded name/region) and `identity_memberships`
 binds), `add_organization_member` (actor must hold owner/admin, member must
 be active, tenant must converge) and `organizations_for`; the principals
 guard now permits the single NULL-to-org tenant binding and still refuses
-every other direct mutation.
+every other direct mutation. Migration `0073_identity_multi_org_switch`
+implements the multi-org decision (several memberships, per-session active
+org): it drops the single-membership unique constraint, carries `org_id`
+on the session row, replaces the create/add functions so founding and
+joining never refuse an already-placed principal (tenant stays first-bound;
+only the unbound bind), replaces the sessions guard to permit
+capability-gated org transitions, drops and recreates
+`identity_session_for` with the active-org column (its return type grows,
+which CREATE OR REPLACE cannot do), and adds
+`switch_identity_session_org` (membership-checked; revoked, expired and
+unknown sessions do not switch).
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

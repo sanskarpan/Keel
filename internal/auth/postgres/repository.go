@@ -195,13 +195,14 @@ func (r *Repository) SessionForToken(ctx context.Context, token string, pepper [
 	err = r.withTx(ctx, func(tx *sql.Tx) error {
 		var revoked, expires, created sql.NullTime
 		var sessionID, principalID uuid.UUID
+		var orgID uuid.NullUUID
 		rowErr := tx.QueryRowContext(ctx,
 			`SELECT out_session_id,out_principal_id,out_principal_state,
-			        out_created_at,out_expires_at,out_revoked_at
+			        out_created_at,out_expires_at,out_revoked_at,out_org_id
 			   FROM keel_meta.identity_session_for($1)`,
 			digest[:],
 		).Scan(&sessionID, &principalID, &session.PrincipalState,
-			&created, &expires, &revoked)
+			&created, &expires, &revoked, &orgID)
 		if errors.Is(rowErr, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -209,6 +210,9 @@ func (r *Repository) SessionForToken(ctx context.Context, token string, pepper [
 		session.CreatedAt, session.ExpiresAt = created.Time, expires.Time
 		if revoked.Valid {
 			session.RevokedAt = revoked.Time
+		}
+		if orgID.Valid {
+			session.OrgID = orgID.UUID.String()
 		}
 		return rowErr
 	})
@@ -552,9 +556,10 @@ type Organization struct {
 	Role        string
 }
 
-// CreateOrganization creates one organization with the caller as owner and
-// binds an unbound principal's tenant to it. An already-bound principal or
-// a taken slug is a conflict.
+// CreateOrganization creates one organization with the caller as owner.
+// Founding never refuses a principal that already belongs elsewhere: the
+// tenant stays first-bound (primary) and only an unbound founder binds.
+// A taken slug is a conflict.
 func (r *Repository) CreateOrganization(ctx context.Context, orgID, principalID uuid.UUID, slug, displayName, region string) (string, error) {
 	if r == nil || r.db == nil || orgID == uuid.Nil || principalID == uuid.Nil {
 		return "", ErrInvalidRecord
@@ -578,15 +583,16 @@ func (r *Repository) CreateOrganization(ctx context.Context, orgID, principalID 
 	if err == nil && outcome == "not_active" {
 		return "", ErrNotVerified
 	}
-	if err == nil && (outcome == "already_bound" || outcome == "slug_conflict") {
+	if err == nil && outcome == "slug_conflict" {
 		return "", ErrConflict
 	}
 	return outcome, err
 }
 
 // AddOrganizationMember seats an active principal as admin or member. The
-// actor must hold owner/admin membership; a bound-to-another-org principal
-// is a tenant conflict.
+// actor must hold owner/admin membership. Joining never refuses a principal
+// that already belongs elsewhere: the tenant stays first-bound (primary)
+// and only an unbound member binds.
 func (r *Repository) AddOrganizationMember(ctx context.Context, actorID, orgID, memberID uuid.UUID, role string) (string, error) {
 	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil || memberID == uuid.Nil {
 		return "", ErrInvalidRecord
@@ -610,8 +616,27 @@ func (r *Repository) AddOrganizationMember(ctx context.Context, actorID, orgID, 
 	if err == nil && outcome == "not_active" {
 		return "", ErrNotVerified
 	}
-	if err == nil && (outcome == "already_member" || outcome == "tenant_conflict") {
+	if err == nil && outcome == "already_member" {
 		return "", ErrConflict
+	}
+	return outcome, err
+}
+
+// SwitchSessionOrg moves one live session to an organization its principal
+// belongs to. Revoked, expired and unknown sessions do not switch.
+func (r *Repository) SwitchSessionOrg(ctx context.Context, sessionID, orgID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || sessionID == uuid.Nil || orgID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.switch_identity_session_org($1,$2)`,
+			sessionID, orgID,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "unknown_session" {
+		return "", ErrNotFound
 	}
 	return outcome, err
 }

@@ -14,7 +14,9 @@ const (
 
 // Session is a stored session row as judged by the caller. Expiry is checked
 // against the caller's clock after the database read; a stored revocation is
-// unconditional because this slice never schedules future revocations.
+// unconditional because this slice never schedules future revocations. OrgID
+// is the session's active organization after an explicit switch and empty
+// when none was selected; it does not affect validity.
 type Session struct {
 	SessionID      string
 	PrincipalID    string
@@ -22,6 +24,7 @@ type Session struct {
 	ExpiresAt      time.Time
 	RevokedAt      time.Time
 	PrincipalState string
+	OrgID          string
 }
 
 // Valid reports whether the session is usable for a principal that is still

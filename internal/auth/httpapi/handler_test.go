@@ -78,6 +78,20 @@ type fakeRepo struct {
 
 	storeOutcome string
 	storeErr     error
+
+	createOrgOutcome string
+	createOrgErr     error
+	createdOrgID     uuid.UUID
+
+	addMemberOutcome string
+	addMemberErr     error
+	addedActor       uuid.UUID
+	addedOrg         uuid.UUID
+	addedMember      uuid.UUID
+	addedRole        string
+
+	orgs    []postgres.Organization
+	orgsErr error
 }
 
 func (f *fakeRepo) BootstrapPrincipal(_ context.Context, id uuid.UUID, _ string, _ []byte, _ string, _ *uuid.UUID) (string, error) {
@@ -136,6 +150,20 @@ func (f *fakeRepo) AdvanceSignCount(_ context.Context, _ []byte, _ uint32) (stri
 
 func (f *fakeRepo) StoreWebAuthnCredential(_ context.Context, _ uuid.UUID, _, _ []byte, _ string, _, _ bool, _ uint32) (string, error) {
 	return f.storeOutcome, f.storeErr
+}
+
+func (f *fakeRepo) CreateOrganization(_ context.Context, orgID, _ uuid.UUID, _, _, _ string) (string, error) {
+	f.createdOrgID = orgID
+	return f.createOrgOutcome, f.createOrgErr
+}
+
+func (f *fakeRepo) AddOrganizationMember(_ context.Context, actor, org, member uuid.UUID, role string) (string, error) {
+	f.addedActor, f.addedOrg, f.addedMember, f.addedRole = actor, org, member, role
+	return f.addMemberOutcome, f.addMemberErr
+}
+
+func (f *fakeRepo) OrganizationsFor(_ context.Context, _ uuid.UUID) ([]postgres.Organization, error) {
+	return f.orgs, f.orgsErr
 }
 
 func (f *fakeRepo) RecordLoginFailure(_ context.Context, _ uuid.UUID) (string, error) {
