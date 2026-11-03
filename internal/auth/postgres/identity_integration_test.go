@@ -622,9 +622,17 @@ func TestPostgreSQLIdentityOrganizations(t *testing.T) {
 	if err != nil || len(orgs) != 1 || orgs[0].OrgID != orgID || orgs[0].Role != auth.OrgRoleOwner {
 		t.Fatalf("owner orgs: %v err=%v", orgs, err)
 	}
-	// Bound principals cannot found a second organization.
-	if _, err := repo.CreateOrganization(ctx, uuid.New(), owner, "second-"+uuid.NewString()[:8], "Second", "home"); !errors.Is(err, ErrConflict) {
-		t.Fatalf("second org: %v", err)
+	// Founders keep founding: the tenant stays first-bound (primary).
+	secondOrgID := uuid.New()
+	if outcome, err := repo.CreateOrganization(ctx, secondOrgID, owner, "second-"+uuid.NewString()[:8], "Second", "home"); err != nil || outcome != "created" {
+		t.Fatalf("second org: %v (outcome %q)", err, outcome)
+	}
+	if bound := boundTenant(t, adminDB, ctx, owner); bound == nil || *bound != orgID {
+		t.Fatalf("owner tenant moved: %v", bound)
+	}
+	orgs, err = repo.OrganizationsFor(ctx, owner)
+	if err != nil || len(orgs) != 2 {
+		t.Fatalf("owner orgs: %v err=%v", orgs, err)
 	}
 	// Slugs are globally unique.
 	other := activeTestPrincipal(t, ctx, repo, pepper, "org-other-"+uuid.NewString()+"@example.test", nil)
@@ -663,7 +671,8 @@ func TestPostgreSQLIdentityOrganizations(t *testing.T) {
 	if outcome, err := repo.AddOrganizationMember(ctx, stranger, orgID, third, auth.OrgRoleMember); err != nil || outcome != "added" {
 		t.Fatalf("admin add: %v (outcome %q)", err, outcome)
 	}
-	// One membership per principal and no cross-org rebinding.
+	// Re-adding to the same org conflicts; joining a second org is allowed
+	// and never moves the first-bound tenant.
 	if _, err := repo.AddOrganizationMember(ctx, owner, orgID, member, auth.OrgRoleMember); !errors.Is(err, ErrConflict) {
 		t.Fatalf("re-add: %v", err)
 	}
@@ -672,8 +681,75 @@ func TestPostgreSQLIdentityOrganizations(t *testing.T) {
 	if outcome, err := repo.CreateOrganization(ctx, otherOrgID, otherOrgOwner, "rival-"+uuid.NewString()[:8], "Rival", "home"); err != nil || outcome != "created" {
 		t.Fatalf("rival create: %v (outcome %q)", err, outcome)
 	}
-	if _, err := repo.AddOrganizationMember(ctx, owner, orgID, otherOrgOwner, auth.OrgRoleMember); !errors.Is(err, ErrConflict) {
-		t.Fatalf("cross-org add: %v", err)
+	if outcome, err := repo.AddOrganizationMember(ctx, owner, orgID, otherOrgOwner, auth.OrgRoleMember); err != nil || outcome != "added" {
+		t.Fatalf("cross-org add: %v (outcome %q)", err, outcome)
+	}
+	if bound := boundTenant(t, adminDB, ctx, otherOrgOwner); bound == nil || *bound != otherOrgID {
+		t.Fatalf("rival tenant moved: %v", bound)
+	}
+	rivalOrgs, err := repo.OrganizationsFor(ctx, otherOrgOwner)
+	if err != nil || len(rivalOrgs) != 2 {
+		t.Fatalf("rival orgs: %v err=%v", rivalOrgs, err)
+	}
+	// Per-session active-org switch follows membership, never tenancy.
+	now := time.Now().UTC()
+	sessionID := uuid.New()
+	sessionToken := mustSecret(t)
+	if outcome, err := repo.RecordSession(ctx, sessionID, member, sessionToken, pepper, now, now.Add(time.Hour)); err != nil || outcome != "created" {
+		t.Fatalf("record session: %v (outcome %q)", err, outcome)
+	}
+	session, err := repo.SessionForToken(ctx, sessionToken, pepper)
+	if err != nil || session.OrgID != "" {
+		t.Fatalf("fresh session org: %q err=%v", session.OrgID, err)
+	}
+	if outcome, err := repo.SwitchSessionOrg(ctx, sessionID, orgID); err != nil || outcome != "switched" {
+		t.Fatalf("switch: %v (outcome %q)", err, outcome)
+	}
+	session, err = repo.SessionForToken(ctx, sessionToken, pepper)
+	if err != nil || session.OrgID != orgID.String() || !session.Valid(now) {
+		t.Fatalf("switched session: %+v err=%v", session, err)
+	}
+	// Switching to a second membership works; strangers and dead sessions fail.
+	if outcome, err := repo.AddOrganizationMember(ctx, otherOrgOwner, otherOrgID, member, auth.OrgRoleMember); err != nil || outcome != "added" {
+		t.Fatalf("member joins rival: %v (outcome %q)", err, outcome)
+	}
+	if outcome, err := repo.SwitchSessionOrg(ctx, sessionID, otherOrgID); err != nil || outcome != "switched" {
+		t.Fatalf("second switch: %v (outcome %q)", err, outcome)
+	}
+	thirdOrgID := uuid.New()
+	thirdOrgOwner := activeTestPrincipal(t, ctx, repo, pepper, "org-third-owner-"+uuid.NewString()+"@example.test", nil)
+	if outcome, err := repo.CreateOrganization(ctx, thirdOrgID, thirdOrgOwner, "third-"+uuid.NewString()[:8], "Third", "home"); err != nil || outcome != "created" {
+		t.Fatalf("third create: %v (outcome %q)", err, outcome)
+	}
+	if outcome, err := repo.SwitchSessionOrg(ctx, sessionID, thirdOrgID); err != nil || outcome != "not_member" {
+		t.Fatalf("stranger switch: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.SwitchSessionOrg(ctx, uuid.New(), orgID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown session switch: %v", err)
+	}
+	if _, err := repo.RevokeSession(ctx, sessionID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if _, err := repo.SwitchSessionOrg(ctx, sessionID, orgID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoked switch: %v", err)
+	}
+	// Expired sessions do not switch either.
+	expirySession := uuid.New()
+	expiryToken := mustSecret(t)
+	if outcome, err := repo.RecordSession(ctx, expirySession, member, expiryToken, pepper, now, now.Add(time.Hour)); err != nil || outcome != "created" {
+		t.Fatalf("expiry session: %v (outcome %q)", err, outcome)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_sessions DISABLE TRIGGER identity_sessions_guard`); err != nil {
+		t.Fatalf("disable sessions guard: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.identity_sessions SET created_at=clock_timestamp()-INTERVAL '2 hours',expires_at=clock_timestamp()-INTERVAL '1 hour' WHERE session_id=$1`, expirySession); err != nil {
+		t.Fatalf("backdate session: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_sessions ENABLE TRIGGER identity_sessions_guard`); err != nil {
+		t.Fatalf("enable sessions guard: %v", err)
+	}
+	if _, err := repo.SwitchSessionOrg(ctx, expirySession, orgID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired switch: %v", err)
 	}
 	// Owner seats are never granted through the member path, and bad input
 	// fails before the database.
