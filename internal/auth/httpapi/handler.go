@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 
 	"github.com/sanskarpan/keel/internal/auth"
@@ -44,6 +45,11 @@ type Repository interface {
 	RecordLoginFailure(ctx context.Context, principalID uuid.UUID) (string, error)
 	ResetLoginThrottle(ctx context.Context, principalID uuid.UUID) (int, error)
 	ThrottleFor(ctx context.Context, principalID uuid.UUID) (int, time.Time, error)
+	RecordWebAuthnChallenge(ctx context.Context, challengeID, principalID uuid.UUID, purpose string, challenge []byte, now, expires time.Time) (string, error)
+	ConsumeWebAuthnChallenge(ctx context.Context, challengeID uuid.UUID) (string, uuid.UUID, string, []byte, error)
+	KeysFor(ctx context.Context, principalID uuid.UUID) ([]postgres.WebAuthnKey, error)
+	AdvanceSignCount(ctx context.Context, credentialID []byte, presented uint32) (string, uuid.UUID, error)
+	StoreWebAuthnCredential(ctx context.Context, principalID uuid.UUID, credentialID, publicKey []byte, transports string, backupEligible, backupState bool, signCount uint32) (string, error)
 }
 
 // VerificationSender delivers email-verification tokens. Production sends
@@ -65,6 +71,7 @@ type Handler struct {
 	resetSender  ResetSender
 	now          func() time.Time
 	mux          *http.ServeMux
+	wa           *webauthn.WebAuthn
 }
 
 // New builds the unmounted identity handler. Pepper must hold at least
@@ -94,6 +101,10 @@ func New(repo Repository, pepper []byte, hashParams auth.ArgonParams, verifySend
 	h.mux.HandleFunc("POST /v1/auth/sessions/revoke", h.logout)
 	h.mux.HandleFunc("POST /v1/auth/password-resets", h.requestReset)
 	h.mux.HandleFunc("POST /v1/auth/password-resets/rotate", h.rotate)
+	h.mux.HandleFunc("POST /v1/auth/webauthn/registration/options", h.webauthnRegistrationOptions)
+	h.mux.HandleFunc("POST /v1/auth/webauthn/registration/verify", h.webauthnRegistrationVerify)
+	h.mux.HandleFunc("POST /v1/auth/webauthn/authentication/options", h.webauthnAuthenticationOptions)
+	h.mux.HandleFunc("POST /v1/auth/webauthn/authentication/verify", h.webauthnAuthenticationVerify)
 	return h, nil
 }
 

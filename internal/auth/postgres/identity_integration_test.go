@@ -742,4 +742,21 @@ func TestPostgreSQLIdentityWebAuthn(t *testing.T) {
 	} else if !isPrivilegeDenial(err) {
 		t.Fatalf("unexpected identity denial: %v", err)
 	}
+	// Direct store outcomes: inactive principals refuse, reuse conflicts.
+	pendingPrincipal := uuid.New()
+	pendingEmail := "webauthn-pending-" + uuid.NewString() + "@example.test"
+	if outcome, err := repo.BootstrapPrincipal(ctx, pendingPrincipal, pendingEmail, pepper, hash, &tenantID); err != nil || outcome != "created" {
+		t.Fatalf("pending bootstrap: %v (outcome %q)", err, outcome)
+	}
+	freshCred := []byte("webauthn-direct-" + uuid.NewString())
+	freshKey := bytes.Repeat([]byte{0x05}, 77)
+	if outcome, err := repo.StoreWebAuthnCredential(ctx, pendingPrincipal, freshCred, freshKey, "usb", false, false, 0); err != nil || outcome != "principal_inactive" {
+		t.Fatalf("pending store: %v (outcome %q)", err, outcome)
+	}
+	if outcome, err := repo.StoreWebAuthnCredential(ctx, principalID, freshCred, freshKey, "usb", true, false, 7); err != nil || outcome != "stored" {
+		t.Fatalf("direct store: %v (outcome %q)", err, outcome)
+	}
+	if outcome, err := repo.StoreWebAuthnCredential(ctx, otherPrincipal, freshCred, freshKey, "", false, false, 0); err != nil || outcome != "credential_reuse" {
+		t.Fatalf("direct reuse: %v (outcome %q)", err, outcome)
+	}
 }

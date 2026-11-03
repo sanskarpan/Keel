@@ -302,7 +302,14 @@ principal/purpose, 32-byte nonce, 10-minute ceremony window) with
 capability-gated record/consume, atomic challenge-bound registration and
 sign-count advance that reports clones without applying them; `0070`
 forward-repairs the `purpose` variable/column ambiguity that aborted both
-consume and register with SQLSTATE 42702.
+consume and register with SQLSTATE 42702. Migration
+`0071_identity_webauthn_direct_store` adds the ceremony-store path: the
+handler consumes the challenge before cryptography runs, verifies with the
+library, then `store_identity_webauthn_credential` binds the key
+(`stored`/`credential_reuse`/`principal_inactive`); the credentials guard is
+relaxed for inserts only so a ceremony may present a nonzero opening
+counter, while updates still advance monotonically and deletes stay
+refused.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

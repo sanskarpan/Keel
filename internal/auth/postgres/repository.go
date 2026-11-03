@@ -515,6 +515,32 @@ func (r *Repository) AdvanceSignCount(ctx context.Context, credentialID []byte, 
 	return outcome, principalID, err
 }
 
+// StoreWebAuthnCredential inserts one verified ceremony key. The caller must
+// have consumed a single-use challenge and verified the attestation first;
+// only "stored" binds the key.
+func (r *Repository) StoreWebAuthnCredential(ctx context.Context, principalID uuid.UUID, credentialID, publicKey []byte, transports string, backupEligible, backupState bool, signCount uint32) (string, error) {
+	if r == nil || r.db == nil || principalID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	if err := auth.ValidateCredentialID(credentialID); err != nil {
+		return "", err
+	}
+	if err := auth.ValidatePublicKey(publicKey); err != nil {
+		return "", err
+	}
+	if err := auth.ValidateTransports(transports); err != nil {
+		return "", err
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.store_identity_webauthn_credential($1,$2,$3,$4,$5,$6,$7)`,
+			principalID, credentialID, publicKey, transports, backupEligible, backupState, int64(signCount),
+		).Scan(&outcome)
+	})
+	return outcome, err
+}
+
 func (r *Repository) withTx(ctx context.Context, work func(*sql.Tx) error) error {
 	tx, tranErr := r.db.BeginTx(ctx, nil)
 	if tranErr != nil {

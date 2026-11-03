@@ -59,6 +59,25 @@ type fakeRepo struct {
 
 	resetCount int
 	resetErr   error
+
+	recordChallengeOutcome string
+	recordChallengeErr     error
+
+	consumeChallengeOutcome   string
+	consumeChallengePrincipal uuid.UUID
+	consumeChallengePurpose   string
+	consumeChallengeNonce     []byte
+	consumeChallengeErr       error
+
+	keys    []postgres.WebAuthnKey
+	keysErr error
+
+	advanceOutcome string
+	advanceID      uuid.UUID
+	advanceErr     error
+
+	storeOutcome string
+	storeErr     error
 }
 
 func (f *fakeRepo) BootstrapPrincipal(_ context.Context, id uuid.UUID, _ string, _ []byte, _ string, _ *uuid.UUID) (string, error) {
@@ -97,6 +116,26 @@ func (f *fakeRepo) RecordPasswordReset(_ context.Context, _ uuid.UUID, _ string,
 
 func (f *fakeRepo) RotateCredential(_ context.Context, _ string, _ []byte, _ string) (string, uuid.UUID, error) {
 	return f.rotateOutcome, f.rotateID, f.rotateErr
+}
+
+func (f *fakeRepo) RecordWebAuthnChallenge(_ context.Context, _, _ uuid.UUID, _ string, _ []byte, _, _ time.Time) (string, error) {
+	return f.recordChallengeOutcome, f.recordChallengeErr
+}
+
+func (f *fakeRepo) ConsumeWebAuthnChallenge(_ context.Context, _ uuid.UUID) (string, uuid.UUID, string, []byte, error) {
+	return f.consumeChallengeOutcome, f.consumeChallengePrincipal, f.consumeChallengePurpose, f.consumeChallengeNonce, f.consumeChallengeErr
+}
+
+func (f *fakeRepo) KeysFor(_ context.Context, _ uuid.UUID) ([]postgres.WebAuthnKey, error) {
+	return f.keys, f.keysErr
+}
+
+func (f *fakeRepo) AdvanceSignCount(_ context.Context, _ []byte, _ uint32) (string, uuid.UUID, error) {
+	return f.advanceOutcome, f.advanceID, f.advanceErr
+}
+
+func (f *fakeRepo) StoreWebAuthnCredential(_ context.Context, _ uuid.UUID, _, _ []byte, _ string, _, _ bool, _ uint32) (string, error) {
+	return f.storeOutcome, f.storeErr
 }
 
 func (f *fakeRepo) RecordLoginFailure(_ context.Context, _ uuid.UUID) (string, error) {
