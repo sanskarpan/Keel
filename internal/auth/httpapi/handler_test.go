@@ -107,6 +107,22 @@ type fakeRepo struct {
 	invitedEmail  string
 	invitedRole   string
 
+	roleOutcome string
+	roleErr     error
+	roleActor   uuid.UUID
+	roleOrg     uuid.UUID
+	roleMember  uuid.UUID
+	roleValue   string
+
+	removeOutcome string
+	removeErr     error
+	removeActor   uuid.UUID
+	removeOrg     uuid.UUID
+	removeMember  uuid.UUID
+
+	reaped  int
+	reapErr error
+
 	acceptOutcome string
 	acceptOrg     uuid.UUID
 	acceptErr     error
@@ -246,6 +262,20 @@ func (f *fakeRepo) RevokeInvite(_ context.Context, _, _ uuid.UUID) (string, erro
 func (f *fakeRepo) InviteMember(_ context.Context, _, _, _ uuid.UUID, email string, _ []byte, _ string, role string, _, _ time.Time) (string, error) {
 	f.invitedEmail, f.invitedRole = email, role
 	return f.inviteOutcome, f.inviteErr
+}
+
+func (f *fakeRepo) SetMemberRole(_ context.Context, actor, org, member uuid.UUID, role string) (string, error) {
+	f.roleActor, f.roleOrg, f.roleMember, f.roleValue = actor, org, member, role
+	return f.roleOutcome, f.roleErr
+}
+
+func (f *fakeRepo) RemoveMember(_ context.Context, actor, org, member uuid.UUID) (string, error) {
+	f.removeActor, f.removeOrg, f.removeMember = actor, org, member
+	return f.removeOutcome, f.removeErr
+}
+
+func (f *fakeRepo) ReapExpiredInvites(_ context.Context, _, _ uuid.UUID) (int, error) {
+	return f.reaped, f.reapErr
 }
 
 func (f *fakeRepo) AcceptInvite(_ context.Context, _ string, _ uuid.UUID) (string, uuid.UUID, error) {

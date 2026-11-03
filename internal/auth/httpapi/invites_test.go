@@ -338,3 +338,90 @@ func TestHTTPDirectoryLifecycleAgainstPostgres(t *testing.T) {
 		t.Fatalf("repeat revoke: %d", response.Code)
 	}
 }
+
+// TestHTTPMembershipLifecycleAgainstPostgres drives role changes, removal
+// and invite reaping over HTTP against the real store.
+func TestHTTPMembershipLifecycleAgainstPostgres(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity HTTP integration tests")
+	}
+	db, err := sql.Open("pgx", identityDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := postgres.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pepper := []byte("keel-http-pepper-keel-http-pepper-32-keel")
+	verifyS, resetS := &fakeSender{}, &fakeSender{}
+	h, err := New(repo, pepper, auth.TestArgonParams(), verifyS, resetS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerToken := httpRegisterVerifyLogin(t, h, verifyS, "lifehttp-owner-"+uuid.NewString()+"@example.test", "lifehttp-owner-pass-phrase")
+	memberEmail := "lifehttp-member-" + uuid.NewString() + "@example.test"
+	memberToken := httpRegisterVerifyLogin(t, h, verifyS, memberEmail, "lifehttp-member-pass-phrase")
+
+	slug := "lifehttp-" + uuid.NewString()[:8]
+	response := doRequest(h, http.MethodPost, "/v1/auth/organizations",
+		map[string]string{"slug": slug, "display_name": "Lifecycle", "region": "home"}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", response.Code, response.Body.String())
+	}
+	var created struct {
+		OrgID string `json:"org_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	memberID := memberPrincipal(t, h, memberToken)
+	roleTarget := "/v1/auth/organizations/" + created.OrgID + "/members/" + memberID + "/role"
+	// Seat via invite+accept so role changes have a subject.
+	response = doRequest(h, http.MethodPost, "/v1/auth/organizations/"+created.OrgID+"/invites",
+		map[string]string{"email": memberEmail, "role": "member"}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("invite: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/invites/accept",
+		map[string]string{"token": resetS.token}, memberToken)
+	if response.Code != http.StatusOK {
+		t.Fatalf("accept: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, roleTarget, map[string]string{"role": "admin"}, ownerToken)
+	if response.Code != http.StatusOK {
+		t.Fatalf("promote: %d %s", response.Code, response.Body.String())
+	}
+	ownerID := memberPrincipal(t, h, ownerToken)
+	if response := doRequest(h, http.MethodPost,
+		"/v1/auth/organizations/"+created.OrgID+"/members/"+ownerID+"/role",
+		map[string]string{"role": "member"}, memberToken); response.Code != http.StatusForbidden {
+		t.Fatalf("admin promote owner: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, roleTarget, map[string]string{"role": "member"}, ownerToken)
+	if response.Code != http.StatusOK {
+		t.Fatalf("demote: %d %s", response.Code, response.Body.String())
+	}
+	removeTarget := "/v1/auth/organizations/" + created.OrgID + "/members/" + memberID + "/remove"
+	if response := doRequest(h, http.MethodPost, removeTarget, nil, memberToken); response.Code != http.StatusNoContent {
+		t.Fatalf("leave: %d %s", response.Code, response.Body.String())
+	}
+	if response := doRequest(h, http.MethodGet, "/v1/auth/organizations", nil, memberToken); !contains(response.Body.String(), `"organizations":[]`) {
+		t.Fatalf("post-leave list: %d %s", response.Code, response.Body.String())
+	}
+	reapTarget := "/v1/auth/organizations/" + created.OrgID + "/invites/reap"
+	strangerToken := httpRegisterVerifyLogin(t, h, verifyS, "lifehttp-stranger-"+uuid.NewString()+"@example.test", "lifehttp-stranger-pass-phrase")
+	if response := doRequest(h, http.MethodPost, reapTarget, nil, strangerToken); response.Code != http.StatusForbidden {
+		t.Fatalf("stranger reap: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, reapTarget, nil, ownerToken)
+	if response.Code != http.StatusOK || !contains(response.Body.String(), `"reaped":0`) {
+		t.Fatalf("reap: %d %s", response.Code, response.Body.String())
+	}
+}

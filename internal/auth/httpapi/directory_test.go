@@ -85,3 +85,81 @@ func TestListInvitesAndRevoke(t *testing.T) {
 		}
 	}
 }
+
+func TestSetMemberRoleMapsOutcomes(t *testing.T) {
+	actor := uuid.New()
+	orgID := uuid.New()
+	target := "/v1/auth/organizations/" + orgID.String() + "/members/" + uuid.NewString() + "/role"
+	for _, tc := range []struct {
+		outcome string
+		err     error
+		status  int
+		code    string
+	}{
+		{"changed", nil, http.StatusOK, ""},
+		{"unchanged", nil, http.StatusOK, ""},
+		{"", postgres.ErrNotAuthorized, http.StatusForbidden, "forbidden"},
+		{"", postgres.ErrNotFound, http.StatusNotFound, "not_found"},
+		{"", postgres.ErrConflict, http.StatusConflict, "owner_immutable"},
+	} {
+		repo := orgMemberRepo(actor, orgID, auth.OrgRoleOwner)
+		repo.roleOutcome, repo.roleErr = tc.outcome, tc.err
+		h := newTestHandler(repo, &fakeSender{}, &fakeSender{})
+		response := doRequest(h, http.MethodPost, target, map[string]string{"role": "admin"}, "token")
+		if response.Code != tc.status {
+			t.Fatalf("%s: status=%d body=%s", tc.outcome, response.Code, response.Body.String())
+		}
+		if tc.code != "" && problemCode(t, response) != tc.code {
+			t.Fatalf("%s: body=%s", tc.outcome, response.Body.String())
+		}
+	}
+	repo := orgMemberRepo(actor, orgID, auth.OrgRoleOwner)
+	h := newTestHandler(repo, &fakeSender{}, &fakeSender{})
+	for _, body := range []any{
+		map[string]string{"role": "owner"},
+		map[string]string{"role": "superadmin"},
+		map[string]string{"role": ""},
+	} {
+		if response := doRequest(h, http.MethodPost, target, body, "token"); response.Code != http.StatusBadRequest {
+			t.Fatalf("body=%v status=%d", body, response.Code)
+		}
+	}
+}
+
+func TestRemoveMemberAndReapMapsOutcomes(t *testing.T) {
+	actor := uuid.New()
+	orgID := uuid.New()
+	memberID := uuid.New().String()
+	for _, tc := range []struct {
+		name   string
+		target string
+		body   any
+		setup  func(r *fakeRepo)
+		status int
+		code   string
+	}{
+		{"removed", "/v1/auth/organizations/" + orgID.String() + "/members/" + memberID + "/remove", nil,
+			func(r *fakeRepo) { r.removeOutcome = "removed" }, http.StatusNoContent, ""},
+		{"remove forbidden", "/v1/auth/organizations/" + orgID.String() + "/members/" + memberID + "/remove", nil,
+			func(r *fakeRepo) { r.removeErr = postgres.ErrNotAuthorized }, http.StatusForbidden, "forbidden"},
+		{"remove missing", "/v1/auth/organizations/" + orgID.String() + "/members/" + memberID + "/remove", nil,
+			func(r *fakeRepo) { r.removeErr = postgres.ErrNotFound }, http.StatusNotFound, "not_found"},
+		{"remove owner", "/v1/auth/organizations/" + orgID.String() + "/members/" + memberID + "/remove", nil,
+			func(r *fakeRepo) { r.removeErr = postgres.ErrConflict }, http.StatusConflict, "owner_immutable"},
+		{"reaped", "/v1/auth/organizations/" + orgID.String() + "/invites/reap", nil,
+			func(r *fakeRepo) { r.reaped = 2 }, http.StatusOK, ""},
+		{"reap forbidden", "/v1/auth/organizations/" + orgID.String() + "/invites/reap", nil,
+			func(r *fakeRepo) { r.reapErr = postgres.ErrNotAuthorized }, http.StatusForbidden, "forbidden"},
+	} {
+		repo := orgMemberRepo(actor, orgID, auth.OrgRoleOwner)
+		tc.setup(repo)
+		h := newTestHandler(repo, &fakeSender{}, &fakeSender{})
+		response := doRequest(h, http.MethodPost, tc.target, tc.body, "token")
+		if response.Code != tc.status {
+			t.Fatalf("%s: status=%d body=%s", tc.name, response.Code, response.Body.String())
+		}
+		if tc.code != "" && problemCode(t, response) != tc.code {
+			t.Fatalf("%s: body=%s", tc.name, response.Body.String())
+		}
+	}
+}

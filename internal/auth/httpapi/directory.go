@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sanskarpan/keel/internal/auth"
 	"github.com/sanskarpan/keel/internal/auth/postgres"
 )
 
@@ -130,4 +131,126 @@ func (h *Handler) revokeInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type setRoleRequest struct {
+	Role string `json:"role"`
+}
+
+// POST /v1/auth/organizations/{org_id}/members/{principal_id}/role
+// (Bearer owner; admin/member seats only).
+func (h *Handler) setMemberRole(w http.ResponseWriter, r *http.Request) {
+	actorID, ok := h.authenticatedPrincipal(w, r)
+	if !ok {
+		return
+	}
+	orgID, err := uuid.Parse(r.PathValue("org_id"))
+	if err != nil || orgID == uuid.Nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	memberID, err := uuid.Parse(r.PathValue("principal_id"))
+	if err != nil || memberID == uuid.Nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	var input setRoleRequest
+	if decode(w, r, &input) != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if input.Role != auth.OrgRoleAdmin && input.Role != auth.OrgRoleMember {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	outcome, err := h.repo.SetMemberRole(r.Context(), actorID, orgID, memberID, input.Role)
+	if err != nil {
+		switch {
+		case errors.Is(err, postgres.ErrNotAuthorized):
+			writeProblem(w, http.StatusForbidden, "forbidden")
+			return
+		case errors.Is(err, postgres.ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "not_found")
+			return
+		case errors.Is(err, postgres.ErrConflict):
+			writeProblem(w, http.StatusConflict, "owner_immutable")
+			return
+		default:
+			writeProblem(w, http.StatusInternalServerError, "request_failed")
+			return
+		}
+	}
+	if outcome != "changed" && outcome != "unchanged" {
+		writeProblem(w, http.StatusInternalServerError, "request_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"role": input.Role, "outcome": outcome})
+}
+
+// POST /v1/auth/organizations/{org_id}/members/{principal_id}/remove
+// (Bearer owner/admin removing others; any non-owner leaving).
+func (h *Handler) removeMember(w http.ResponseWriter, r *http.Request) {
+	actorID, ok := h.authenticatedPrincipal(w, r)
+	if !ok {
+		return
+	}
+	orgID, err := uuid.Parse(r.PathValue("org_id"))
+	if err != nil || orgID == uuid.Nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	memberID, err := uuid.Parse(r.PathValue("principal_id"))
+	if err != nil || memberID == uuid.Nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	outcome, err := h.repo.RemoveMember(r.Context(), actorID, orgID, memberID)
+	if err != nil {
+		switch {
+		case errors.Is(err, postgres.ErrNotAuthorized):
+			writeProblem(w, http.StatusForbidden, "forbidden")
+			return
+		case errors.Is(err, postgres.ErrNotFound):
+			writeProblem(w, http.StatusNotFound, "not_found")
+			return
+		case errors.Is(err, postgres.ErrConflict):
+			writeProblem(w, http.StatusConflict, "owner_immutable")
+			return
+		default:
+			writeProblem(w, http.StatusInternalServerError, "request_failed")
+			return
+		}
+	}
+	if outcome != "removed" {
+		writeProblem(w, http.StatusInternalServerError, "request_failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type reapResponse struct {
+	Reaped int `json:"reaped"`
+}
+
+// POST /v1/auth/organizations/{org_id}/invites/reap (Bearer owner/admin).
+func (h *Handler) reapInvites(w http.ResponseWriter, r *http.Request) {
+	actorID, ok := h.authenticatedPrincipal(w, r)
+	if !ok {
+		return
+	}
+	orgID, err := uuid.Parse(r.PathValue("org_id"))
+	if err != nil || orgID == uuid.Nil {
+		writeProblem(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	reaped, err := h.repo.ReapExpiredInvites(r.Context(), actorID, orgID)
+	if err != nil {
+		if errors.Is(err, postgres.ErrNotAuthorized) {
+			writeProblem(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeProblem(w, http.StatusInternalServerError, "request_failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, reapResponse{Reaped: reaped})
 }

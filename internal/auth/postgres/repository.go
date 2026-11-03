@@ -967,6 +967,79 @@ func (r *Repository) RevokeInvite(ctx context.Context, actorID, inviteID uuid.UU
 	return outcome, err
 }
 
+// SetMemberRole moves a seat between admin and member. Only the owner may
+// change roles; the owner seat moves only by transfer and the call is
+// idempotent when the seat already holds the role.
+func (r *Repository) SetMemberRole(ctx context.Context, actorID, orgID, memberID uuid.UUID, role string) (string, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil || memberID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	if role != auth.OrgRoleAdmin && role != auth.OrgRoleMember {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.set_organization_member_role($1,$2,$3,$4)`,
+			actorID, orgID, memberID, role,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
+	if err == nil && outcome == "not_member" {
+		return "", ErrNotFound
+	}
+	if err == nil && outcome == "owner_immutable" {
+		return "", ErrConflict
+	}
+	return outcome, err
+}
+
+// RemoveMember removes a non-owner seat. Owners and admins remove others;
+// any non-owner may leave unilaterally. Owners leave only by transfer.
+func (r *Repository) RemoveMember(ctx context.Context, actorID, orgID, memberID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil || memberID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.remove_organization_member($1,$2,$3)`,
+			actorID, orgID, memberID,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
+	if err == nil && outcome == "not_member" {
+		return "", ErrNotFound
+	}
+	if err == nil && outcome == "owner_immutable" {
+		return "", ErrConflict
+	}
+	return outcome, err
+}
+
+// ReapExpiredInvites deletes expired pending invites for one organization.
+// Negative means the actor is not an owner/admin; otherwise the count
+// removed (zero is valid).
+func (r *Repository) ReapExpiredInvites(ctx context.Context, actorID, orgID uuid.UUID) (int, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil {
+		return 0, ErrInvalidRecord
+	}
+	var reaped int
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.reap_expired_organization_invites($1,$2)`, actorID, orgID,
+		).Scan(&reaped)
+	})
+	if err == nil && reaped < 0 {
+		return 0, ErrNotAuthorized
+	}
+	return reaped, err
+}
+
 // OrganizationsFor lists every organization one principal belongs to.
 func (r *Repository) OrganizationsFor(ctx context.Context, principalID uuid.UUID) ([]Organization, error) {
 	if r == nil || r.db == nil || principalID == uuid.Nil {
