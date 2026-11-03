@@ -953,9 +953,12 @@ func TestPostgreSQLIdentityAPIKeys(t *testing.T) {
 	if _, err := repo.CreateServicePrincipal(ctx, uuid.New(), stranger, orgID, "intruder"); !errors.Is(err, ErrNotAuthorized) {
 		t.Fatalf("stranger create: %v", err)
 	}
+	if _, err := repo.IssueAPIKey(ctx, uuid.New(), stranger, svcID, now, time.Time{}); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("stranger issue: %v", err)
+	}
 	// Issue shows the wire form once; verification resolves the identity.
 	keyID := uuid.New()
-	wire, err := repo.IssueAPIKey(ctx, keyID, svcID, now, time.Time{})
+	wire, err := repo.IssueAPIKey(ctx, keyID, owner, svcID, now, time.Time{})
 	if err != nil || wire == "" {
 		t.Fatalf("issue: %v", err)
 	}
@@ -971,17 +974,17 @@ func TestPostgreSQLIdentityAPIKeys(t *testing.T) {
 	}
 	// Rotation overlaps: the predecessor stays valid until revoked.
 	rotatedID := uuid.New()
-	rotated, err := repo.IssueAPIKey(ctx, rotatedID, svcID, now, now.Add(24*time.Hour))
+	rotated, err := repo.IssueAPIKey(ctx, rotatedID, owner, svcID, now, now.Add(24*time.Hour))
 	if err != nil || rotated == "" {
 		t.Fatalf("rotate issue: %v", err)
 	}
 	if outcome, _, err := repo.VerifyAPIKey(ctx, wire); err != nil || outcome != "valid" {
 		t.Fatalf("predecessor during overlap: %v (outcome %q)", err, outcome)
 	}
-	if outcome, err := repo.RevokeAPIKey(ctx, keyID); err != nil || outcome != "revoked" {
+	if outcome, err := repo.RevokeAPIKey(ctx, owner, keyID); err != nil || outcome != "revoked" {
 		t.Fatalf("revoke: %v (outcome %q)", err, outcome)
 	}
-	if _, err := repo.RevokeAPIKey(ctx, keyID); !errors.Is(err, ErrNotFound) {
+	if _, err := repo.RevokeAPIKey(ctx, owner, keyID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("repeat revoke: %v", err)
 	}
 	if outcome, _, err := repo.VerifyAPIKey(ctx, wire); err != nil || outcome != "revoked" {
@@ -1009,17 +1012,17 @@ func TestPostgreSQLIdentityAPIKeys(t *testing.T) {
 	}
 	// Disabling the principal revokes every live key.
 	liveID := uuid.New()
-	live, err := repo.IssueAPIKey(ctx, liveID, svcID, now, time.Time{})
+	live, err := repo.IssueAPIKey(ctx, liveID, owner, svcID, now, time.Time{})
 	if err != nil {
 		t.Fatalf("live issue: %v", err)
 	}
-	if outcome, err := repo.DisableServicePrincipal(ctx, svcID); err != nil || outcome != "disabled" {
+	if outcome, err := repo.DisableServicePrincipal(ctx, owner, svcID); err != nil || outcome != "disabled" {
 		t.Fatalf("disable: %v (outcome %q)", err, outcome)
 	}
 	if outcome, _, err := repo.VerifyAPIKey(ctx, live); err != nil || outcome != "revoked" {
 		t.Fatalf("disabled verify: %v (outcome %q)", err, outcome)
 	}
-	if _, err := repo.DisableServicePrincipal(ctx, svcID); !errors.Is(err, ErrNotFound) {
+	if _, err := repo.DisableServicePrincipal(ctx, owner, svcID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("repeat disable: %v", err)
 	}
 	// Structural lockdown for both new tables.

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -266,5 +267,98 @@ func TestHTTPOrganizationLifecycleAgainstPostgres(t *testing.T) {
 		map[string]string{"email": memberEmail, "role": "member"}, ownerToken)
 	if response.Code != http.StatusConflict {
 		t.Fatalf("re-add: %d %s", response.Code, response.Body.String())
+	}
+}
+
+// TestHTTPAPIKeysLifecycleAgainstPostgres drives service principals and keys
+// over HTTP against the real store: create, issue (wire shown once),
+// verify, revoke and disable with actor authorization.
+func TestHTTPAPIKeysLifecycleAgainstPostgres(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity HTTP integration tests")
+	}
+	db, err := sql.Open("pgx", identityDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := postgres.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pepper := []byte("keel-http-pepper-keel-http-pepper-32-keel")
+	verifyS, resetS := &fakeSender{}, &fakeSender{}
+	h, err := New(repo, pepper, auth.TestArgonParams(), verifyS, resetS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerToken := httpRegisterVerifyLogin(t, h, verifyS, "apikey-owner-"+uuid.NewString()+"@example.test", "apikey-owner-pass-phrase")
+	strangerToken := httpRegisterVerifyLogin(t, h, verifyS, "apikey-stranger-"+uuid.NewString()+"@example.test", "apikey-stranger-pass-phrase")
+
+	slug := "apikey-" + uuid.NewString()[:8]
+	response := doRequest(h, http.MethodPost, "/v1/auth/organizations",
+		map[string]string{"slug": slug, "display_name": "Keys Org", "region": "home"}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", response.Code, response.Body.String())
+	}
+	var created struct {
+		OrgID string `json:"org_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/service-principals",
+		map[string]string{"org_id": created.OrgID, "name": "intruder"}, strangerToken)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("stranger create: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/service-principals",
+		map[string]string{"org_id": created.OrgID, "name": "etl-worker"}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create sp: %d %s", response.Code, response.Body.String())
+	}
+	var sp struct {
+		ServicePrincipalID string `json:"service_principal_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &sp); err != nil {
+		t.Fatal(err)
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/service-principals/"+sp.ServicePrincipalID+"/keys",
+		map[string]any{}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", response.Code, response.Body.String())
+	}
+	var issued struct {
+		KeyID  string `json:"key_id"`
+		APIKey string `json:"api_key"`
+		Prefix string `json:"prefix"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &issued); err != nil || issued.APIKey == "" {
+		t.Fatalf("issue body: %v %s", err, response.Body.String())
+	}
+	outcome, identity, err := repo.VerifyAPIKey(context.Background(), issued.APIKey)
+	if err != nil || outcome != "valid" || identity.OrgID.String() != created.OrgID {
+		t.Fatalf("verify: %v (outcome %q identity %+v)", err, outcome, identity)
+	}
+	revokeTarget := "/v1/auth/service-principals/" + sp.ServicePrincipalID + "/keys/" + issued.KeyID + "/revoke"
+	response = doRequest(h, http.MethodPost, revokeTarget, nil, strangerToken)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("stranger revoke: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, revokeTarget, nil, ownerToken)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("revoke: %d %s", response.Code, response.Body.String())
+	}
+	if outcome, _, _ := repo.VerifyAPIKey(context.Background(), issued.APIKey); outcome != "revoked" {
+		t.Fatalf("post-revoke: %s", outcome)
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/service-principals/"+sp.ServicePrincipalID+"/disable", nil, ownerToken)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("disable: %d %s", response.Code, response.Body.String())
 	}
 }

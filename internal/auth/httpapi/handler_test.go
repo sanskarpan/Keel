@@ -112,6 +112,22 @@ type fakeRepo struct {
 	switchErr     error
 	switchSession uuid.UUID
 	switchOrg     uuid.UUID
+
+	createSPOutcome string
+	createSPErr     error
+
+	issueWire string
+	issueErr  error
+
+	verifyOutcome  string
+	verifyIdentity postgres.APIKeyIdentity
+	verifyErr      error
+
+	revokeKeyOutcome string
+	revokeKeyErr     error
+
+	disableSPOutcome string
+	disableSPErr     error
 }
 
 func (f *fakeRepo) BootstrapPrincipal(_ context.Context, id uuid.UUID, _ string, _ []byte, _ string, _ *uuid.UUID) (string, error) {
@@ -170,6 +186,26 @@ func (f *fakeRepo) AdvanceSignCount(_ context.Context, _ []byte, _ uint32) (stri
 
 func (f *fakeRepo) StoreWebAuthnCredential(_ context.Context, _ uuid.UUID, _, _ []byte, _ string, _, _ bool, _ uint32) (string, error) {
 	return f.storeOutcome, f.storeErr
+}
+
+func (f *fakeRepo) CreateServicePrincipal(_ context.Context, _, _, _ uuid.UUID, _ string) (string, error) {
+	return f.createSPOutcome, f.createSPErr
+}
+
+func (f *fakeRepo) IssueAPIKey(_ context.Context, _, _, _ uuid.UUID, _, _ time.Time) (string, error) {
+	return f.issueWire, f.issueErr
+}
+
+func (f *fakeRepo) VerifyAPIKey(_ context.Context, _ string) (string, postgres.APIKeyIdentity, error) {
+	return f.verifyOutcome, f.verifyIdentity, f.verifyErr
+}
+
+func (f *fakeRepo) RevokeAPIKey(_ context.Context, _, _ uuid.UUID) (string, error) {
+	return f.revokeKeyOutcome, f.revokeKeyErr
+}
+
+func (f *fakeRepo) DisableServicePrincipal(_ context.Context, _, _ uuid.UUID) (string, error) {
+	return f.disableSPOutcome, f.disableSPErr
 }
 
 func (f *fakeRepo) CreateOrganization(_ context.Context, orgID, _ uuid.UUID, _, _, _ string) (string, error) {

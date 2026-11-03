@@ -57,7 +57,14 @@ type Repository interface {
 	AcceptInvite(ctx context.Context, token string, principalID uuid.UUID) (string, uuid.UUID, error)
 	TransferOwnership(ctx context.Context, actorID, orgID, newOwnerID uuid.UUID) (string, error)
 	SwitchSessionOrg(ctx context.Context, sessionID, orgID uuid.UUID) (string, error)
+	CreateServicePrincipal(ctx context.Context, servicePrincipalID, actorID, orgID uuid.UUID, name string) (string, error)
+	IssueAPIKey(ctx context.Context, keyID, actorID, servicePrincipalID uuid.UUID, now, expires time.Time) (string, error)
+	VerifyAPIKey(ctx context.Context, formattedKey string) (string, postgres.APIKeyIdentity, error)
+	RevokeAPIKey(ctx context.Context, actorID, keyID uuid.UUID) (string, error)
+	DisableServicePrincipal(ctx context.Context, actorID, servicePrincipalID uuid.UUID) (string, error)
 }
+
+type APIKeyIdentity = postgres.APIKeyIdentity
 
 // VerificationSender delivers email-verification tokens. Production sends
 // email; tests capture the token.
@@ -119,6 +126,10 @@ func New(repo Repository, pepper []byte, hashParams auth.ArgonParams, verifySend
 	h.mux.HandleFunc("POST /v1/auth/invites/accept", h.acceptInvite)
 	h.mux.HandleFunc("POST /v1/auth/organizations/{org_id}/transfer", h.transferOwnership)
 	h.mux.HandleFunc("POST /v1/auth/sessions/switch", h.switchSessionOrg)
+	h.mux.HandleFunc("POST /v1/auth/service-principals", h.createServicePrincipal)
+	h.mux.HandleFunc("POST /v1/auth/service-principals/{service_principal_id}/keys", h.issueAPIKey)
+	h.mux.HandleFunc("POST /v1/auth/service-principals/{service_principal_id}/keys/{key_id}/revoke", h.revokeAPIKey)
+	h.mux.HandleFunc("POST /v1/auth/service-principals/{service_principal_id}/disable", h.disableServicePrincipal)
 	return h, nil
 }
 
