@@ -41,7 +41,11 @@ func TestTokenDigestIsPurposeSeparated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reset digest: %v", err)
 	}
-	if session == verification || session == reset || verification == reset {
+	invite, err := TokenDigest(secret, PurposeOrganizationInvite)
+	if err != nil {
+		t.Fatalf("invite digest: %v", err)
+	}
+	if session == verification || session == reset || session == invite || verification == reset || verification == invite || reset == invite {
 		t.Fatal("one purpose digest must not equal another purpose digest")
 	}
 	if _, err := TokenDigest("!"+secret, PurposeSession); err == nil {

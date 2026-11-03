@@ -641,6 +641,89 @@ func (r *Repository) SwitchSessionOrg(ctx context.Context, sessionID, orgID uuid
 	return outcome, err
 }
 
+// InviteMember records one bounded email invite for an admin/member seat.
+// The invitee needs no account yet; acceptance binds a matching principal.
+func (r *Repository) InviteMember(ctx context.Context, inviteID, actorID, orgID uuid.UUID, email string, pepper []byte, token string, role string, now, expires time.Time) (string, error) {
+	if r == nil || r.db == nil || inviteID == uuid.Nil || actorID == uuid.Nil || orgID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	if role != auth.OrgRoleAdmin && role != auth.OrgRoleMember {
+		return "", ErrInvalidRecord
+	}
+	if err := auth.ValidateInviteTTL(now, expires); err != nil {
+		return "", err
+	}
+	emailDigest, err := auth.EmailDigest(email, pepper)
+	if err != nil {
+		return "", err
+	}
+	tokenDigest, err := auth.TokenDigest(token, auth.PurposeOrganizationInvite)
+	if err != nil {
+		return "", err
+	}
+	var outcome string
+	err = r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.invite_organization_member($1,$2,$3,$4,$5,$6,$7)`,
+			inviteID, actorID, orgID, emailDigest[:], tokenDigest[:], role, expires.UTC(),
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
+	if err == nil && outcome == "already_member" {
+		return "", ErrConflict
+	}
+	if err == nil && outcome == "token_reuse" {
+		return "", ErrTokenReuse
+	}
+	return outcome, err
+}
+
+// AcceptInvite consumes one invite for the matching active principal,
+// seating them with the invited role and binding an unbound tenant.
+func (r *Repository) AcceptInvite(ctx context.Context, token string, principalID uuid.UUID) (string, uuid.UUID, error) {
+	if r == nil || r.db == nil || principalID == uuid.Nil {
+		return "", uuid.Nil, ErrInvalidRecord
+	}
+	tokenDigest, err := auth.TokenDigest(token, auth.PurposeOrganizationInvite)
+	if err != nil {
+		return "", uuid.Nil, err
+	}
+	var outcome string
+	var orgID uuid.UUID
+	err = r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT outcome,out_org_id FROM keel_meta.accept_organization_invite($1,$2)`,
+			tokenDigest[:], principalID,
+		).Scan(&outcome, &orgID)
+	})
+	return outcome, orgID, err
+}
+
+// TransferOwnership moves the owner seat to an admin/member immediately: the
+// actor becomes admin and the target becomes owner in one transaction.
+// Self-transfer is a no-op success.
+func (r *Repository) TransferOwnership(ctx context.Context, actorID, orgID, newOwnerID uuid.UUID) (string, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil || newOwnerID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.transfer_organization_ownership($1,$2,$3)`,
+			actorID, orgID, newOwnerID,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
+	if err == nil && outcome == "not_member" {
+		return "", ErrNotFound
+	}
+	return outcome, err
+}
+
 // OrganizationsFor lists every organization one principal belongs to.
 func (r *Repository) OrganizationsFor(ctx context.Context, principalID uuid.UUID) ([]Organization, error) {
 	if r == nil || r.db == nil || principalID == uuid.Nil {

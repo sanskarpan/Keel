@@ -29,9 +29,10 @@ const (
 // Token purposes are an allowlist with a version suffix, separated from the secret
 // by a zero byte so a digest for one purpose can never verify as another.
 const (
-	PurposeSession           = "identity-session-v1"
-	PurposeEmailVerification = "identity-email-verification-v1"
-	PurposePasswordReset     = "identity-password-reset-v1"
+	PurposeSession            = "identity-session-v1"
+	PurposeEmailVerification  = "identity-email-verification-v1"
+	PurposePasswordReset      = "identity-password-reset-v1"
+	PurposeOrganizationInvite = "identity-organization-invite-v1"
 )
 
 var (
@@ -57,7 +58,8 @@ func NewSecret(source io.Reader) (string, error) {
 
 // TokenDigest binds one allowed purpose to one well-formed secret.
 func TokenDigest(secret, purpose string) ([sha256.Size]byte, error) {
-	if purpose != PurposeSession && purpose != PurposeEmailVerification && purpose != PurposePasswordReset {
+	if purpose != PurposeSession && purpose != PurposeEmailVerification && purpose != PurposePasswordReset &&
+		purpose != PurposeOrganizationInvite {
 		return [sha256.Size]byte{}, ErrInvalidToken
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(secret)
