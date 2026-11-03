@@ -142,6 +142,7 @@ func New(repo Repository, pepper []byte, hashParams auth.ArgonParams, verifySend
 	h.mux.HandleFunc("POST /v1/auth/service-principals/{service_principal_id}/keys", h.issueAPIKey)
 	h.mux.HandleFunc("POST /v1/auth/service-principals/{service_principal_id}/keys/{key_id}/revoke", h.revokeAPIKey)
 	h.mux.HandleFunc("POST /v1/auth/service-principals/{service_principal_id}/disable", h.disableServicePrincipal)
+	h.mux.HandleFunc("GET /v1/auth/whoami", h.whoami)
 	return h, nil
 }
 

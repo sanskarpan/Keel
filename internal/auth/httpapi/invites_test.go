@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -423,5 +424,77 @@ func TestHTTPMembershipLifecycleAgainstPostgres(t *testing.T) {
 	response = doRequest(h, http.MethodPost, reapTarget, nil, ownerToken)
 	if response.Code != http.StatusOK || !contains(response.Body.String(), `"reaped":0`) {
 		t.Fatalf("reap: %d %s", response.Code, response.Body.String())
+	}
+}
+
+// TestHTTPWhoamiAgainstPostgres proves the unified chain live: a switched
+// session and a bearer API key answer the same shape with their own tenant.
+func TestHTTPWhoamiAgainstPostgres(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity HTTP integration tests")
+	}
+	db, err := sql.Open("pgx", identityDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := postgres.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pepper := []byte("keel-http-pepper-keel-http-pepper-32-keel")
+	verifyS, resetS := &fakeSender{}, &fakeSender{}
+	h, err := New(repo, pepper, auth.TestArgonParams(), verifyS, resetS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerToken := httpRegisterVerifyLogin(t, h, verifyS, "whoami-owner-"+uuid.NewString()+"@example.test", "whoami-owner-pass-phrase")
+	slug := "whoami-" + uuid.NewString()[:8]
+	response := doRequest(h, http.MethodPost, "/v1/auth/organizations",
+		map[string]string{"slug": slug, "display_name": "Whoami", "region": "home"}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", response.Code, response.Body.String())
+	}
+	var created struct {
+		OrgID string `json:"org_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	response = doRequest(h, http.MethodGet, "/v1/auth/whoami", nil, ownerToken)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unswitched whoami: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/sessions/switch",
+		map[string]string{"org_id": created.OrgID}, ownerToken)
+	if response.Code != http.StatusOK {
+		t.Fatalf("switch: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodGet, "/v1/auth/whoami", nil, ownerToken)
+	if response.Code != http.StatusOK || !contains(response.Body.String(), `"kind":"session"`) || !contains(response.Body.String(), created.OrgID) {
+		t.Fatalf("session whoami: %d %s", response.Code, response.Body.String())
+	}
+	ownerID, err := uuid.Parse(memberPrincipal(t, h, ownerToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spID := uuid.New()
+	if outcome, err := repo.CreateServicePrincipal(context.Background(), spID, ownerID, uuid.MustParse(created.OrgID), "gateway"); err != nil || outcome != "created" {
+		t.Fatalf("create sp: %v (outcome %q)", err, outcome)
+	}
+	keyID := uuid.New()
+	now := time.Now().UTC()
+	wire, err := repo.IssueAPIKey(context.Background(), keyID, ownerID, spID, now, time.Time{})
+	if err != nil || wire == "" {
+		t.Fatalf("issue: %v", err)
+	}
+	response = doRequest(h, http.MethodGet, "/v1/auth/whoami", nil, wire)
+	if response.Code != http.StatusOK || !contains(response.Body.String(), `"kind":"api_key"`) || !contains(response.Body.String(), created.OrgID) {
+		t.Fatalf("key whoami: %d %s", response.Code, response.Body.String())
 	}
 }
