@@ -176,7 +176,7 @@ func TestPostgreSQLIdentityBootstrapAndSessionLifecycle(t *testing.T) {
 		 WHERE n.nspname='keel_meta'
 		   AND c.relname IN ('identity_principals','identity_credentials',
 		                     'identity_email_verifications','identity_sessions',
-		                     'identity_password_resets')
+		                     'identity_password_resets','identity_login_throttle')
 		   AND EXISTS (SELECT 1 FROM aclexplode(c.relacl) a
 		                WHERE a.grantee<>c.relowner)`)
 	if err != nil {
@@ -423,6 +423,118 @@ func mustSecret(t *testing.T) string {
 		t.Fatalf("secret: %v", err)
 	}
 	return secret
+}
+
+// TestPostgreSQLIdentityLockout proves the bounded lockout: four failures
+// count, the fifth locks for 15 minutes without stretching on further
+// attempts, success clears the count, stale failures decay, and unknown
+// principals are never counted.
+func TestPostgreSQLIdentityLockout(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity integration tests")
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	identityDB := openRoleDB(t, identityDSN)
+	repo, err := New(identityDB)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	pepper := []byte("keel-integration-pepper-keel-integration-pepper-32")
+	adminDB := openRoleDB(t, adminDSN)
+
+	email := "lockout-" + uuid.NewString() + "@example.test"
+	hash, err := auth.HashPassword("lockout-pass-phrase", auth.TestArgonParams())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	principalID := uuid.New()
+	tenantID := uuid.MustParse("33333333-3333-4333-8333-333333333333")
+	if outcome, err := repo.BootstrapPrincipal(ctx, principalID, email, pepper, hash, &tenantID); err != nil || outcome != "created" {
+		t.Fatalf("bootstrap: %v (outcome %q)", err, outcome)
+	}
+	verifyToken := mustSecret(t)
+	if _, err := repo.RecordEmailVerification(ctx, principalID, verifyToken, pepper, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("record verification: %v", err)
+	}
+	if outcome, _, err := repo.ConsumeEmailVerification(ctx, verifyToken, pepper); err != nil || outcome != "verified" {
+		t.Fatalf("consume: %v (outcome %q)", err, outcome)
+	}
+
+	for i := 0; i < 4; i++ {
+		if outcome, err := repo.RecordLoginFailure(ctx, principalID); err != nil || outcome != "counted" {
+			t.Fatalf("failure %d: %v (outcome %q)", i+1, err, outcome)
+		}
+	}
+	if outcome, err := repo.RecordLoginFailure(ctx, principalID); err != nil || outcome != "locked" {
+		t.Fatalf("fifth failure: %v (outcome %q)", err, outcome)
+	}
+	count, lockedUntil, err := repo.ThrottleFor(ctx, principalID)
+	if err != nil || count != 5 || !lockedUntil.After(now) {
+		t.Fatalf("throttle: count=%d locked=%v err=%v", count, lockedUntil, err)
+	}
+	// Attempts while locked change nothing: same outcome, same expiry.
+	if outcome, err := repo.RecordLoginFailure(ctx, principalID); err != nil || outcome != "locked" {
+		t.Fatalf("locked attempt: %v (outcome %q)", err, outcome)
+	}
+	_, lockedAgain, err := repo.ThrottleFor(ctx, principalID)
+	if err != nil || !lockedAgain.Equal(lockedUntil) {
+		t.Fatalf("lock stretched: %v vs %v err=%v", lockedAgain, lockedUntil, err)
+	}
+	// Success clears the count.
+	if n, err := repo.ResetLoginThrottle(ctx, principalID); err != nil || n != 1 {
+		t.Fatalf("reset: %v (n=%d)", err, n)
+	}
+	if count, lockedUntil, err := repo.ThrottleFor(ctx, principalID); err != nil || count != 0 || !lockedUntil.IsZero() {
+		t.Fatalf("post-reset: count=%d locked=%v err=%v", count, lockedUntil, err)
+	}
+	if n, err := repo.ResetLoginThrottle(ctx, principalID); err != nil || n != 0 {
+		t.Fatalf("empty reset: %v (n=%d)", err, n)
+	}
+	// Unknown principals are never counted.
+	if _, err := repo.RecordLoginFailure(ctx, uuid.New()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown principal: %v", err)
+	}
+	// Stale failures decay: a failure older than 15 minutes restarts at one.
+	if outcome, err := repo.RecordLoginFailure(ctx, principalID); err != nil || outcome != "counted" {
+		t.Fatalf("fresh failure: %v (outcome %q)", err, outcome)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_login_throttle DISABLE TRIGGER identity_login_throttle_guard`); err != nil {
+		t.Fatalf("disable throttle guard: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.identity_login_throttle SET first_failure_at=clock_timestamp()-INTERVAL '1 hour',last_failure_at=clock_timestamp()-INTERVAL '1 hour' WHERE principal_id=$1`, principalID); err != nil {
+		t.Fatalf("backdate throttle: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_login_throttle ENABLE TRIGGER identity_login_throttle_guard`); err != nil {
+		t.Fatalf("enable throttle guard: %v", err)
+	}
+	if outcome, err := repo.RecordLoginFailure(ctx, principalID); err != nil || outcome != "counted" {
+		t.Fatalf("decayed failure: %v (outcome %q)", err, outcome)
+	}
+	if count, lockedUntil, err := repo.ThrottleFor(ctx, principalID); err != nil || count != 1 || !lockedUntil.IsZero() {
+		t.Fatalf("decayed throttle: count=%d locked=%v err=%v", count, lockedUntil, err)
+	}
+	// Structural lockdown for the throttle table.
+	var forced bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT relforcerowsecurity FROM pg_class
+		  WHERE oid='keel_meta.identity_login_throttle'::regclass`).Scan(&forced); err != nil || !forced {
+		t.Fatalf("throttle is not FORCE RLS: %v", err)
+	}
+	appDB := openRoleDB(t, "postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable")
+	if _, err := appDB.QueryContext(ctx, `SELECT keel_meta.record_identity_login_failure(gen_random_uuid())`); err == nil {
+		t.Fatal("app capability executed throttle function")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected app denial: %v", err)
+	}
+	if _, err := identityDB.QueryContext(ctx, `SELECT consecutive_failures FROM keel_meta.identity_login_throttle LIMIT 1`); err == nil {
+		t.Fatal("identity login read throttle directly")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected identity denial: %v", err)
+	}
 }
 
 func openRoleDB(t *testing.T, dsn string) *sql.DB {
