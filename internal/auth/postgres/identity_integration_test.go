@@ -179,7 +179,8 @@ func TestPostgreSQLIdentityBootstrapAndSessionLifecycle(t *testing.T) {
 		   AND c.relname IN ('identity_principals','identity_credentials',
 		                     'identity_email_verifications','identity_sessions',
 		                     'identity_password_resets','identity_login_throttle',
-		                     'identity_webauthn_credentials','identity_webauthn_challenges')
+		                     'identity_webauthn_credentials','identity_webauthn_challenges',
+		                     'identity_organizations','identity_memberships')
 		   AND EXISTS (SELECT 1 FROM aclexplode(c.relacl) a
 		                WHERE a.grantee<>c.relowner)`)
 	if err != nil {
@@ -551,6 +552,160 @@ func openRoleDB(t *testing.T, dsn string) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+// activeTestPrincipal bootstraps and verifies one principal for tests that
+// need an eligible actor or member. A nil tenant leaves the principal
+// unbound so organization tests can prove first binding.
+func activeTestPrincipal(t *testing.T, ctx context.Context, repo *Repository, pepper []byte, email string, tenantID *uuid.UUID) uuid.UUID {
+	t.Helper()
+	passwordHash, err := auth.HashPassword("org-member-pass-phrase", auth.TestArgonParams())
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	principalID := uuid.New()
+	if outcome, err := repo.BootstrapPrincipal(ctx, principalID, email, pepper, passwordHash, tenantID); err != nil || outcome != "created" {
+		t.Fatalf("bootstrap: %v (outcome %q)", err, outcome)
+	}
+	token := mustSecret(t)
+	now := time.Now().UTC()
+	if _, err := repo.RecordEmailVerification(ctx, principalID, token, pepper, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("record verification: %v", err)
+	}
+	if outcome, _, err := repo.ConsumeEmailVerification(ctx, token, pepper); err != nil || outcome != "verified" {
+		t.Fatalf("consume: %v (outcome %q)", err, outcome)
+	}
+	return principalID
+}
+
+func boundTenant(t *testing.T, adminDB *sql.DB, ctx context.Context, principalID uuid.UUID) *uuid.UUID {
+	t.Helper()
+	var tenant uuid.NullUUID
+	if err := adminDB.QueryRowContext(ctx, `SELECT tenant_id FROM keel_meta.identity_principals WHERE principal_id=$1`, principalID).Scan(&tenant); err != nil {
+		t.Fatalf("tenant lookup: %v", err)
+	}
+	if !tenant.Valid {
+		return nil
+	}
+	id := tenant.UUID
+	return &id
+}
+
+// TestPostgreSQLIdentityOrganizations proves first binding: creating seats an
+// owner and binds the tenant, owners/admins seat members with tenant
+// convergence, and cross-org principals, strangers and bad input fail closed.
+func TestPostgreSQLIdentityOrganizations(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity integration tests")
+	}
+	ctx := context.Background()
+
+	identityDB := openRoleDB(t, identityDSN)
+	repo, err := New(identityDB)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	pepper := []byte("keel-integration-pepper-keel-integration-pepper-32")
+	adminDB := openRoleDB(t, adminDSN)
+
+	owner := activeTestPrincipal(t, ctx, repo, pepper, "org-owner-"+uuid.NewString()+"@example.test", nil)
+	orgID := uuid.New()
+	if outcome, err := repo.CreateOrganization(ctx, orgID, owner, "acme-"+uuid.NewString()[:8], "Acme Corporation", "home"); err != nil || outcome != "created" {
+		t.Fatalf("create: %v (outcome %q)", err, outcome)
+	}
+	if bound := boundTenant(t, adminDB, ctx, owner); bound == nil || *bound != orgID {
+		t.Fatalf("owner tenant not bound: %v", bound)
+	}
+	orgs, err := repo.OrganizationsFor(ctx, owner)
+	if err != nil || len(orgs) != 1 || orgs[0].OrgID != orgID || orgs[0].Role != auth.OrgRoleOwner {
+		t.Fatalf("owner orgs: %v err=%v", orgs, err)
+	}
+	// Bound principals cannot found a second organization.
+	if _, err := repo.CreateOrganization(ctx, uuid.New(), owner, "second-"+uuid.NewString()[:8], "Second", "home"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second org: %v", err)
+	}
+	// Slugs are globally unique.
+	other := activeTestPrincipal(t, ctx, repo, pepper, "org-other-"+uuid.NewString()+"@example.test", nil)
+	if _, err := repo.CreateOrganization(ctx, uuid.New(), other, orgs[0].Slug, "Clone", "home"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("slug reuse: %v", err)
+	}
+	// Pending principals cannot found organizations.
+	pendingHash, err := auth.HashPassword("pending-pass-phrase", auth.TestArgonParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := uuid.New()
+	if outcome, err := repo.BootstrapPrincipal(ctx, pending, "org-pending-"+uuid.NewString()+"@example.test", pepper, pendingHash, nil); err != nil || outcome != "created" {
+		t.Fatalf("pending bootstrap: %v", err)
+	}
+	if _, err := repo.CreateOrganization(ctx, uuid.New(), pending, "pending-"+uuid.NewString()[:8], "Pending", "home"); !errors.Is(err, ErrNotVerified) {
+		t.Fatalf("pending create: %v", err)
+	}
+	// Owners seat members; membership binds the tenant.
+	member := activeTestPrincipal(t, ctx, repo, pepper, "org-member-"+uuid.NewString()+"@example.test", nil)
+	if outcome, err := repo.AddOrganizationMember(ctx, owner, orgID, member, auth.OrgRoleMember); err != nil || outcome != "added" {
+		t.Fatalf("add member: %v (outcome %q)", err, outcome)
+	}
+	if bound := boundTenant(t, adminDB, ctx, member); bound == nil || *bound != orgID {
+		t.Fatalf("member tenant not bound: %v", bound)
+	}
+	// Members cannot seat others; admins can.
+	stranger := activeTestPrincipal(t, ctx, repo, pepper, "org-stranger-"+uuid.NewString()+"@example.test", nil)
+	if _, err := repo.AddOrganizationMember(ctx, member, orgID, stranger, auth.OrgRoleMember); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("member add: %v", err)
+	}
+	if outcome, err := repo.AddOrganizationMember(ctx, owner, orgID, stranger, auth.OrgRoleAdmin); err != nil || outcome != "added" {
+		t.Fatalf("add admin: %v (outcome %q)", err, outcome)
+	}
+	third := activeTestPrincipal(t, ctx, repo, pepper, "org-third-"+uuid.NewString()+"@example.test", nil)
+	if outcome, err := repo.AddOrganizationMember(ctx, stranger, orgID, third, auth.OrgRoleMember); err != nil || outcome != "added" {
+		t.Fatalf("admin add: %v (outcome %q)", err, outcome)
+	}
+	// One membership per principal and no cross-org rebinding.
+	if _, err := repo.AddOrganizationMember(ctx, owner, orgID, member, auth.OrgRoleMember); !errors.Is(err, ErrConflict) {
+		t.Fatalf("re-add: %v", err)
+	}
+	otherOrgOwner := activeTestPrincipal(t, ctx, repo, pepper, "org-rival-"+uuid.NewString()+"@example.test", nil)
+	otherOrgID := uuid.New()
+	if outcome, err := repo.CreateOrganization(ctx, otherOrgID, otherOrgOwner, "rival-"+uuid.NewString()[:8], "Rival", "home"); err != nil || outcome != "created" {
+		t.Fatalf("rival create: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.AddOrganizationMember(ctx, owner, orgID, otherOrgOwner, auth.OrgRoleMember); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cross-org add: %v", err)
+	}
+	// Owner seats are never granted through the member path, and bad input
+	// fails before the database.
+	if _, err := repo.AddOrganizationMember(ctx, owner, orgID, third, auth.OrgRoleOwner); !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("owner grant: %v", err)
+	}
+	strangerOrgs, err := repo.OrganizationsFor(ctx, stranger)
+	if err != nil || len(strangerOrgs) != 1 || strangerOrgs[0].Role != auth.OrgRoleAdmin {
+		t.Fatalf("admin orgs: %v err=%v", strangerOrgs, err)
+	}
+	if _, err := repo.CreateOrganization(ctx, uuid.New(), owner, "Bad Slug!", "Bad", "home"); err == nil {
+		t.Fatal("bad slug accepted")
+	}
+	// Structural lockdown for both new tables.
+	for _, table := range []string{"identity_organizations", "identity_memberships"} {
+		var forced bool
+		if err := adminDB.QueryRowContext(ctx,
+			`SELECT relforcerowsecurity FROM pg_class WHERE oid=('keel_meta.'||$1)::regclass`, table).Scan(&forced); err != nil || !forced {
+			t.Fatalf("%s is not FORCE RLS: %v", table, err)
+		}
+	}
+	appDB := openRoleDB(t, "postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable")
+	if _, err := appDB.QueryContext(ctx, `SELECT keel_meta.create_identity_organization(gen_random_uuid(),gen_random_uuid(),'s','n','home')`); err == nil {
+		t.Fatal("app capability executed org function")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected app denial: %v", err)
+	}
+	if _, err := identityDB.QueryContext(ctx, `SELECT slug FROM keel_meta.identity_organizations LIMIT 1`); err == nil {
+		t.Fatal("identity login read organizations directly")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected identity denial: %v", err)
+	}
 }
 
 // TestPostgreSQLIdentityWebAuthn proves the key lifecycle: active-only

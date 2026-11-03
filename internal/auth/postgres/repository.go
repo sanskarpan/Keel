@@ -29,6 +29,8 @@ var (
 	ErrInvalidRecord = errors.New("identity record is invalid")
 	// ErrCapabilityDenied reports a caller without the keel_identity capability.
 	ErrCapabilityDenied = errors.New("identity capability is required")
+	// ErrNotAuthorized reports an actor without owner/admin membership.
+	ErrNotAuthorized = errors.New("identity actor is not authorized")
 )
 
 // Repository is the PostgreSQL-backed identity store.
@@ -539,6 +541,107 @@ func (r *Repository) StoreWebAuthnCredential(ctx context.Context, principalID uu
 		).Scan(&outcome)
 	})
 	return outcome, err
+}
+
+// Organization is one organization row with the caller's membership role.
+type Organization struct {
+	OrgID       uuid.UUID
+	Slug        string
+	DisplayName string
+	Region      string
+	Role        string
+}
+
+// CreateOrganization creates one organization with the caller as owner and
+// binds an unbound principal's tenant to it. An already-bound principal or
+// a taken slug is a conflict.
+func (r *Repository) CreateOrganization(ctx context.Context, orgID, principalID uuid.UUID, slug, displayName, region string) (string, error) {
+	if r == nil || r.db == nil || orgID == uuid.Nil || principalID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	if err := auth.ValidateOrgSlug(slug); err != nil {
+		return "", err
+	}
+	if err := auth.ValidateOrgName(displayName); err != nil {
+		return "", err
+	}
+	if err := auth.ValidateOrgRegion(region); err != nil {
+		return "", err
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.create_identity_organization($1,$2,$3,$4,$5)`,
+			orgID, principalID, slug, displayName, region,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_active" {
+		return "", ErrNotVerified
+	}
+	if err == nil && (outcome == "already_bound" || outcome == "slug_conflict") {
+		return "", ErrConflict
+	}
+	return outcome, err
+}
+
+// AddOrganizationMember seats an active principal as admin or member. The
+// actor must hold owner/admin membership; a bound-to-another-org principal
+// is a tenant conflict.
+func (r *Repository) AddOrganizationMember(ctx context.Context, actorID, orgID, memberID uuid.UUID, role string) (string, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || orgID == uuid.Nil || memberID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	if err := auth.ValidateOrgRole(role); err != nil {
+		return "", err
+	}
+	if role == auth.OrgRoleOwner {
+		return "", ErrInvalidRecord
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.add_organization_member($1,$2,$3,$4)`,
+			actorID, orgID, memberID, role,
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_authorized" {
+		return "", ErrNotAuthorized
+	}
+	if err == nil && outcome == "not_active" {
+		return "", ErrNotVerified
+	}
+	if err == nil && (outcome == "already_member" || outcome == "tenant_conflict") {
+		return "", ErrConflict
+	}
+	return outcome, err
+}
+
+// OrganizationsFor lists every organization one principal belongs to.
+func (r *Repository) OrganizationsFor(ctx context.Context, principalID uuid.UUID) ([]Organization, error) {
+	if r == nil || r.db == nil || principalID == uuid.Nil {
+		return nil, ErrInvalidRecord
+	}
+	var orgs []Organization
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		rows, rowsErr := tx.QueryContext(ctx,
+			`SELECT out_org_id,out_slug,out_display_name,out_region,out_role
+			   FROM keel_meta.organizations_for($1)`,
+			principalID,
+		)
+		if rowsErr != nil {
+			return rowsErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var org Organization
+			if scanErr := rows.Scan(&org.OrgID, &org.Slug, &org.DisplayName, &org.Region, &org.Role); scanErr != nil {
+				return scanErr
+			}
+			orgs = append(orgs, org)
+		}
+		return rows.Err()
+	})
+	return orgs, err
 }
 
 func (r *Repository) withTx(ctx context.Context, work func(*sql.Tx) error) error {
