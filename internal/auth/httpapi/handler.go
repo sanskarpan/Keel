@@ -50,6 +50,9 @@ type Repository interface {
 	KeysFor(ctx context.Context, principalID uuid.UUID) ([]postgres.WebAuthnKey, error)
 	AdvanceSignCount(ctx context.Context, credentialID []byte, presented uint32) (string, uuid.UUID, error)
 	StoreWebAuthnCredential(ctx context.Context, principalID uuid.UUID, credentialID, publicKey []byte, transports string, backupEligible, backupState bool, signCount uint32) (string, error)
+	CreateOrganization(ctx context.Context, orgID, principalID uuid.UUID, slug, displayName, region string) (string, error)
+	AddOrganizationMember(ctx context.Context, actorID, orgID, memberID uuid.UUID, role string) (string, error)
+	OrganizationsFor(ctx context.Context, principalID uuid.UUID) ([]postgres.Organization, error)
 }
 
 // VerificationSender delivers email-verification tokens. Production sends
@@ -105,6 +108,9 @@ func New(repo Repository, pepper []byte, hashParams auth.ArgonParams, verifySend
 	h.mux.HandleFunc("POST /v1/auth/webauthn/registration/verify", h.webauthnRegistrationVerify)
 	h.mux.HandleFunc("POST /v1/auth/webauthn/authentication/options", h.webauthnAuthenticationOptions)
 	h.mux.HandleFunc("POST /v1/auth/webauthn/authentication/verify", h.webauthnAuthenticationVerify)
+	h.mux.HandleFunc("POST /v1/auth/organizations", h.createOrganization)
+	h.mux.HandleFunc("POST /v1/auth/organizations/{org_id}/members", h.addOrganizationMember)
+	h.mux.HandleFunc("GET /v1/auth/organizations", h.listOrganizations)
 	return h, nil
 }
 

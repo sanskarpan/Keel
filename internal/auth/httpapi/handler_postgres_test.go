@@ -129,3 +129,142 @@ func TestHTTPIdentityLifecycleAgainstPostgres(t *testing.T) {
 	}
 	_ = httptest.NewRecorder
 }
+
+// httpPassword stages one verified principal and returns its email/password.
+func httpPassword(t *testing.T, prefix string) (string, string) {
+	t.Helper()
+	return prefix + "-" + uuid.NewString() + "@example.test", prefix + "-pass-phrase"
+}
+
+func httpRegisterVerifyLogin(t *testing.T, h *Handler, _ *fakeSender, email, password string) string {
+	t.Helper()
+	response := doRequest(h, http.MethodPost, "/v1/auth/principals",
+		map[string]string{"email": email, "password": password}, "")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("register %s: %d %s", email, response.Code, response.Body.String())
+	}
+	token := httpVerifyToken(t, h, email)
+	response = doRequest(h, http.MethodPost, "/v1/auth/verifications/consume",
+		map[string]string{"token": token}, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("verify %s: %d %s", email, response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/sessions",
+		map[string]string{"email": email, "password": password}, "")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("login %s: %d %s", email, response.Code, response.Body.String())
+	}
+	var login struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &login); err != nil || login.Token == "" {
+		t.Fatal(err)
+	}
+	return login.Token
+}
+
+func httpVerifyToken(t *testing.T, h *Handler, _ string) string {
+	t.Helper()
+	sender, ok := h.verifySender.(*fakeSender)
+	if !ok {
+		t.Fatal("handler sender is not a fake")
+	}
+	if sender.calls == 0 || sender.token == "" {
+		t.Fatalf("no verification sent: %+v", sender)
+	}
+	token := sender.token
+	sender.calls, sender.token, sender.email = 0, "", ""
+	return token
+}
+
+// TestHTTPOrganizationLifecycleAgainstPostgres drives the organization
+// surface over HTTP: create binds, owners/admins seat members, strangers
+// are refused, and conflicts stay distinct.
+func TestHTTPOrganizationLifecycleAgainstPostgres(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity HTTP integration tests")
+	}
+	db, err := sql.Open("pgx", identityDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := postgres.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pepper := []byte("keel-http-pepper-keel-http-pepper-32-keel")
+	h, err := New(repo, pepper, auth.TestArgonParams(), &fakeSender{}, &fakeSender{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ownerEmail, ownerPassword := httpPassword(t, "orgowner")
+	ownerToken := httpRegisterVerifyLogin(t, h, nil, ownerEmail, ownerPassword)
+
+	slug := "acme-" + uuid.NewString()[:8]
+	response := doRequest(h, http.MethodPost, "/v1/auth/organizations",
+		map[string]string{"slug": slug, "display_name": "Acme", "region": "home"}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", response.Code, response.Body.String())
+	}
+	var created struct {
+		OrgID string `json:"org_id"`
+		Role  string `json:"role"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil || created.Role != auth.OrgRoleOwner {
+		t.Fatalf("create body: %v %s", err, response.Body.String())
+	}
+	response = doRequest(h, http.MethodGet, "/v1/auth/organizations", nil, ownerToken)
+	if response.Code != http.StatusOK || !contains(response.Body.String(), slug) {
+		t.Fatalf("owner list: %d %s", response.Code, response.Body.String())
+	}
+	// A bound founder cannot found again.
+	response = doRequest(h, http.MethodPost, "/v1/auth/organizations",
+		map[string]string{"slug": "second-" + uuid.NewString()[:8], "display_name": "Second", "region": "home"}, ownerToken)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("second org: %d %s", response.Code, response.Body.String())
+	}
+
+	memberEmail, memberPassword := httpPassword(t, "orgmember")
+	memberToken := httpRegisterVerifyLogin(t, h, nil, memberEmail, memberPassword)
+	response = doRequest(h, http.MethodPost, "/v1/auth/organizations/"+created.OrgID+"/members",
+		map[string]string{"email": memberEmail, "role": "member"}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("add member: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodGet, "/v1/auth/organizations", nil, memberToken)
+	if response.Code != http.StatusOK || !contains(response.Body.String(), slug) {
+		t.Fatalf("member list: %d %s", response.Code, response.Body.String())
+	}
+	// A plain member cannot seat others.
+	strangerEmail, strangerPassword := httpPassword(t, "orgstranger")
+	httpRegisterVerifyLogin(t, h, nil, strangerEmail, strangerPassword)
+	response = doRequest(h, http.MethodPost, "/v1/auth/organizations/"+created.OrgID+"/members",
+		map[string]string{"email": strangerEmail, "role": "member"}, memberToken)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("member add: %d %s", response.Code, response.Body.String())
+	}
+	// Unknown addresses resolve to 404; owner seats are rejected at the edge.
+	response = doRequest(h, http.MethodPost, "/v1/auth/organizations/"+created.OrgID+"/members",
+		map[string]string{"email": "nobody-" + uuid.NewString() + "@example.test", "role": "member"}, ownerToken)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unknown member: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/organizations/"+created.OrgID+"/members",
+		map[string]string{"email": strangerEmail, "role": "owner"}, ownerToken)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("owner grant: %d %s", response.Code, response.Body.String())
+	}
+	// Re-adding converges on conflict, and a bound outsider is a tenant conflict.
+	response = doRequest(h, http.MethodPost, "/v1/auth/organizations/"+created.OrgID+"/members",
+		map[string]string{"email": memberEmail, "role": "member"}, ownerToken)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("re-add: %d %s", response.Code, response.Body.String())
+	}
+}
