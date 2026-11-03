@@ -348,7 +348,9 @@ Migration `0079_identity_membership_lifecycle` adds role changes
 (owner-only, admin/member only, never the owner seat), removal
 (owner/admin remove others, non-owners leave, owners never leave) and
 per-org expiry reap, with the membership guard extended to exactly those
-transitions.
+transitions. Migration `0080_identity_key_directory` adds
+capability-gated service-principal org resolution and owner/admin-visible
+key listing with lifecycle timestamps.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

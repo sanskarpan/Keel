@@ -849,6 +849,67 @@ func (r *Repository) RevokeAPIKey(ctx context.Context, actorID, keyID uuid.UUID)
 	return outcome, err
 }
 
+// APIKey is one bearer key row as seen by an owner/admin directory read.
+type APIKey struct {
+	KeyID      uuid.UUID
+	Prefix     string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	RevokedAt  time.Time
+	LastUsedAt time.Time
+}
+
+// ServicePrincipalOrg resolves the owning org for one service principal.
+// Empty means unknown.
+func (r *Repository) ServicePrincipalOrg(ctx context.Context, servicePrincipalID uuid.UUID) (uuid.UUID, error) {
+	if r == nil || r.db == nil || servicePrincipalID == uuid.Nil {
+		return uuid.Nil, ErrInvalidRecord
+	}
+	var orgID uuid.UUID
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		rowErr := tx.QueryRowContext(ctx,
+			`SELECT out_org_id FROM keel_meta.service_principal_org($1)`,
+			servicePrincipalID,
+		).Scan(&orgID)
+		if errors.Is(rowErr, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return rowErr
+	})
+	return orgID, err
+}
+
+// KeysForServicePrincipal lists every key a service principal holds,
+// including revoked history. Non-owners/admins see nothing.
+func (r *Repository) KeysForServicePrincipal(ctx context.Context, actorID, servicePrincipalID uuid.UUID) ([]APIKey, error) {
+	if r == nil || r.db == nil || actorID == uuid.Nil || servicePrincipalID == uuid.Nil {
+		return nil, ErrInvalidRecord
+	}
+	var keys []APIKey
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		var nullExpires, nullRevoked, nullUsed sql.NullTime
+		rows, rowsErr := tx.QueryContext(ctx,
+			`SELECT out_key_id,out_prefix,out_created_at,out_expires_at,out_revoked_at,out_last_used_at
+			   FROM keel_meta.keys_for_service_principal($1,$2)`,
+			actorID, servicePrincipalID,
+		)
+		if rowsErr != nil {
+			return rowsErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var key APIKey
+			if scanErr := rows.Scan(&key.KeyID, &key.Prefix, &key.CreatedAt, &nullExpires, &nullRevoked, &nullUsed); scanErr != nil {
+				return scanErr
+			}
+			key.ExpiresAt, key.RevokedAt, key.LastUsedAt = nullExpires.Time, nullRevoked.Time, nullUsed.Time
+			keys = append(keys, key)
+		}
+		return rows.Err()
+	})
+	return keys, err
+}
+
 // DisableServicePrincipal disables one machine identity and revokes every
 // live key it holds. The actor must hold owner/admin membership.
 func (r *Repository) DisableServicePrincipal(ctx context.Context, actorID, servicePrincipalID uuid.UUID) (string, error) {
