@@ -293,7 +293,16 @@ principal, five consecutive failures locking for 15 minutes with a 15-minute
 staleness decay, success deleting the row, attempts while locked changing
 nothing, and unknown principals never counted; `0068` forward-repairs the
 throttle guard, which had refused the fresh-count reset (first/last moved
-to now) that the decay and expired-lock branches require.
+to now) that the decay and expired-lock branches require. Migration
+`0069_identity_webauthn_credentials` adds the MFA key foundation: forced-RLS
+`identity_webauthn_credentials` (globally unique credential id, COSE public
+key, monotonic sign count, transports, backup flags) and
+`identity_webauthn_challenges` (single pending challenge per
+principal/purpose, 32-byte nonce, 10-minute ceremony window) with
+capability-gated record/consume, atomic challenge-bound registration and
+sign-count advance that reports clones without applying them; `0070`
+forward-repairs the `purpose` variable/column ambiguity that aborted both
+consume and register with SQLSTATE 42702.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

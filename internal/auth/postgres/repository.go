@@ -369,6 +369,152 @@ func (r *Repository) ThrottleFor(ctx context.Context, principalID uuid.UUID) (in
 	return consecutive, time.Time{}, nil
 }
 
+// WebAuthnKey is one stored credential public key with its clone-detection
+// counter and authenticator flags.
+type WebAuthnKey struct {
+	CredentialID   []byte
+	PublicKey      []byte
+	SignCount      uint32
+	Transports     string
+	BackupEligible bool
+	BackupState    bool
+}
+
+// RecordWebAuthnChallenge stores one bounded ceremony challenge for an active
+// principal, replacing any pending challenge for the same purpose.
+func (r *Repository) RecordWebAuthnChallenge(ctx context.Context, challengeID, principalID uuid.UUID, purpose string, challenge []byte, now, expires time.Time) (string, error) {
+	if r == nil || r.db == nil || challengeID == uuid.Nil {
+		return "", ErrInvalidRecord
+	}
+	if purpose != auth.PurposeWebAuthnRegistration && purpose != auth.PurposeWebAuthnAuthentication {
+		return "", ErrInvalidRecord
+	}
+	if err := auth.ValidateChallengeBytes(challenge); err != nil {
+		return "", err
+	}
+	if err := auth.ValidateWebAuthnChallengeTTL(now, expires); err != nil {
+		return "", err
+	}
+	var outcome string
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT keel_meta.record_identity_webauthn_challenge($1,$2,$3,$4,$5)`,
+			challengeID, principalID, purpose, challenge, expires.UTC(),
+		).Scan(&outcome)
+	})
+	if err == nil && outcome == "not_active" {
+		return "", ErrNotVerified
+	}
+	if err == nil && outcome == "challenge_reuse" {
+		return "", ErrTokenReuse
+	}
+	return outcome, err
+}
+
+// ConsumeWebAuthnChallenge marks one challenge consumed and returns its
+// principal, purpose and nonce. Only "ready" challenges feed a ceremony.
+func (r *Repository) ConsumeWebAuthnChallenge(ctx context.Context, challengeID uuid.UUID) (string, uuid.UUID, string, []byte, error) {
+	if r == nil || r.db == nil || challengeID == uuid.Nil {
+		return "", uuid.Nil, "", nil, ErrInvalidRecord
+	}
+	var outcome, purpose string
+	var principalID uuid.UUID
+	var nonce []byte
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		var purposeNull sql.NullString
+		rowErr := tx.QueryRowContext(ctx,
+			`SELECT outcome,out_principal_id,out_purpose,out_challenge FROM keel_meta.consume_identity_webauthn_challenge($1)`,
+			challengeID,
+		).Scan(&outcome, &principalID, &purposeNull, &nonce)
+		if purposeNull.Valid {
+			purpose = purposeNull.String
+		}
+		return rowErr
+	})
+	return outcome, principalID, purpose, nonce, err
+}
+
+// RegisterWebAuthnCredential atomically consumes one registration challenge
+// and stores the credential public key. Only "registered" binds a key.
+func (r *Repository) RegisterWebAuthnCredential(ctx context.Context, challengeID uuid.UUID, credentialID, publicKey []byte, transports string, backupEligible, backupState bool) (string, uuid.UUID, error) {
+	if r == nil || r.db == nil || challengeID == uuid.Nil {
+		return "", uuid.Nil, ErrInvalidRecord
+	}
+	if err := auth.ValidateCredentialID(credentialID); err != nil {
+		return "", uuid.Nil, err
+	}
+	if err := auth.ValidatePublicKey(publicKey); err != nil {
+		return "", uuid.Nil, err
+	}
+	if err := auth.ValidateTransports(transports); err != nil {
+		return "", uuid.Nil, err
+	}
+	var outcome string
+	var principalID uuid.UUID
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT outcome,out_principal_id FROM keel_meta.register_identity_webauthn_credential($1,$2,$3,$4,$5,$6)`,
+			challengeID, credentialID, publicKey, transports, backupEligible, backupState,
+		).Scan(&outcome, &principalID)
+	})
+	return outcome, principalID, err
+}
+
+// KeysFor lists every credential public key for one principal. Empty (not an
+// error) means the principal enrolled nothing.
+func (r *Repository) KeysFor(ctx context.Context, principalID uuid.UUID) ([]WebAuthnKey, error) {
+	if r == nil || r.db == nil || principalID == uuid.Nil {
+		return nil, ErrInvalidRecord
+	}
+	var keys []WebAuthnKey
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		rows, rowsErr := tx.QueryContext(ctx,
+			`SELECT out_credential_id,out_public_key,out_sign_count,out_transports,out_backup_eligible,out_backup_state
+			   FROM keel_meta.identity_webauthn_keys_for($1)`,
+			principalID,
+		)
+		if rowsErr != nil {
+			return rowsErr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var key WebAuthnKey
+			var signCount int64
+			if scanErr := rows.Scan(&key.CredentialID, &key.PublicKey, &signCount, &key.Transports, &key.BackupEligible, &key.BackupState); scanErr != nil {
+				return scanErr
+			}
+			if signCount < 0 || signCount > 4294967295 {
+				return fmt.Errorf("%w: stored sign count out of range", ErrInvalidRecord)
+			}
+			key.SignCount = uint32(signCount)
+			keys = append(keys, key)
+		}
+		return rows.Err()
+	})
+	return keys, err
+}
+
+// AdvanceSignCount applies one presented counter. "advanced" moves the stored
+// value; "cloned" reports a non-advancing counter while one was expected and
+// changes nothing, so the caller must fail the ceremony closed.
+func (r *Repository) AdvanceSignCount(ctx context.Context, credentialID []byte, presented uint32) (string, uuid.UUID, error) {
+	if r == nil || r.db == nil {
+		return "", uuid.Nil, ErrInvalidRecord
+	}
+	if err := auth.ValidateCredentialID(credentialID); err != nil {
+		return "", uuid.Nil, err
+	}
+	var outcome string
+	var principalID uuid.UUID
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT outcome,out_principal_id FROM keel_meta.advance_identity_webauthn_sign_count($1,$2)`,
+			credentialID, int64(presented),
+		).Scan(&outcome, &principalID)
+	})
+	return outcome, principalID, err
+}
+
 func (r *Repository) withTx(ctx context.Context, work func(*sql.Tx) error) error {
 	tx, tranErr := r.db.BeginTx(ctx, nil)
 	if tranErr != nil {
