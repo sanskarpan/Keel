@@ -248,3 +248,93 @@ func memberPrincipal(t *testing.T, h *Handler, token string) string {
 	}
 	return session.PrincipalID
 }
+
+// TestHTTPDirectoryLifecycleAgainstPostgres drives member/invite listing and
+// revocation over HTTP against the real store.
+func TestHTTPDirectoryLifecycleAgainstPostgres(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity HTTP integration tests")
+	}
+	db, err := sql.Open("pgx", identityDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := postgres.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pepper := []byte("keel-http-pepper-keel-http-pepper-32-keel")
+	verifyS, resetS := &fakeSender{}, &fakeSender{}
+	h, err := New(repo, pepper, auth.TestArgonParams(), verifyS, resetS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerToken := httpRegisterVerifyLogin(t, h, verifyS, "dirhttp-owner-"+uuid.NewString()+"@example.test", "dirhttp-owner-pass-phrase")
+	strangerToken := httpRegisterVerifyLogin(t, h, verifyS, "dirhttp-stranger-"+uuid.NewString()+"@example.test", "dirhttp-stranger-pass-phrase")
+
+	slug := "dirhttp-" + uuid.NewString()[:8]
+	response := doRequest(h, http.MethodPost, "/v1/auth/organizations",
+		map[string]string{"slug": slug, "display_name": "Directory", "region": "home"}, ownerToken)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", response.Code, response.Body.String())
+	}
+	var created struct {
+		OrgID string `json:"org_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	membersTarget := "/v1/auth/organizations/" + created.OrgID + "/members"
+	invitesTarget := "/v1/auth/organizations/" + created.OrgID + "/invites"
+	response = doRequest(h, http.MethodGet, membersTarget, nil, ownerToken)
+	if response.Code != http.StatusOK || !contains(response.Body.String(), "owner") {
+		t.Fatalf("members: %d %s", response.Code, response.Body.String())
+	}
+	if response := doRequest(h, http.MethodGet, membersTarget, nil, strangerToken); response.Code != http.StatusForbidden {
+		t.Fatalf("stranger members: %d", response.Code)
+	}
+	for _, email := range []string{
+		"dirhttp-one-" + uuid.NewString() + "@example.test",
+		"dirhttp-two-" + uuid.NewString() + "@example.test",
+	} {
+		response = doRequest(h, http.MethodPost, invitesTarget,
+			map[string]string{"email": email, "role": "member"}, ownerToken)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("invite %s: %d %s", email, response.Code, response.Body.String())
+		}
+	}
+	response = doRequest(h, http.MethodGet, invitesTarget, nil, ownerToken)
+	if response.Code != http.StatusOK {
+		t.Fatalf("invites: %d %s", response.Code, response.Body.String())
+	}
+	var listed struct {
+		Invites []struct {
+			InviteID string `json:"invite_id"`
+		} `json:"invites"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil || len(listed.Invites) != 2 {
+		t.Fatalf("invite list: %v %s", err, response.Body.String())
+	}
+	response = doRequest(h, http.MethodPost, "/v1/auth/invites/"+listed.Invites[0].InviteID+"/revoke", nil, ownerToken)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("revoke: %d %s", response.Code, response.Body.String())
+	}
+	response = doRequest(h, http.MethodGet, invitesTarget, nil, ownerToken)
+	var remaining struct {
+		Invites []struct {
+			InviteID string `json:"invite_id"`
+		} `json:"invites"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &remaining); err != nil || len(remaining.Invites) != 1 {
+		t.Fatalf("remaining: %v %s", err, response.Body.String())
+	}
+	if response := doRequest(h, http.MethodPost, "/v1/auth/invites/"+listed.Invites[0].InviteID+"/revoke", nil, ownerToken); response.Code != http.StatusNotFound {
+		t.Fatalf("repeat revoke: %d", response.Code)
+	}
+}

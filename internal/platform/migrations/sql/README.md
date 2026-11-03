@@ -340,7 +340,10 @@ the legitimate member-to-owner transfer shape. Migration
 use-stamp history) with capability-gated create/issue/verify/revoke plus
 principal disable that revokes every live key; `0077` repairs the trust
 boundary by adding owner/admin actor authorization to issue/revoke/disable
-and dropping the capability-only originals.
+and dropping the capability-only originals. Migration
+`0078_identity_directory_reads` adds owner/admin directory reads (members
+with roles, pending invites with digests, both empty on unauthorized) and
+pre-acceptance invite revocation (consumed invites stay immutable).
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.
