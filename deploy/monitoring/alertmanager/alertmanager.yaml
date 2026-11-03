@@ -1,37 +1,49 @@
 # Local Alertmanager routing for Keel webhook alerts (UNQUALIFIED).
 #
-# PagerDuty was removed as a dependency: both receivers post to a generic webhook URL
-# that the operator points at any free endpoint (Slack/Discord/custom receiver). Until
-# the URL is set to something real, notifications fail closed with connection errors in
-# the Alertmanager log and no alert is lost silently: firing state stays visible in the
-# Alertmanager UI and inhibition still applies. Grouping uses only the fixed
-# service/component/alertname labels, matching the content-free metrics contract.
+# PagerDuty was removed as a cost dependency (owner direction 2026-11-02).
+# Each receiver now posts to two targets: the committed loopback alert sink that
+# keeps local delivery verified end to end, and a Grafana OnCall (OSS/free)
+# integration whose URL is NOT committed: it is read from a secret file mounted
+# at deploy time. Until that file exists, OnCall notify fails closed with log
+# errors while the sink still receives every alert; firing state stays visible
+# in the Alertmanager UI and inhibition still applies. Escalations, schedules
+# and on-call rotations are then owned by Grafana OnCall instead of Alertmanager
+# route editing. Grouping uses only the fixed service/component/alertname
+# labels, matching the content-free metrics contract.
 global:
   resolve_timeout: 5m
 
 route:
-  receiver: keel-warning-ops
+  receiver: keel-warning-oncall
   group_by: [service, component, alertname]
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
   routes:
     - matchers: [severity = "critical"]
-      receiver: keel-critical-ops
+      receiver: keel-critical-oncall
       group_wait: 10s
       repeat_interval: 30m
       continue: false
 
 receivers:
-  - name: keel-critical-ops
+  - name: keel-critical-oncall
     webhook_configs:
       - url: http://127.0.0.1:19095/hooks/ops-alerts
         send_resolved: true
         http_config:
           follow_redirects: false
-  - name: keel-warning-ops
+      - url_file: /run/secrets/oncall-critical-url
+        send_resolved: true
+        http_config:
+          follow_redirects: false
+  - name: keel-warning-oncall
     webhook_configs:
       - url: http://127.0.0.1:19095/hooks/ops-alerts
+        send_resolved: true
+        http_config:
+          follow_redirects: false
+      - url_file: /run/secrets/oncall-warning-url
         send_resolved: true
         http_config:
           follow_redirects: false
