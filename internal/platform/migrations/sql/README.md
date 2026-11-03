@@ -344,6 +344,11 @@ and dropping the capability-only originals. Migration
 `0078_identity_directory_reads` adds owner/admin directory reads (members
 with roles, pending invites with digests, both empty on unauthorized) and
 pre-acceptance invite revocation (consumed invites stay immutable).
+Migration `0079_identity_membership_lifecycle` adds role changes
+(owner-only, admin/member only, never the owner seat), removal
+(owner/admin remove others, non-owners leave, owners never leave) and
+per-org expiry reap, with the membership guard extended to exactly those
+transitions.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

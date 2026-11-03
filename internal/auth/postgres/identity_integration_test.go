@@ -1013,6 +1013,111 @@ func TestPostgreSQLIdentityDirectory(t *testing.T) {
 	}
 }
 
+// TestPostgreSQLIdentityMembershipLifecycle proves role changes, removal and
+// invite expiry reap: owners promote/demote between admin and member, the
+// owner seat moves only by transfer, anyone non-owner may leave, owners
+// cannot leave, and strangers change nothing.
+func TestPostgreSQLIdentityMembershipLifecycle(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity integration tests")
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	identityDB := openRoleDB(t, identityDSN)
+	repo, err := New(identityDB)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	pepper := []byte("keel-integration-pepper-keel-integration-pepper-32")
+	adminDB := openRoleDB(t, adminDSN)
+
+	owner := activeTestPrincipal(t, ctx, repo, pepper, "life-owner-"+uuid.NewString()+"@example.test", nil)
+	orgID := uuid.New()
+	if outcome, err := repo.CreateOrganization(ctx, orgID, owner, "life-"+uuid.NewString()[:8], "Lifecycle", "home"); err != nil || outcome != "created" {
+		t.Fatalf("create: %v (outcome %q)", err, outcome)
+	}
+	member := activeTestPrincipal(t, ctx, repo, pepper, "life-member-"+uuid.NewString()+"@example.test", nil)
+	if outcome, err := repo.AddOrganizationMember(ctx, owner, orgID, member, auth.OrgRoleMember); err != nil || outcome != "added" {
+		t.Fatalf("add: %v (outcome %q)", err, outcome)
+	}
+	// Owner promotes and demotes between admin and member.
+	if outcome, err := repo.SetMemberRole(ctx, owner, orgID, member, auth.OrgRoleAdmin); err != nil || outcome != "changed" {
+		t.Fatalf("promote: %v (outcome %q)", err, outcome)
+	}
+	if outcome, err := repo.SetMemberRole(ctx, owner, orgID, member, auth.OrgRoleAdmin); err != nil || outcome != "unchanged" {
+		t.Fatalf("idempotent promote: %v (outcome %q)", err, outcome)
+	}
+	if outcome, err := repo.SetMemberRole(ctx, owner, orgID, member, auth.OrgRoleMember); err != nil || outcome != "changed" {
+		t.Fatalf("demote: %v (outcome %q)", err, outcome)
+	}
+	// Admins do not change roles; owners are immutable outside transfer.
+	admin := activeTestPrincipal(t, ctx, repo, pepper, "life-admin-"+uuid.NewString()+"@example.test", nil)
+	if outcome, err := repo.AddOrganizationMember(ctx, owner, orgID, admin, auth.OrgRoleAdmin); err != nil || outcome != "added" {
+		t.Fatalf("add admin: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.SetMemberRole(ctx, admin, orgID, member, auth.OrgRoleAdmin); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("admin promote: %v", err)
+	}
+	if _, err := repo.SetMemberRole(ctx, owner, orgID, owner, auth.OrgRoleMember); !errors.Is(err, ErrConflict) {
+		t.Fatalf("owner demote: %v", err)
+	}
+	// Owners and admins remove others; members only leave themselves.
+	leaver := activeTestPrincipal(t, ctx, repo, pepper, "life-leaver-"+uuid.NewString()+"@example.test", nil)
+	if outcome, err := repo.AddOrganizationMember(ctx, owner, orgID, leaver, auth.OrgRoleMember); err != nil || outcome != "added" {
+		t.Fatalf("add leaver: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.RemoveMember(ctx, leaver, orgID, member); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("member remove other: %v", err)
+	}
+	if outcome, err := repo.RemoveMember(ctx, leaver, orgID, leaver); err != nil || outcome != "removed" {
+		t.Fatalf("leave: %v (outcome %q)", err, outcome)
+	}
+	if outcome, err := repo.RemoveMember(ctx, admin, orgID, member); err != nil || outcome != "removed" {
+		t.Fatalf("admin remove: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.RemoveMember(ctx, owner, orgID, owner); !errors.Is(err, ErrConflict) {
+		t.Fatalf("owner leave: %v", err)
+	}
+	if _, err := repo.RemoveMember(ctx, admin, orgID, owner); !errors.Is(err, ErrConflict) {
+		t.Fatalf("remove owner: %v", err)
+	}
+	// Expired pending invites reap per org; strangers reap nothing.
+	firstToken := mustSecret(t)
+	if outcome, err := repo.InviteMember(ctx, uuid.New(), owner, orgID, "reap-one-"+uuid.NewString()+"@example.test", pepper, firstToken, auth.OrgRoleMember, now, now.Add(24*time.Hour)); err != nil || outcome != "invited" {
+		t.Fatalf("invite one: %v (outcome %q)", err, outcome)
+	}
+	secondToken := mustSecret(t)
+	if outcome, err := repo.InviteMember(ctx, uuid.New(), owner, orgID, "reap-two-"+uuid.NewString()+"@example.test", pepper, secondToken, auth.OrgRoleMember, now, now.Add(24*time.Hour)); err != nil || outcome != "invited" {
+		t.Fatalf("invite two: %v (outcome %q)", err, outcome)
+	}
+	firstDigest, err := auth.TokenDigest(firstToken, auth.PurposeOrganizationInvite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_invites DISABLE TRIGGER identity_invites_guard`); err != nil {
+		t.Fatalf("disable invite guard: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.identity_invites SET requested_at=clock_timestamp()-INTERVAL '2 hours',expires_at=clock_timestamp()-INTERVAL '1 minute' WHERE token_digest=$1`, firstDigest[:]); err != nil {
+		t.Fatalf("backdate invite: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_invites ENABLE TRIGGER identity_invites_guard`); err != nil {
+		t.Fatalf("enable invite guard: %v", err)
+	}
+	stranger := activeTestPrincipal(t, ctx, repo, pepper, "life-stranger-"+uuid.NewString()+"@example.test", nil)
+	if _, err := repo.ReapExpiredInvites(ctx, stranger, orgID); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("stranger reap: %v", err)
+	}
+	if n, err := repo.ReapExpiredInvites(ctx, owner, orgID); err != nil || n != 1 {
+		t.Fatalf("reap: %v (n=%d)", err, n)
+	}
+	if n, err := repo.ReapExpiredInvites(ctx, owner, orgID); err != nil || n != 0 {
+		t.Fatalf("reap again: %v (n=%d)", err, n)
+	}
+}
+
 // TestPostgreSQLIdentityAPIKeys proves the machine-identity lifecycle: an
 // owner/admin registers a service principal, issues bearer keys shown once,
 // verifies against digests only, rotates with overlap, and revocation plus
@@ -1128,7 +1233,7 @@ func TestPostgreSQLIdentityAPIKeys(t *testing.T) {
 		}
 	}
 	appDB := openRoleDB(t, "postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable")
-	if _, err := appDB.QueryContext(ctx, `SELECT keel_meta.issue_identity_api_key(gen_random_uuid(),gen_random_uuid(),'abcdefgh','00'::bytea,NULL)`); err == nil {
+	if _, err := appDB.QueryContext(ctx, `SELECT keel_meta.issue_identity_api_key(gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),'abcdefgh','00'::bytea,NULL)`); err == nil {
 		t.Fatal("app capability executed key function")
 	} else if !isPrivilegeDenial(err) {
 		t.Fatalf("unexpected app denial: %v", err)
