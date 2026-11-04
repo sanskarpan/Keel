@@ -224,10 +224,10 @@ func TestHTTPOrganizationLifecycleAgainstPostgres(t *testing.T) {
 	if response.Code != http.StatusOK || !contains(response.Body.String(), slug) {
 		t.Fatalf("owner list: %d %s", response.Code, response.Body.String())
 	}
-	// A bound founder cannot found again.
+	// Founders keep founding (multi-org); the tenant stays first-bound.
 	response = doRequest(h, http.MethodPost, "/v1/auth/organizations",
 		map[string]string{"slug": "second-" + uuid.NewString()[:8], "display_name": "Second", "region": "home"}, ownerToken)
-	if response.Code != http.StatusConflict {
+	if response.Code != http.StatusCreated {
 		t.Fatalf("second org: %d %s", response.Code, response.Body.String())
 	}
 
