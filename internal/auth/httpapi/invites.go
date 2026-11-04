@@ -153,6 +153,9 @@ func (h *Handler) transferOwnership(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, postgres.ErrNotFound):
 			writeProblem(w, http.StatusNotFound, "not_found")
 			return
+		case errors.Is(err, postgres.ErrMFARequired):
+			writeProblem(w, http.StatusForbidden, "mfa_required")
+			return
 		default:
 			writeProblem(w, http.StatusInternalServerError, "request_failed")
 			return

@@ -31,6 +31,9 @@ var (
 	ErrCapabilityDenied = errors.New("identity capability is required")
 	// ErrNotAuthorized reports an actor without owner/admin membership.
 	ErrNotAuthorized = errors.New("identity actor is not authorized")
+	// ErrMFARequired reports an owner action attempted without a registered
+	// second factor.
+	ErrMFARequired = errors.New("identity owner action requires MFA")
 )
 
 // Repository is the PostgreSQL-backed identity store.
@@ -720,6 +723,9 @@ func (r *Repository) TransferOwnership(ctx context.Context, actorID, orgID, newO
 	}
 	if err == nil && outcome == "not_member" {
 		return "", ErrNotFound
+	}
+	if err == nil && outcome == "mfa_required" {
+		return "", ErrMFARequired
 	}
 	return outcome, err
 }
