@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -103,6 +104,7 @@ func TestTransferOwnershipMapsOutcomes(t *testing.T) {
 		{"transferred", nil, http.StatusNoContent, ""},
 		{"", postgres.ErrNotAuthorized, http.StatusForbidden, "forbidden"},
 		{"", postgres.ErrNotFound, http.StatusNotFound, "not_found"},
+		{"", postgres.ErrMFARequired, http.StatusForbidden, "mfa_required"},
 	} {
 		repo := orgSessionRepo(actor)
 		repo.transferOutcome, repo.transferErr = tc.outcome, tc.err
@@ -221,6 +223,12 @@ func TestHTTPInviteTransferAndSwitchAgainstPostgres(t *testing.T) {
 	memberID := memberPrincipal(t, h, memberToken)
 	response = doRequest(h, http.MethodPost, "/v1/auth/organizations/"+created.OrgID+"/transfer",
 		map[string]string{"principal_id": memberID}, ownerToken)
+	if response.Code != http.StatusForbidden || problemCode(t, response) != "mfa_required" {
+		t.Fatalf("transfer without MFA: %d %s", response.Code, response.Body.String())
+	}
+	enrollHTTPKey(t, context.Background(), repo, mustParseUUID(t, memberPrincipal(t, h, ownerToken)))
+	response = doRequest(h, http.MethodPost, "/v1/auth/organizations/"+created.OrgID+"/transfer",
+		map[string]string{"principal_id": memberID}, ownerToken)
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("transfer: %d %s", response.Code, response.Body.String())
 	}
@@ -248,6 +256,29 @@ func memberPrincipal(t *testing.T, h *Handler, token string) string {
 		t.Fatal(err)
 	}
 	return session.PrincipalID
+}
+
+func mustParseUUID(t *testing.T, raw string) uuid.UUID {
+	t.Helper()
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// enrollHTTPKey binds one synthetic credential for MFA-gated owner actions.
+func enrollHTTPKey(t *testing.T, ctx context.Context, repo *postgres.Repository, principalID uuid.UUID) {
+	t.Helper()
+	now := time.Now().UTC()
+	nonce := []byte(uuid.NewString() + uuid.NewString())[:auth.WebAuthnChallengeBytes]
+	challengeID := uuid.New()
+	if outcome, err := repo.RecordWebAuthnChallenge(ctx, challengeID, principalID, auth.PurposeWebAuthnRegistration, nonce, now, now.Add(5*time.Minute)); err != nil || outcome != "recorded" {
+		t.Fatalf("record challenge: %v (outcome %q)", err, outcome)
+	}
+	if outcome, _, err := repo.RegisterWebAuthnCredential(ctx, challengeID, []byte("http-mfa-"+uuid.NewString()), bytes.Repeat([]byte{0x04}, 77), "", false, false); err != nil || outcome != "registered" {
+		t.Fatalf("register: %v (outcome %q)", err, outcome)
+	}
 }
 
 // TestHTTPDirectoryLifecycleAgainstPostgres drives member/invite listing and

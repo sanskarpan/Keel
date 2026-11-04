@@ -350,7 +350,10 @@ Migration `0079_identity_membership_lifecycle` adds role changes
 per-org expiry reap, with the membership guard extended to exactly those
 transitions. Migration `0080_identity_key_directory` adds
 capability-gated service-principal org resolution and owner/admin-visible
-key listing with lifecycle timestamps.
+key listing with lifecycle timestamps. Migration
+`0081_identity_transfer_mfa_stepup` requires the acting owner to hold a
+registered WebAuthn credential before transfer (`mfa_required`
+otherwise); self-transfer stays a no-op.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

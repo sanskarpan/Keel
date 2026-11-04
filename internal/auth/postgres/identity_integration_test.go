@@ -877,7 +877,21 @@ func TestPostgreSQLIdentityInvitesAndTransfer(t *testing.T) {
 	if outcome, _, err := repo.AcceptInvite(ctx, expiryToken, expiryPrincipal); err != nil || outcome != "expired" {
 		t.Fatalf("expired accept: %v (outcome %q)", err, outcome)
 	}
-	// Immediate transfer swaps owner and admin atomically.
+	// Immediate transfer swaps owner and admin atomically; the actor must
+	// hold a registered second factor first.
+	bareOrgID := uuid.New()
+	bareOwner := activeTestPrincipal(t, ctx, repo, pepper, "bare-owner-"+uuid.NewString()+"@example.test", nil)
+	if outcome, err := repo.CreateOrganization(ctx, bareOrgID, bareOwner, "bare-"+uuid.NewString()[:8], "Bare", "home"); err != nil || outcome != "created" {
+		t.Fatalf("bare create: %v (outcome %q)", err, outcome)
+	}
+	bareMember := activeTestPrincipal(t, ctx, repo, pepper, "bare-member-"+uuid.NewString()+"@example.test", nil)
+	if outcome, err := repo.AddOrganizationMember(ctx, bareOwner, bareOrgID, bareMember, auth.OrgRoleMember); err != nil || outcome != "added" {
+		t.Fatalf("bare add: %v (outcome %q)", err, outcome)
+	}
+	if _, err := repo.TransferOwnership(ctx, bareOwner, bareOrgID, bareMember); !errors.Is(err, ErrMFARequired) {
+		t.Fatalf("transfer without MFA: %v", err)
+	}
+	enrollTestKey(t, ctx, repo, owner)
 	if outcome, err := repo.TransferOwnership(ctx, owner, orgID, invitee); err != nil || outcome != "transferred" {
 		t.Fatalf("transfer: %v (outcome %q)", err, outcome)
 	}
@@ -1287,6 +1301,23 @@ func mustAPIKeySecret(t *testing.T, wire string) string {
 		t.Fatal(err)
 	}
 	return secret
+}
+
+// enrollTestKey binds one synthetic WebAuthn credential through the
+// capability-gated record/register path (no ceremony crypto; the keys table
+// only needs a row for the MFA gate).
+func enrollTestKey(t *testing.T, ctx context.Context, repo *Repository, principalID uuid.UUID) {
+	t.Helper()
+	now := time.Now().UTC()
+	nonce := []byte(uuid.NewString() + uuid.NewString())[:auth.WebAuthnChallengeBytes]
+	challengeID := uuid.New()
+	if outcome, err := repo.RecordWebAuthnChallenge(ctx, challengeID, principalID, auth.PurposeWebAuthnRegistration, nonce, now, now.Add(5*time.Minute)); err != nil || outcome != "recorded" {
+		t.Fatalf("record challenge: %v (outcome %q)", err, outcome)
+	}
+	credentialID := []byte("mfa-test-cred-" + uuid.NewString())
+	if outcome, _, err := repo.RegisterWebAuthnCredential(ctx, challengeID, credentialID, bytes.Repeat([]byte{0x04}, 77), "usb", false, false); err != nil || outcome != "registered" {
+		t.Fatalf("register: %v (outcome %q)", err, outcome)
+	}
 }
 
 // TestPostgreSQLIdentityWebAuthn proves the key lifecycle: active-only
