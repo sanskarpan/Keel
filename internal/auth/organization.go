@@ -4,6 +4,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Organization lifecycle bounds. Slugs are globally unique, DNS-safe handles;
@@ -14,6 +15,13 @@ const (
 	MaxOrgSlugLen   = 63
 	MaxOrgNameLen   = 128
 	MaxOrgRegionLen = 32
+)
+
+// Invite windows are email-paced: an hour at minimum so delivery is never
+// hopeless, seven days at most so stale invites cannot pile up.
+const (
+	MinInviteTTL = time.Hour
+	MaxInviteTTL = 7 * 24 * time.Hour
 )
 
 var (
@@ -65,6 +73,14 @@ func ValidateOrgRegion(region string) error {
 func ValidateOrgRole(role string) error {
 	if role != OrgRoleOwner && role != OrgRoleAdmin && role != OrgRoleMember {
 		return ErrInvalidMembership
+	}
+	return nil
+}
+
+// ValidateInviteTTL accepts one bounded invite window.
+func ValidateInviteTTL(now, expires time.Time) error {
+	if expires.IsZero() || expires.Before(now.Add(MinInviteTTL)) || expires.After(now.Add(MaxInviteTTL)) {
+		return ErrInvalidRecord
 	}
 	return nil
 }

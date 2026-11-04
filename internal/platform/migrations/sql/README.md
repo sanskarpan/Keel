@@ -327,7 +327,13 @@ capability-gated org transitions, drops and recreates
 `identity_session_for` with the active-org column (its return type grows,
 which CREATE OR REPLACE cannot do), and adds
 `switch_identity_session_org` (membership-checked; revoked, expired and
-unknown sessions do not switch).
+unknown sessions do not switch). Migration `0074_identity_invites_transfer`
+adds email invites (forced-RLS `identity_invites` naming a peppered email
+digest that needs no account yet, single-use tokens, admin/member seats,
+resend replacement) with capability-gated invite/accept and an immediate
+audited owner transfer that swaps owner/admin atomically without
+orphaning; `0075` forward-repairs the membership guard, which had refused
+the legitimate member-to-owner transfer shape.
 
 Add later product tables with the owning domain migration and its access, retention, and recovery
 contracts.

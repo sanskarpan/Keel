@@ -3,6 +3,7 @@ package auth
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOrgValidation(t *testing.T) {
@@ -44,5 +45,18 @@ func TestOrgValidation(t *testing.T) {
 	}
 	if err := ValidateOrgRole("superadmin"); err == nil {
 		t.Fatal("unknown role accepted")
+	}
+}
+
+func TestInviteTTLBounds(t *testing.T) {
+	now := time.Date(2026, time.November, 2, 12, 0, 0, 0, time.UTC)
+	if err := ValidateInviteTTL(now, now.Add(24*time.Hour)); err != nil {
+		t.Fatalf("valid window: %v", err)
+	}
+	if err := ValidateInviteTTL(now, now.Add(30*time.Minute)); err == nil {
+		t.Fatal("under-min window accepted")
+	}
+	if err := ValidateInviteTTL(now, now.Add(30*24*time.Hour)); err == nil {
+		t.Fatal("over-max window accepted")
 	}
 }

@@ -180,7 +180,8 @@ func TestPostgreSQLIdentityBootstrapAndSessionLifecycle(t *testing.T) {
 		                     'identity_email_verifications','identity_sessions',
 		                     'identity_password_resets','identity_login_throttle',
 		                     'identity_webauthn_credentials','identity_webauthn_challenges',
-		                     'identity_organizations','identity_memberships')
+		                     'identity_organizations','identity_memberships',
+		                     'identity_invites')
 		   AND EXISTS (SELECT 1 FROM aclexplode(c.relacl) a
 		                WHERE a.grantee<>c.relowner)`)
 	if err != nil {
@@ -779,6 +780,139 @@ func TestPostgreSQLIdentityOrganizations(t *testing.T) {
 	}
 	if _, err := identityDB.QueryContext(ctx, `SELECT slug FROM keel_meta.identity_organizations LIMIT 1`); err == nil {
 		t.Fatal("identity login read organizations directly")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected identity denial: %v", err)
+	}
+}
+
+// TestPostgreSQLIdentityInvitesAndTransfer proves token invites and the
+// immediate owner handoff: invites name an email that needs no account yet,
+// acceptance seats the matching principal and binds an unbound tenant, and
+// transfer swaps owner/admin atomically without orphaning the org.
+func TestPostgreSQLIdentityInvitesAndTransfer(t *testing.T) {
+	identityDSN := os.Getenv("KEEL_TEST_IDENTITY_DATABASE_URL")
+	adminDSN := os.Getenv("KEEL_TEST_ADMIN_DATABASE_URL")
+	if identityDSN == "" || adminDSN == "" {
+		t.Skip("set identity and admin PostgreSQL URLs to run identity integration tests")
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	identityDB := openRoleDB(t, identityDSN)
+	repo, err := New(identityDB)
+	if err != nil {
+		t.Fatalf("repository: %v", err)
+	}
+	pepper := []byte("keel-integration-pepper-keel-integration-pepper-32")
+	adminDB := openRoleDB(t, adminDSN)
+
+	owner := activeTestPrincipal(t, ctx, repo, pepper, "invite-owner-"+uuid.NewString()+"@example.test", nil)
+	orgID := uuid.New()
+	if outcome, err := repo.CreateOrganization(ctx, orgID, owner, "invite-"+uuid.NewString()[:8], "Invite Org", "home"); err != nil || outcome != "created" {
+		t.Fatalf("create: %v (outcome %q)", err, outcome)
+	}
+	// Owners and admins invite; strangers are refused.
+	inviteeEmail := "invitee-" + uuid.NewString() + "@example.test"
+	inviteToken := mustSecret(t)
+	if outcome, err := repo.InviteMember(ctx, uuid.New(), owner, orgID, inviteeEmail, pepper, inviteToken, auth.OrgRoleMember, now, now.Add(24*time.Hour)); err != nil || outcome != "invited" {
+		t.Fatalf("invite: %v (outcome %q)", err, outcome)
+	}
+	stranger := activeTestPrincipal(t, ctx, repo, pepper, "invite-stranger-"+uuid.NewString()+"@example.test", nil)
+	if _, err := repo.InviteMember(ctx, uuid.New(), stranger, orgID, "x-"+uuid.NewString()+"@example.test", pepper, mustSecret(t), auth.OrgRoleMember, now, now.Add(24*time.Hour)); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("stranger invite: %v", err)
+	}
+	// Tokens are single-use across invites; members are not re-invited.
+	if _, err := repo.InviteMember(ctx, uuid.New(), owner, orgID, "fresh-"+uuid.NewString()+"@example.test", pepper, inviteToken, auth.OrgRoleMember, now, now.Add(24*time.Hour)); !errors.Is(err, ErrTokenReuse) {
+		t.Fatalf("token reuse: %v", err)
+	}
+	if _, err := repo.InviteMember(ctx, uuid.New(), owner, orgID, "ttl-"+uuid.NewString()+"@example.test", pepper, mustSecret(t), auth.OrgRoleMember, now, now.Add(30*time.Minute)); err == nil {
+		t.Fatal("under-min invite TTL accepted")
+	}
+	// Acceptance seats the matching principal and binds an unbound tenant.
+	invitee := activeTestPrincipal(t, ctx, repo, pepper, inviteeEmail, nil)
+	if outcome, acceptedOrg, err := repo.AcceptInvite(ctx, inviteToken, invitee); err != nil || outcome != "accepted" || acceptedOrg != orgID {
+		t.Fatalf("accept: %v (outcome %q org %v)", err, outcome, acceptedOrg)
+	}
+	if bound := boundTenant(t, adminDB, ctx, invitee); bound == nil || *bound != orgID {
+		t.Fatalf("invitee tenant not bound: %v", bound)
+	}
+	if outcome, _, err := repo.AcceptInvite(ctx, inviteToken, invitee); err != nil || outcome != "duplicate" {
+		t.Fatalf("repeat accept: %v (outcome %q)", err, outcome)
+	}
+	// A different principal cannot consume the invite.
+	otherEmail := "invitee-other-" + uuid.NewString() + "@example.test"
+	otherToken := mustSecret(t)
+	if outcome, err := repo.InviteMember(ctx, uuid.New(), owner, orgID, otherEmail, pepper, otherToken, auth.OrgRoleAdmin, now, now.Add(24*time.Hour)); err != nil || outcome != "invited" {
+		t.Fatalf("second invite: %v (outcome %q)", err, outcome)
+	}
+	other := activeTestPrincipal(t, ctx, repo, pepper, "wrong-principal-"+uuid.NewString()+"@example.test", nil)
+	if outcome, _, err := repo.AcceptInvite(ctx, otherToken, other); err != nil || outcome != "email_mismatch" {
+		t.Fatalf("mismatch accept: %v (outcome %q)", err, outcome)
+	}
+	// Members are not re-invited.
+	if _, err := repo.InviteMember(ctx, uuid.New(), owner, orgID, inviteeEmail, pepper, mustSecret(t), auth.OrgRoleMember, now, now.Add(24*time.Hour)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("member re-invite: %v", err)
+	}
+	// Expired invites consume as expired.
+	expiryEmail := "expiry-" + uuid.NewString() + "@example.test"
+	expiryToken := mustSecret(t)
+	if outcome, err := repo.InviteMember(ctx, uuid.New(), owner, orgID, expiryEmail, pepper, expiryToken, auth.OrgRoleMember, now, now.Add(24*time.Hour)); err != nil || outcome != "invited" {
+		t.Fatalf("expiry invite: %v (outcome %q)", err, outcome)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_invites DISABLE TRIGGER identity_invites_guard`); err != nil {
+		t.Fatalf("disable invite guard: %v", err)
+	}
+	expiryDigest, err := auth.TokenDigest(expiryToken, auth.PurposeOrganizationInvite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `UPDATE keel_meta.identity_invites SET requested_at=clock_timestamp()-INTERVAL '2 hours',expires_at=clock_timestamp()-INTERVAL '1 minute' WHERE token_digest=$1`, expiryDigest[:]); err != nil {
+		t.Fatalf("backdate invite: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `ALTER TABLE keel_meta.identity_invites ENABLE TRIGGER identity_invites_guard`); err != nil {
+		t.Fatalf("enable invite guard: %v", err)
+	}
+	expiryPrincipal := activeTestPrincipal(t, ctx, repo, pepper, expiryEmail, nil)
+	if outcome, _, err := repo.AcceptInvite(ctx, expiryToken, expiryPrincipal); err != nil || outcome != "expired" {
+		t.Fatalf("expired accept: %v (outcome %q)", err, outcome)
+	}
+	// Immediate transfer swaps owner and admin atomically.
+	if outcome, err := repo.TransferOwnership(ctx, owner, orgID, invitee); err != nil || outcome != "transferred" {
+		t.Fatalf("transfer: %v (outcome %q)", err, outcome)
+	}
+	ownerOrgs, err := repo.OrganizationsFor(ctx, owner)
+	if err != nil || len(ownerOrgs) != 1 || ownerOrgs[0].Role != auth.OrgRoleAdmin {
+		t.Fatalf("old owner orgs: %v err=%v", ownerOrgs, err)
+	}
+	inviteeOrgs, err := repo.OrganizationsFor(ctx, invitee)
+	if err != nil || len(inviteeOrgs) != 1 || inviteeOrgs[0].Role != auth.OrgRoleOwner {
+		t.Fatalf("new owner orgs: %v err=%v", inviteeOrgs, err)
+	}
+	// Demoted owners cannot transfer; outsiders are not members.
+	if _, err := repo.TransferOwnership(ctx, owner, orgID, invitee); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("demoted transfer: %v", err)
+	}
+	if _, err := repo.TransferOwnership(ctx, invitee, orgID, stranger); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("outsider transfer: %v", err)
+	}
+	// Self-transfer is a no-op success.
+	if outcome, err := repo.TransferOwnership(ctx, invitee, orgID, invitee); err != nil || outcome != "transferred" {
+		t.Fatalf("self transfer: %v (outcome %q)", err, outcome)
+	}
+	// Structural lockdown for the invites table.
+	var forced bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT relforcerowsecurity FROM pg_class WHERE oid='keel_meta.identity_invites'::regclass`).Scan(&forced); err != nil || !forced {
+		t.Fatalf("invites is not FORCE RLS: %v", err)
+	}
+	appDB := openRoleDB(t, "postgres://keel_local_app:keel-app-local-only@127.0.0.1:5432/postgres?sslmode=disable")
+	if _, err := appDB.QueryContext(ctx, `SELECT keel_meta.invite_organization_member(gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),'00'::bytea,'00'::bytea,'member',now())`); err == nil {
+		t.Fatal("app capability executed invite function")
+	} else if !isPrivilegeDenial(err) {
+		t.Fatalf("unexpected app denial: %v", err)
+	}
+	if _, err := identityDB.QueryContext(ctx, `SELECT token_digest FROM keel_meta.identity_invites LIMIT 1`); err == nil {
+		t.Fatal("identity login read invites directly")
 	} else if !isPrivilegeDenial(err) {
 		t.Fatalf("unexpected identity denial: %v", err)
 	}
